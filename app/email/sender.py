@@ -38,6 +38,6 @@ class EmailSender:
                 timeout=20,
             ) as smtp:
                 smtp.login(self.settings.smtp_username, self.settings.smtp_password)
-                smtp.send_message(msg)
+                smtp.sendmail(self.settings.email_from, [self.settings.email_to], msg.as_string())
         except (smtplib.SMTPException, OSError, TimeoutError) as exc:
             raise EmailSendError("SMTP send failed") from exc

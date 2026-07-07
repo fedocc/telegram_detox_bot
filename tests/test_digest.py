@@ -22,7 +22,7 @@ class FakeLLM:
         direct = []
         noise = []
         for chat in payload["chats"]:
-            ids = [m["message_id"] for m in chat["messages"]]
+            refs = [m["source_ref"] for m in chat["messages"]]
             if chat["chat_type"] == "private":
                 direct.append(
                     {
@@ -32,12 +32,12 @@ class FakeLLM:
                         "action": "Ответить.",
                         "deadline": None,
                         "priority": "P1",
-                        "message_ids": ids,
+                        "source_refs": refs,
                         "needs_manual_review": False,
                     }
                 )
             else:
-                noise.append({"chat": chat["chat_title"], "count": len(ids)})
+                noise.append({"chat": chat["chat_title"], "count": len(refs)})
         return DailyDigest(date=payload["date"], direct_messages=direct, noise_counts=noise)
 
 
@@ -59,7 +59,6 @@ class MaskingLLM:
                     "chat": "Other",
                     "summary": "Wrong chat same message id.",
                     "needs_reply": False,
-                    "message_ids": [1],
                     "source_refs": [{"chat_id": "group-1", "message_id": 1}],
                 }
             ],
@@ -81,6 +80,15 @@ class FakeEmail:
         if self.fail:
             raise EmailSendError("smtp down")
         self.sent.append((subject, text, html))
+
+
+class CountingLLM(FakeLLM):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def daily_digest(self, payload: dict) -> DailyDigest:
+        self.calls += 1
+        return super().daily_digest(payload)
 
 
 def test_personal_message_always_appears_in_digest(session) -> None:
@@ -155,7 +163,6 @@ def test_digest_cannot_drop_private_message_when_llm_omits_it(session) -> None:
 
     assert digest.review
     item = digest.review[0]
-    assert item.message_ids == [101]
     assert item.source_refs == [{"chat_id": "1", "message_id": 101}]
     assert item.reason == "LLM did not classify this incoming private message"
     assert item.sender == "Sender"
@@ -168,7 +175,7 @@ def test_private_message_never_becomes_p3(session) -> None:
     digest = generate_digest(session, OmittingLLM(), date(2026, 7, 7), "Europe/Moscow")
 
     assert all(count.chat != "Маша" for count in digest.noise_counts)
-    assert any(102 in item.message_ids for item in digest.review)
+    assert any(item.source_refs == [{"chat_id": "1", "message_id": 102}] for item in digest.review)
 
 
 def test_private_message_not_masked_by_group_same_message_id(session, now) -> None:
@@ -213,7 +220,6 @@ def test_private_message_not_masked_by_other_private_chat_same_message_id(sessio
                         "chat": "Маша",
                         "summary": "One only.",
                         "needs_reply": False,
-                        "message_ids": [1],
                         "source_refs": [{"chat_id": "p1", "message_id": 1}],
                     }
                 ],
@@ -230,8 +236,8 @@ def test_digest_llm_failure_keeps_all_private_messages(session) -> None:
 
     digest = generate_digest(session, FailingLLM(), date(2026, 7, 7), "Europe/Moscow")
 
-    ids = {mid for item in digest.review for mid in item.message_ids}
-    assert {201, 202}.issubset(ids)
+    refs = {(ref.chat_id, ref.message_id) for item in digest.review for ref in item.source_refs}
+    assert {("1", 201), ("1", 202)}.issubset(refs)
     assert digest.generated_by == "fallback"
 
 
@@ -312,16 +318,147 @@ def test_pending_digest_retried_and_marked_sent(session) -> None:
         max_email_attempts=1,
     )
     email = FakeEmail()
+    record = repository.pending_digests(session)[0]
 
     sent = repository.retry_pending_digests(
         session,
         email,
-        now=day_bounds(date(2026, 7, 7), "Europe/Moscow")[0],
+        now=record.next_attempt_at,
     )
 
     assert sent == 1
     assert repository.pending_digests(session) == []
     assert email.sent
+
+
+def test_first_failed_digest_waits_one_minute_before_retry(session, now) -> None:
+    repository.save_message(session, msg(message_id=306, text="ping", timestamp=now))
+    send_daily_digest_pipeline(
+        session,
+        FakeLLM(),
+        FakeEmail(fail=True),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+        max_email_attempts=1,
+    )
+    record = repository.pending_digests(session)[0]
+
+    assert record.attempts == 1
+    assert record.next_attempt_at > record.created_at
+
+
+def test_pending_digest_retry_reuses_original_html(session) -> None:
+    repository.save_message(session, msg(message_id=307, text="ping"))
+    send_daily_digest_pipeline(
+        session,
+        FakeLLM(),
+        FakeEmail(fail=True),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+        max_email_attempts=1,
+    )
+    record = repository.pending_digests(session)[0]
+    record.html_payload = "<p>ORIGINAL HTML</p>"
+    session.commit()
+    email = FakeEmail()
+
+    repository.retry_pending_digests(session, email, now=record.next_attempt_at)
+
+    assert email.sent[0][2] == "<p>ORIGINAL HTML</p>"
+
+
+def test_pending_digest_retry_reuses_original_text(session) -> None:
+    repository.save_message(session, msg(message_id=308, text="ping"))
+    send_daily_digest_pipeline(
+        session,
+        FakeLLM(),
+        FakeEmail(fail=True),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+        max_email_attempts=1,
+    )
+    record = repository.pending_digests(session)[0]
+    record.text_payload = "ORIGINAL TEXT"
+    session.commit()
+    email = FakeEmail()
+
+    repository.retry_pending_digests(session, email, now=record.next_attempt_at)
+
+    assert email.sent[0][1] == "ORIGINAL TEXT"
+
+
+def test_pending_digest_retry_does_not_call_llm_again(session) -> None:
+    repository.save_message(session, msg(message_id=309, text="ping"))
+    llm = CountingLLM()
+    send_daily_digest_pipeline(
+        session,
+        llm,
+        FakeEmail(fail=True),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+        max_email_attempts=1,
+    )
+    record = repository.pending_digests(session)[0]
+
+    repository.retry_pending_digests(session, FakeEmail(), now=record.next_attempt_at)
+
+    assert llm.calls == 1
+
+
+def test_two_workers_cannot_claim_same_digest_job(session) -> None:
+    repository.save_message(session, msg(message_id=310, text="ping"))
+    send_daily_digest_pipeline(
+        session,
+        FakeLLM(),
+        FakeEmail(fail=True),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+        max_email_attempts=1,
+    )
+    record = repository.pending_digests(session)[0]
+
+    first = repository.claim_pending_digest(session, record.id, record.next_attempt_at, "token-1")
+    second = repository.claim_pending_digest(session, record.id, record.next_attempt_at, "token-2")
+
+    assert first is not None
+    assert second is None
+
+
+def test_stale_sending_digest_becomes_retryable(session, now) -> None:
+    repository.save_message(session, msg(message_id=311, text="ping", timestamp=now))
+    send_daily_digest_pipeline(
+        session,
+        FakeLLM(),
+        FakeEmail(fail=True),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+        max_email_attempts=1,
+    )
+    record = repository.pending_digests(session)[0]
+    repository.claim_pending_digest(session, record.id, record.next_attempt_at, "token-1")
+
+    repository.release_stale_digest_claims(session, record.next_attempt_at, stale_minutes=0)
+
+    assert repository.pending_digests(session)
+
+
+def test_digest_real_openai_error_uses_fallback_digest(session, settings) -> None:
+    from app.llm.client import HaikuClient
+    from tests.test_llm_errors import BrokenClient
+
+    repository.save_message(session, msg(message_id=312, text="ping"))
+    client = HaikuClient(settings)
+    client.client = BrokenClient()
+
+    digest = send_daily_digest_pipeline(
+        session,
+        client,
+        FakeEmail(),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+    )
+
+    assert digest.generated_by == "fallback"
 
 
 def test_digest_now_uses_persistent_delivery_pipeline() -> None:
@@ -331,13 +468,26 @@ def test_digest_now_uses_persistent_delivery_pipeline() -> None:
     assert "send_and_store_digest" not in source
 
 
+def test_digest_schema_uses_only_message_refs_for_sources() -> None:
+    import app.models.schemas as schemas
+
+    for model in [
+        schemas.DigestP0Alert,
+        schemas.DigestDirectMessage,
+        schemas.DigestGroupUpdate,
+        schemas.DigestReviewItem,
+    ]:
+        assert "message_ids" not in model.model_fields
+        assert "source_refs" in model.model_fields
+
+
 def test_fallback_digest_includes_private_messages(now) -> None:
     digest = fallback_digest(
         date(2026, 7, 7),
         [msg(message_id=401, text="secret personal", timestamp=now)],
     )
 
-    assert digest.review[0].message_ids == [401]
+    assert digest.review[0].source_refs == [{"chat_id": "1", "message_id": 401}]
     assert digest.review[0].raw_text == "secret personal"
 
 
@@ -373,7 +523,7 @@ def test_fallback_digest_includes_p0_review_candidates(session, now) -> None:
     digest = fallback_digest(date(2026, 7, 7), rows)
 
     assert digest.review[0].reason == "P0 review candidate"
-    assert digest.review[0].message_ids == [501]
+    assert digest.review[0].source_refs == [{"chat_id": "g1", "message_id": 501}]
 
 
 def test_fallback_digest_includes_review_and_media(session, now) -> None:

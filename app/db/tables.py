@@ -37,6 +37,8 @@ class DigestRecord(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     digest_date: Mapped[str] = mapped_column(String(16), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    subject: Mapped[str] = mapped_column(String(512), default="")
+    text_payload: Mapped[str] = mapped_column(Text, default="")
     json_payload: Mapped[str] = mapped_column(Text)
     html_payload: Mapped[str] = mapped_column(Text)
     generated_by: Mapped[str] = mapped_column(String(32), default="llm")
@@ -45,6 +47,8 @@ class DigestRecord(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error_safe: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class AlertJob(Base):
@@ -66,3 +70,5 @@ class AlertJob(Base):
     last_error_safe: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True)

@@ -50,6 +50,13 @@ def scan_telegram_safety_source(source: str, path: str = "snippet.py") -> list[t
     return offenders
 
 
+def scan_telegram_safety_tree(root: Path) -> list[tuple[str, str]]:
+    offenders: list[tuple[str, str]] = []
+    for path in (root / "app").rglob("*.py"):
+        offenders.extend(scan_telegram_safety_source(path.read_text(encoding="utf-8"), str(path)))
+    return offenders
+
+
 class FakeClient:
     def __init__(self, authorized: bool) -> None:
         self.authorized = authorized
@@ -118,24 +125,12 @@ def test_only_telegram_login_cli_can_call_start() -> None:
 
 def test_no_telegram_write_methods_used_in_runtime_code() -> None:
     root = Path(__file__).resolve().parents[1]
-    offenders: list[tuple[str, str]] = []
-    for path in (root / "app" / "telegram").rglob("*.py"):
-        if path.name == "client.py":
-            source = path.read_text(encoding="utf-8")
-        else:
-            source = path.read_text(encoding="utf-8")
-        offenders.extend(scan_telegram_safety_source(source, path.relative_to(root).as_posix()))
-
-    assert offenders == []
+    assert scan_telegram_safety_tree(root) == []
 
 
 def test_no_dynamic_telegram_dispatch_in_runtime_code() -> None:
     root = Path(__file__).resolve().parents[1]
-    offenders = []
-    for path in (root / "app" / "telegram").rglob("*.py"):
-        offenders.extend(scan_telegram_safety_source(path.read_text(encoding="utf-8"), str(path)))
-
-    assert offenders == []
+    assert scan_telegram_safety_tree(root) == []
 
 
 def test_safety_scan_detects_getattr_write_attempt() -> None:
@@ -148,3 +143,46 @@ def test_safety_scan_detects_direct_write_attempt() -> None:
     offenders = scan_telegram_safety_source("client.send_message('x')")
 
     assert offenders
+
+
+def test_scanner_covers_full_app_tree(tmp_path) -> None:
+    evil = tmp_path / "app" / "services" / "evil.py"
+    evil.parent.mkdir(parents=True)
+    evil.write_text("client.send_message('x')", encoding="utf-8")
+
+    assert scan_telegram_safety_tree(tmp_path)
+
+
+def test_scanner_detects_direct_write_outside_telegram_folder(tmp_path) -> None:
+    evil = tmp_path / "app" / "services" / "evil.py"
+    evil.parent.mkdir(parents=True)
+    evil.write_text("client.delete_messages(1)", encoding="utf-8")
+
+    assert scan_telegram_safety_tree(tmp_path)
+
+
+def test_scanner_detects_getattr_write_outside_telegram_folder(tmp_path) -> None:
+    evil = tmp_path / "app" / "services" / "evil.py"
+    evil.parent.mkdir(parents=True)
+    evil.write_text('getattr(client, "send_message")("x")', encoding="utf-8")
+
+    assert scan_telegram_safety_tree(tmp_path)
+
+
+def test_scanner_detects_dunder_dynamic_dispatch_outside_telegram_folder(tmp_path) -> None:
+    evil = tmp_path / "app" / "services" / "evil.py"
+    evil.parent.mkdir(parents=True)
+    evil.write_text('client.__getattribute__("delete_messages")(1)', encoding="utf-8")
+
+    assert scan_telegram_safety_tree(tmp_path)
+
+
+def test_scanner_detects_string_based_banned_method_lookup(tmp_path) -> None:
+    evil = tmp_path / "app" / "services" / "evil.py"
+    evil.parent.mkdir(parents=True)
+    evil.write_text(
+        'method_name = "forward_messages"\ngetattr(client, method_name)',
+        encoding="utf-8",
+    )
+
+    assert scan_telegram_safety_tree(tmp_path)

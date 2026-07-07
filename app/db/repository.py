@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
+from uuid import uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
@@ -12,13 +13,17 @@ from app.models.schemas import DailyDigest, StoredMessage
 
 
 def _backoff_minutes(attempts: int) -> int:
-    return [1, 5, 15, 60][min(attempts, 3)]
+    return [1, 5, 15, 60][min(max(attempts - 1, 0), 3)]
 
 
 def safe_error(exc: Exception | str | None) -> str | None:
     if exc is None:
         return None
     return exc if isinstance(exc, str) else exc.__class__.__name__
+
+
+def _db_time(value: datetime) -> datetime:
+    return value.replace(tzinfo=None) if value.tzinfo else value
 
 
 def save_message(session: Session, message: StoredMessage) -> None:
@@ -84,10 +89,20 @@ def messages_between(session: Session, start: datetime, end: datetime) -> list[M
     )
 
 
-def save_digest(session: Session, digest: DailyDigest, html: str) -> DigestRecord:
+def save_digest(
+    session: Session,
+    digest: DailyDigest,
+    html: str,
+    *,
+    subject: str = "",
+    text: str = "",
+) -> DigestRecord:
+    now = _db_time(datetime.now().astimezone())
     record = DigestRecord(
         digest_date=digest.date,
-        created_at=datetime.now().astimezone(),
+        created_at=now,
+        subject=subject,
+        text_payload=text,
         json_payload=digest.model_dump_json(),
         html_payload=html,
         generated_by=digest.generated_by,
@@ -103,6 +118,8 @@ def mark_digest_sent(session: Session, record: DigestRecord) -> None:
     record.email_status = "sent"
     record.last_error_safe = None
     record.next_attempt_at = None
+    record.claimed_at = None
+    record.claim_token = None
     session.commit()
 
 
@@ -112,10 +129,13 @@ def mark_digest_pending(
     error: Exception | str,
     now: datetime,
 ) -> None:
+    now = _db_time(now)
     record.email_status = "pending"
     record.attempts += 1
     record.last_error_safe = safe_error(error)
-    record.next_attempt_at = now + timedelta(minutes=_backoff_minutes(record.attempts - 1))
+    record.next_attempt_at = now + timedelta(minutes=_backoff_minutes(record.attempts))
+    record.claimed_at = None
+    record.claim_token = None
     session.commit()
 
 
@@ -130,36 +150,86 @@ def pending_digests(session: Session) -> list[DigestRecord]:
 
 
 def retry_pending_digests(session: Session, email_sender, now: datetime) -> int:
-    records = list(
+    now = _db_time(now)
+    release_stale_digest_claims(session, now)
+    candidates = list(
         session.scalars(
-            select(DigestRecord)
+            select(DigestRecord.id)
             .where(DigestRecord.email_status == "pending")
-            .where(
-                (DigestRecord.next_attempt_at.is_(None))
-                | (DigestRecord.next_attempt_at <= now)
-                | (DigestRecord.attempts == 1)
-            )
+            .where(DigestRecord.next_attempt_at <= now)
             .order_by(DigestRecord.created_at)
         )
     )
     sent = 0
-    for record in records:
-        record.email_status = "sending"
-        session.commit()
-        try:
-            email_sender.send(
-                f"[FALLBACK] Telegram digest — {record.digest_date}"
-                if record.generated_by == "fallback"
-                else f"Telegram digest — {record.digest_date}",
-                DailyDigest.model_validate_json(record.json_payload).model_dump_json(),
-                record.html_payload,
-            )
-        except Exception as exc:
-            mark_digest_pending(session, record, exc, now)
-        else:
-            mark_digest_sent(session, record)
-            sent += 1
+    for record_id in candidates:
+        token = uuid4().hex
+        record = claim_pending_digest(session, record_id, now, token)
+        if record:
+            sent += int(send_claimed_digest(session, record.id, token, email_sender, now))
     return sent
+
+
+def claim_pending_digest(
+    session: Session,
+    record_id: int,
+    now: datetime,
+    claim_token: str,
+) -> DigestRecord | None:
+    now = _db_time(now)
+    result = session.execute(
+        update(DigestRecord)
+        .where(DigestRecord.id == record_id)
+        .where(DigestRecord.email_status == "pending")
+        .where(DigestRecord.next_attempt_at <= now)
+        .values(email_status="sending", claimed_at=now, claim_token=claim_token)
+    )
+    session.commit()
+    if result.rowcount != 1:
+        return None
+    return session.scalar(
+        select(DigestRecord).where(
+            DigestRecord.id == record_id,
+            DigestRecord.claim_token == claim_token,
+            DigestRecord.email_status == "sending",
+        )
+    )
+
+
+def send_claimed_digest(
+    session: Session,
+    record_id: int,
+    claim_token: str,
+    email_sender,
+    now: datetime,
+) -> bool:
+    record = session.scalar(
+        select(DigestRecord).where(
+            DigestRecord.id == record_id,
+            DigestRecord.claim_token == claim_token,
+            DigestRecord.email_status == "sending",
+        )
+    )
+    if not record:
+        return False
+    try:
+        email_sender.send(record.subject, record.text_payload, record.html_payload)
+    except Exception as exc:
+        mark_digest_pending(session, record, exc, now)
+        return False
+    mark_digest_sent(session, record)
+    return True
+
+
+def release_stale_digest_claims(session: Session, now: datetime, stale_minutes: int = 10) -> int:
+    cutoff = _db_time(now) - timedelta(minutes=stale_minutes)
+    result = session.execute(
+        update(DigestRecord)
+        .where(DigestRecord.email_status == "sending")
+        .where(DigestRecord.claimed_at <= cutoff)
+        .values(email_status="pending", claimed_at=None, claim_token=None)
+    )
+    session.commit()
+    return int(result.rowcount or 0)
 
 
 def create_alert_job(
@@ -182,6 +252,7 @@ def create_alert_job(
     )
     if existing:
         return existing
+    now = _db_time(now)
     job = AlertJob(
         chat_id=chat_id,
         message_id=message_id,
@@ -191,6 +262,7 @@ def create_alert_job(
         html_body=html_body,
         status="pending",
         attempts=0,
+        next_attempt_at=now,
         created_at=now,
     )
     session.add(job)
@@ -208,11 +280,84 @@ def pending_alert_jobs(session: Session) -> list[AlertJob]:
     )
 
 
+def claim_pending_alert(
+    session: Session,
+    job_id: int,
+    now: datetime,
+    claim_token: str,
+) -> AlertJob | None:
+    now = _db_time(now)
+    result = session.execute(
+        update(AlertJob)
+        .where(AlertJob.id == job_id)
+        .where(AlertJob.status == "pending")
+        .where(AlertJob.next_attempt_at <= now)
+        .values(status="sending", claimed_at=now, claim_token=claim_token)
+    )
+    session.commit()
+    if result.rowcount != 1:
+        return None
+    return session.scalar(
+        select(AlertJob).where(
+            AlertJob.id == job_id,
+            AlertJob.claim_token == claim_token,
+            AlertJob.status == "sending",
+        )
+    )
+
+
+def _mark_alert_pending(
+    session: Session,
+    job: AlertJob,
+    error: Exception | str,
+    now: datetime,
+) -> None:
+    now = _db_time(now)
+    job.status = "pending"
+    job.attempts += 1
+    job.last_error_safe = safe_error(error)
+    job.next_attempt_at = now + timedelta(minutes=_backoff_minutes(job.attempts))
+    job.claimed_at = None
+    job.claim_token = None
+    session.commit()
+
+
+def _mark_alert_sent(session: Session, job: AlertJob, now: datetime) -> None:
+    job.status = "sent"
+    job.sent_at = _db_time(now)
+    job.last_error_safe = None
+    job.next_attempt_at = None
+    job.claimed_at = None
+    job.claim_token = None
+    session.commit()
+
+
 def send_alert_job(session: Session, job: AlertJob, email_sender, now: datetime) -> bool:
     if job.status == "sent":
         return False
-    job.status = "sending"
-    session.commit()
+    token = uuid4().hex
+    claimed = claim_pending_alert(session, job.id, job.next_attempt_at or now, token)
+    if not claimed:
+        return False
+    return send_claimed_alert(session, claimed.id, token, email_sender, now)
+
+
+def send_claimed_alert(
+    session: Session,
+    job_id: int,
+    claim_token: str,
+    email_sender,
+    now: datetime,
+) -> bool:
+    job = session.scalar(
+        select(AlertJob).where(
+            AlertJob.id == job_id,
+            AlertJob.claim_token == claim_token,
+            AlertJob.status == "sending",
+        )
+    )
+    if not job:
+        return False
     try:
         email_sender.send(
             job.subject,
@@ -224,44 +369,45 @@ def send_alert_job(session: Session, job: AlertJob, email_sender, now: datetime)
         try:
             email_sender.send(job.subject, job.text_body, job.html_body)
         except Exception as exc:
-            job.status = "pending"
-            job.attempts += 1
-            job.last_error_safe = safe_error(exc)
-            job.next_attempt_at = now + timedelta(minutes=_backoff_minutes(job.attempts - 1))
-            session.commit()
+            _mark_alert_pending(session, job, exc, now)
             return False
     except Exception as exc:
-        job.status = "pending"
-        job.attempts += 1
-        job.last_error_safe = safe_error(exc)
-        job.next_attempt_at = now + timedelta(minutes=_backoff_minutes(job.attempts - 1))
-        session.commit()
+        _mark_alert_pending(session, job, exc, now)
         return False
-    job.status = "sent"
-    job.sent_at = now
-    job.last_error_safe = None
-    job.next_attempt_at = None
-    session.commit()
+    _mark_alert_sent(session, job, now)
     return True
 
 
 def retry_pending_alerts(session: Session, email_sender, now: datetime) -> int:
-    jobs = list(
+    now = _db_time(now)
+    release_stale_alert_claims(session, now)
+    job_ids = list(
         session.scalars(
-            select(AlertJob)
+            select(AlertJob.id)
             .where(AlertJob.status == "pending")
-            .where(
-                (AlertJob.next_attempt_at.is_(None))
-                | (AlertJob.next_attempt_at <= now)
-                | (AlertJob.attempts == 1)
-            )
+            .where(AlertJob.next_attempt_at <= now)
             .order_by(AlertJob.created_at, AlertJob.id)
         )
     )
     sent = 0
-    for job in jobs:
-        sent += int(send_alert_job(session, job, email_sender, now))
+    for job_id in job_ids:
+        token = uuid4().hex
+        job = claim_pending_alert(session, job_id, now, token)
+        if job:
+            sent += int(send_claimed_alert(session, job.id, token, email_sender, now))
     return sent
+
+
+def release_stale_alert_claims(session: Session, now: datetime, stale_minutes: int = 10) -> int:
+    cutoff = _db_time(now) - timedelta(minutes=stale_minutes)
+    result = session.execute(
+        update(AlertJob)
+        .where(AlertJob.status == "sending")
+        .where(AlertJob.claimed_at <= cutoff)
+        .values(status="pending", claimed_at=None, claim_token=None)
+    )
+    session.commit()
+    return int(result.rowcount or 0)
 
 
 def cleanup_old(

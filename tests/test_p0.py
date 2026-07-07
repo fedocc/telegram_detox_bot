@@ -142,7 +142,8 @@ def test_pending_p0_alert_is_retried_and_marked_sent(session, now) -> None:
     repository.save_message(session, message)
     handle_p0_candidate(session, message, FakeLLM(fail=True), FakeEmail(fail=True))
 
-    sent = repository.retry_pending_alerts(session, FakeEmail(), now=now)
+    job = repository.pending_alert_jobs(session)[0]
+    sent = repository.retry_pending_alerts(session, FakeEmail(), now=job.next_attempt_at)
 
     assert sent == 1
     assert repository.pending_alert_jobs(session) == []
@@ -175,6 +176,112 @@ def test_p0_retry_does_not_email_storm(session, now) -> None:
 
     assert repository.retry_pending_alerts(session, email, now=now) == 0
     assert len(email.sent) == 0
+
+
+def test_first_failed_alert_waits_one_minute_before_retry(session, now) -> None:
+    message = msg(text="Позвони через час", timestamp=now)
+    repository.save_message(session, message)
+
+    handle_p0_candidate(session, message, FakeLLM(fail=True), FakeEmail(fail=True))
+    job = repository.pending_alert_jobs(session)[0]
+
+    assert job.attempts == 1
+    assert job.next_attempt_at > now.replace(tzinfo=None)
+    assert repository.retry_pending_alerts(session, FakeEmail(), now=now) == 0
+
+
+def test_retry_respects_next_attempt_at(session, now) -> None:
+    message = msg(text="Позвони через час", timestamp=now)
+    repository.save_message(session, message)
+    handle_p0_candidate(session, message, FakeLLM(fail=True), FakeEmail(fail=True))
+    email = FakeEmail()
+
+    assert repository.retry_pending_alerts(session, email, now=now) == 0
+    assert email.sent == []
+
+
+def test_backoff_caps_at_sixty_minutes(session, now) -> None:
+    from datetime import timedelta
+
+    message = msg(text="Позвони через час", timestamp=now)
+    repository.save_message(session, message)
+    handle_p0_candidate(session, message, FakeLLM(fail=True), FakeEmail(fail=True))
+    job = repository.pending_alert_jobs(session)[0]
+    for _ in range(5):
+        repository.retry_pending_alerts(session, FakeEmail(fail=True), now=job.next_attempt_at)
+        job = repository.pending_alert_jobs(session)[0]
+
+    assert job.next_attempt_at <= now.replace(tzinfo=None) + timedelta(
+        minutes=1 + 5 + 15 + 60 + 60 + 60
+    )
+
+
+def test_two_workers_cannot_claim_same_alert_job(session, now) -> None:
+    message = msg(text="Позвони через час", timestamp=now)
+    repository.save_message(session, message)
+    handle_p0_candidate(session, message, FakeLLM(fail=True), FakeEmail(fail=True))
+    job = repository.pending_alert_jobs(session)[0]
+
+    first = repository.claim_pending_alert(session, job.id, job.next_attempt_at, "token-1")
+    second = repository.claim_pending_alert(session, job.id, job.next_attempt_at, "token-2")
+
+    assert first is not None
+    assert second is None
+
+
+def test_stale_sending_alert_becomes_retryable(session, now) -> None:
+    message = msg(text="Позвони через час", timestamp=now)
+    repository.save_message(session, message)
+    handle_p0_candidate(session, message, FakeLLM(fail=True), FakeEmail(fail=True))
+    job = repository.pending_alert_jobs(session)[0]
+    repository.claim_pending_alert(session, job.id, job.next_attempt_at, "token-1")
+
+    repository.release_stale_alert_claims(session, job.next_attempt_at, stale_minutes=0)
+
+    assert repository.pending_alert_jobs(session)
+
+
+def test_claimed_job_is_not_sent_by_second_worker(session, now) -> None:
+    message = msg(text="Позвони через час", timestamp=now)
+    repository.save_message(session, message)
+    handle_p0_candidate(session, message, FakeLLM(fail=True), FakeEmail(fail=True))
+    job = repository.pending_alert_jobs(session)[0]
+    repository.claim_pending_alert(session, job.id, job.next_attempt_at, "token-1")
+    email = FakeEmail()
+
+    assert (
+        repository.send_claimed_alert(session, job.id, "token-2", email, job.next_attempt_at)
+        is False
+    )
+    assert email.sent == []
+
+
+def test_p0_malformed_provider_response_sends_fallback_email(session, settings) -> None:
+    from app.llm.client import HaikuClient
+    from tests.test_llm_errors import FakeClient, MalformedCompletions
+
+    message = msg(text="можешь посмотреть?")
+    repository.save_message(session, message)
+    client = HaikuClient(settings)
+    client.client = FakeClient(MalformedCompletions(type("Response", (), {"choices": []})()))
+    email = FakeEmail()
+
+    assert handle_p0_candidate(session, message, client, email) is True
+    assert email.sent[0][0] == "[ПРОВЕРЬ] новое личное сообщение"
+
+
+def test_p0_real_openai_error_uses_fallback_email(session, settings) -> None:
+    from app.llm.client import HaikuClient
+    from tests.test_llm_errors import BrokenClient
+
+    message = msg(text="можешь посмотреть?")
+    repository.save_message(session, message)
+    client = HaikuClient(settings)
+    client.client = BrokenClient()
+    email = FakeEmail()
+
+    assert handle_p0_candidate(session, message, client, email) is True
+    assert email.sent
 
 
 def test_p0_fallback_text_is_capped_and_escaped(session) -> None:

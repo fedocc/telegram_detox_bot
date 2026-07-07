@@ -112,7 +112,6 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
                     chat=row.chat_title,
                     reason=f"Необработанное медиа: {row.media_type}",
                     summary="Содержимое не анализировалось.",
-                    message_ids=[row.message_id],
                     source_refs=[MessageRef(chat_id=row.chat_id, message_id=row.message_id)],
                 )
             )
@@ -122,7 +121,6 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
                     chat=row.chat_title,
                     reason="P0 review candidate",
                     summary=safe_truncate(row.text or row.caption or "Needs manual review."),
-                    message_ids=[row.message_id],
                     source_refs=[MessageRef(chat_id=row.chat_id, message_id=row.message_id)],
                     sender=row.sender_name,
                     timestamp=row.timestamp,
@@ -138,7 +136,6 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
                     summary=f"{len(incoming)} входящих личных сообщений.",
                     needs_reply=True,
                     action="Проверить чат.",
-                    message_ids=[r.message_id for r in incoming],
                     source_refs=[
                         MessageRef(chat_id=r.chat_id, message_id=r.message_id)
                         for r in incoming
@@ -154,7 +151,6 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
                         summary=safe_truncate(
                             row.text or row.caption or "Личное сообщение без текста."
                         ),
-                        message_ids=[row.message_id],
                         source_refs=[MessageRef(chat_id=row.chat_id, message_id=row.message_id)],
                         sender=row.sender_name,
                         timestamp=row.timestamp,
@@ -206,7 +202,6 @@ def _protect_private_messages(digest: DailyDigest, rows: list) -> DailyDigest:
                 chat=row.chat_title,
                 reason="LLM did not classify this incoming private message",
                 summary=safe_truncate(row.text or row.caption or "Личное сообщение без текста."),
-                message_ids=[row.message_id],
                 source_refs=[MessageRef(chat_id=row.chat_id, message_id=row.message_id)],
                 sender=row.sender_name,
                 timestamp=row.timestamp,
@@ -251,7 +246,6 @@ def generate_digest(session: Session, llm: HaikuClient, day: date, timezone: str
                     chat=row.chat_title,
                     reason=f"Необработанное медиа: {row.media_type}",
                     summary="Содержимое не анализировалось.",
-                    message_ids=[row.message_id],
                     source_refs=[MessageRef(chat_id=row.chat_id, message_id=row.message_id)],
                 )
             )
@@ -260,10 +254,12 @@ def generate_digest(session: Session, llm: HaikuClient, day: date, timezone: str
 
 def send_and_store_digest(session: Session, digest: DailyDigest, email_sender: EmailSender) -> None:
     html = render_html(digest)
+    text = render_plain_text(digest)
+    subject = digest_subject(digest)
     digest.email_status = "pending"
-    record = repository.save_digest(session, digest, html)
+    record = repository.save_digest(session, digest, html, subject=subject, text=text)
     try:
-        email_sender.send(digest_subject(digest), render_plain_text(digest), html)
+        email_sender.send(subject, text, html)
     except EmailSendError as exc:
         repository.mark_digest_pending(session, record, exc, datetime.now().astimezone())
     else:
@@ -289,12 +285,13 @@ def send_daily_digest_pipeline(
     digest = generate_digest(session, llm, day, timezone)
     html = render_html(digest)
     text = render_plain_text(digest)
+    subject = _subject_for(digest)
     digest.email_status = "pending"
-    record = repository.save_digest(session, digest, html)
+    record = repository.save_digest(session, digest, html, subject=subject, text=text)
     now = datetime.now().astimezone()
     for attempt in range(max_email_attempts):
         try:
-            email_sender.send(_subject_for(digest), text, html)
+            email_sender.send(subject, text, html)
             digest.email_status = "sent"
             repository.mark_digest_sent(session, record)
             return digest

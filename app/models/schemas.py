@@ -83,7 +83,6 @@ class DigestP0Alert(BaseModel):
     summary: str
     action: str | None = None
     deadline: datetime | None = None
-    message_ids: list[int]
     source_refs: list[MessageRef] = Field(default_factory=list)
     alert_sent: bool
 
@@ -95,7 +94,6 @@ class DigestDirectMessage(BaseModel):
     action: str | None = None
     deadline: datetime | None = None
     priority: Priority = Priority.p1
-    message_ids: list[int]
     source_refs: list[MessageRef] = Field(default_factory=list)
     needs_manual_review: bool = False
 
@@ -106,7 +104,6 @@ class DigestGroupUpdate(BaseModel):
     action: str | None = None
     priority: Priority = Priority.p2
     deadline: datetime | None = None
-    message_ids: list[int]
     source_refs: list[MessageRef] = Field(default_factory=list)
     needs_manual_review: bool = False
 
@@ -115,7 +112,6 @@ class DigestReviewItem(BaseModel):
     chat: str
     reason: str
     summary: str
-    message_ids: list[int]
     source_refs: list[MessageRef] = Field(default_factory=list)
     sender: str | None = None
     timestamp: datetime | None = None

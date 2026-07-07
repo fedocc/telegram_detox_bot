@@ -22,6 +22,18 @@ def _safe_llm_error(exc: Exception) -> LLMError:
     return LLMError(f"llm_error:{exc.__class__.__name__}")
 
 
+def _extract_content(response) -> str:
+    try:
+        choices = response.choices
+        choice = choices[0]
+        content = choice.message.content
+    except Exception as exc:
+        raise _safe_llm_error(exc) from exc
+    if not isinstance(content, str) or not content:
+        raise LLMError("llm_error:MalformedResponse")
+    return content
+
+
 class HaikuClient:
     def __init__(self, settings: Settings):
         if not settings.aitunnel_api_key:
@@ -77,10 +89,7 @@ class HaikuClient:
             if isinstance(exc, LLMError):
                 raise
             raise _safe_llm_error(exc) from exc
-        content = response.choices[0].message.content
-        if not content:
-            raise LLMError("empty LLM response")
-        return content
+        return _extract_content(response)
 
     def _validated_json(self, schema: type[T], system: str, user: str) -> T:
         raw = self._json_completion(system, user, schema)
