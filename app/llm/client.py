@@ -34,6 +34,25 @@ def _extract_content(response) -> str:
     return content
 
 
+def _extract_json_document(content: str) -> str:
+    text = content.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) < 3:
+            raise LLMError("llm_error:InvalidJsonEnvelope")
+        opening = lines[0].strip().lower()
+        closing = lines[-1].strip()
+        if opening not in {"```", "```json"} or closing != "```":
+            raise LLMError("llm_error:InvalidJsonEnvelope")
+        body = "\n".join(lines[1:-1]).strip()
+        if "```" in body:
+            raise LLMError("llm_error:InvalidJsonEnvelope")
+        text = body
+    if not text.startswith("{") or not text.endswith("}"):
+        raise LLMError("llm_error:InvalidJsonEnvelope")
+    return text
+
+
 class HaikuClient:
     def __init__(self, settings: Settings):
         if not settings.aitunnel_api_key:
@@ -93,8 +112,9 @@ class HaikuClient:
 
     def _validated_json(self, schema: type[T], system: str, user: str) -> T:
         raw = self._json_completion(system, user, schema)
+        json_text = _extract_json_document(raw)
         try:
-            return schema.model_validate_json(raw)
+            return schema.model_validate_json(json_text)
         except (ValidationError, ValueError, json.JSONDecodeError) as first_error:
             logger.warning(
                 "LLM JSON invalid; trying one repair retry: %s",
@@ -102,15 +122,16 @@ class HaikuClient:
             )
             repair_user = (
                 "Repair the following response into valid JSON matching the requested schema. "
-                "Return JSON only, no markdown.\n\n"
+                "Return only valid JSON. No markdown. No code fences. No explanation.\n\n"
                 f"{raw}"
             )
             try:
                 repaired = self._json_completion(system, repair_user, schema, prefer_schema=False)
             except Exception as repair_error:
                 raise _safe_llm_error(repair_error) from repair_error
+            repaired_json = _extract_json_document(repaired)
             try:
-                return schema.model_validate_json(repaired)
+                return schema.model_validate_json(repaired_json)
             except (ValidationError, ValueError, json.JSONDecodeError) as second_error:
                 raise LLMError("LLM returned invalid JSON after repair retry") from second_error
 
@@ -119,7 +140,8 @@ class HaikuClient:
             "Lightweight Telegram P0 classifier. Return JSON only with keys: "
             "status, summary, action, deadline, confidence. status must be P0, "
             "NOT_P0, or REVIEW. Be conservative: if uncertain, use REVIEW. "
-            "P0 means same-day urgent action or personal/family risk."
+            "P0 means same-day urgent action or personal/family risk. "
+            "Return only valid JSON. No markdown. No code fences. No explanation."
         )
         return self._validated_json(P0Decision, system, json.dumps(payload, ensure_ascii=False))
 
@@ -128,6 +150,7 @@ class HaikuClient:
             "Create a short practical Telegram daily digest as strict JSON. "
             "Never hide direct messages. If unsure whether something is safe "
             "background, put it in review. "
-            "Mention unprocessed media in review. Keep output concise and action-oriented."
+            "Mention unprocessed media in review. Keep output concise and action-oriented. "
+            "Return only valid JSON. No markdown. No code fences. No explanation."
         )
         return self._validated_json(DailyDigest, system, json.dumps(payload, ensure_ascii=False))

@@ -49,6 +49,10 @@ def response_with(content):
     return type("Response", (), {"choices": [choice]})()
 
 
+def p0_json(status: str = "P0") -> str:
+    return f'{{"status":"{status}","summary":"ok","confidence":1}}'
+
+
 def test_second_openai_retry_error_becomes_llm_error(settings: Settings) -> None:
     client = HaikuClient(settings)
     client.client = BrokenClient()
@@ -112,3 +116,79 @@ def test_openai_sdk_error_is_wrapped_as_llm_error(settings: Settings) -> None:
 
     with pytest.raises(LLMError, match="llm_error"):
         client.daily_digest({"date": "2026-07-07", "chats": []})
+
+
+def test_plain_json_response_parses(settings: Settings) -> None:
+    client = HaikuClient(settings)
+    client.client = FakeClient(MalformedCompletions(response_with(p0_json("NOT_P0"))))
+
+    result = client.classify_p0({"message": {"text": "ping"}, "context": []})
+
+    assert result.status == "NOT_P0"
+
+
+def test_json_fence_response_parses(settings: Settings) -> None:
+    client = HaikuClient(settings)
+    client.client = FakeClient(MalformedCompletions(response_with(f"```json\n{p0_json()}\n```")))
+
+    result = client.classify_p0({"message": {"text": "ping"}, "context": []})
+
+    assert result.status == "P0"
+
+
+def test_plain_fence_response_parses(settings: Settings) -> None:
+    client = HaikuClient(settings)
+    client.client = FakeClient(MalformedCompletions(response_with(f"```\n{p0_json()}\n```")))
+
+    result = client.classify_p0({"message": {"text": "ping"}, "context": []})
+
+    assert result.status == "P0"
+
+
+def test_whitespace_around_json_parses(settings: Settings) -> None:
+    client = HaikuClient(settings)
+    client.client = FakeClient(MalformedCompletions(response_with(f"\n\n  {p0_json()}  \n")))
+
+    result = client.classify_p0({"message": {"text": "ping"}, "context": []})
+
+    assert result.status == "P0"
+
+
+def test_repair_json_fence_response_parses(settings: Settings) -> None:
+    client = HaikuClient(settings)
+    client.client = FakeClient(
+        SequenceCompletions([
+            response_with("{bad json}"),
+            response_with(f"```json\n{p0_json('REVIEW')}\n```"),
+        ])
+    )
+
+    result = client.classify_p0({"message": {"text": "ping"}, "context": []})
+
+    assert result.status == "REVIEW"
+
+
+def test_text_before_json_is_rejected(settings: Settings) -> None:
+    client = HaikuClient(settings)
+    client.client = FakeClient(MalformedCompletions(response_with(f"Here is JSON:\n{p0_json()}")))
+
+    with pytest.raises(LLMError):
+        client.classify_p0({"message": {"text": "ping"}, "context": []})
+
+
+def test_multiple_code_blocks_are_rejected(settings: Settings) -> None:
+    client = HaikuClient(settings)
+    client.client = FakeClient(
+        MalformedCompletions(response_with(f"```json\n{p0_json()}\n```\n```json\n{p0_json()}\n```"))
+    )
+
+    with pytest.raises(LLMError):
+        client.classify_p0({"message": {"text": "ping"}, "context": []})
+
+
+def test_invalid_fenced_json_becomes_llm_error(settings: Settings) -> None:
+    client = HaikuClient(settings)
+    client.client = FakeClient(MalformedCompletions(response_with("```json\n{bad json\n```")))
+
+    with pytest.raises(LLMError):
+        client.classify_p0({"message": {"text": "ping"}, "context": []})
