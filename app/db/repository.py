@@ -108,6 +108,8 @@ def save_digest(
         generated_by=digest.generated_by,
         email_status=digest.email_status,
         error_summary=digest.error_summary,
+        attempts=0,
+        next_attempt_at=now if digest.email_status == "pending" else None,
     )
     session.add(record)
     session.commit()

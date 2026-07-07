@@ -307,6 +307,73 @@ def test_digest_email_failure_creates_pending_digest(session) -> None:
     assert repository.pending_digests(session)[0].email_status == "pending"
 
 
+def test_new_pending_digest_is_immediately_retryable(session) -> None:
+    digest = DailyDigest(date="2026-07-07")
+    record = repository.save_digest(
+        session,
+        digest,
+        "<p>html</p>",
+        subject="subject",
+        text="plain",
+    )
+
+    assert record.email_status == "pending"
+    assert record.attempts == 0
+    assert record.next_attempt_at is not None
+    assert record.next_attempt_at <= record.created_at
+
+
+def test_crash_after_save_digest_before_smtp_is_recovered_by_retry_scheduler(session) -> None:
+    digest = DailyDigest(date="2026-07-07")
+    record = repository.save_digest(
+        session,
+        digest,
+        "<p>saved html</p>",
+        subject="saved subject",
+        text="saved plain",
+    )
+    email = FakeEmail()
+
+    sent = repository.retry_pending_digests(session, email, now=record.next_attempt_at)
+
+    assert sent == 1
+    assert email.sent == [("saved subject", "saved plain", "<p>saved html</p>")]
+    assert repository.pending_digests(session) == []
+
+
+def test_successful_initial_digest_send_marks_digest_sent(session) -> None:
+    repository.save_message(session, msg(message_id=313, text="ping"))
+
+    digest = send_daily_digest_pipeline(
+        session,
+        FakeLLM(),
+        FakeEmail(),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+    )
+
+    assert digest.email_status == "sent"
+    assert repository.pending_digests(session) == []
+
+
+def test_failed_initial_digest_send_sets_backoff_timestamp(session) -> None:
+    repository.save_message(session, msg(message_id=314, text="ping"))
+
+    send_daily_digest_pipeline(
+        session,
+        FakeLLM(),
+        FakeEmail(fail=True),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+        max_email_attempts=1,
+    )
+    record = repository.pending_digests(session)[0]
+
+    assert record.email_status == "pending"
+    assert record.attempts == 1
+    assert record.next_attempt_at > record.created_at
+
+
 def test_pending_digest_retried_and_marked_sent(session) -> None:
     repository.save_message(session, msg(message_id=305, text="ping"))
     send_daily_digest_pipeline(
