@@ -15,6 +15,7 @@ class Settings(BaseSettings):
 
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 465
+    smtp_tls_mode: str = "ssl"
     smtp_username: str = ""
     smtp_password: str = ""
     email_from: str = ""
@@ -44,6 +45,14 @@ class Settings(BaseSettings):
         if value == "":
             return None
         return value
+
+    @field_validator("smtp_tls_mode")
+    @classmethod
+    def validate_smtp_tls_mode(cls, value: str) -> str:
+        normalized = value.lower().strip()
+        if normalized not in {"ssl", "starttls"}:
+            raise ValueError("SMTP_TLS_MODE must be one of: ssl, starttls")
+        return normalized
 
     def ensure_runtime_dirs(self) -> None:
         Path("data").mkdir(mode=0o700, exist_ok=True)

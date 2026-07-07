@@ -8,6 +8,7 @@ FIELDS = [
     ("AITUNNEL_API_KEY", True, ""),
     ("SMTP_USERNAME", False, ""),
     ("SMTP_PASSWORD", True, ""),
+    ("SMTP_TLS_MODE", False, "ssl"),
     ("EMAIL_FROM", False, ""),
     ("EMAIL_TO", False, ""),
     ("TG_API_ID", False, ""),
@@ -37,7 +38,8 @@ def main() -> None:
         "TG_SESSION_PATH": "data/telegram_digest.session",
     }
     for name, secret, default in FIELDS:
-        prompt = f"{name}" + (f" [{default}]" if default else "") + ": "
+        hint = " (ssl = port 465, starttls = port 587)" if name == "SMTP_TLS_MODE" else ""
+        prompt = f"{name}{hint}" + (f" [{default}]" if default else "") + ": "
         value = getpass.getpass(prompt) if secret else input(prompt)
         values[name] = value or default
     path = Path(".env")
