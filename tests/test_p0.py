@@ -20,9 +20,15 @@ class FakeEmail:
 
 
 class FakeLLM:
-    def __init__(self, fail: bool = False, status: P0Status = P0Status.p0) -> None:
+    def __init__(
+        self,
+        fail: bool = False,
+        status: P0Status = P0Status.p0,
+        deadline_text: str | None = None,
+    ) -> None:
         self.fail = fail
         self.status = status
+        self.deadline_text = deadline_text
 
     def classify_p0(self, payload: dict) -> P0Decision:
         if self.fail:
@@ -31,6 +37,7 @@ class FakeLLM:
             status=self.status,
             summary="Просит позвонить через час.",
             action="Позвонить.",
+            deadline_text=self.deadline_text,
             confidence=0.9,
         )
 
@@ -305,3 +312,71 @@ def test_p0_message_is_deduplicated(session) -> None:
     assert handle_p0_candidate(session, message, FakeLLM(status=P0Status.review), email) is False
 
     assert len(email.sent) == 1
+
+
+def test_call_back_in_one_hour_is_p0() -> None:
+    from app.services.prefilter import is_urgent_call_candidate
+
+    assert is_urgent_call_candidate("Please call me back in one hour")
+
+
+def test_pozvoni_cherez_chas_is_p0() -> None:
+    from app.services.prefilter import is_urgent_call_candidate
+
+    assert is_urgent_call_candidate("Позвони через час")
+
+
+def test_join_call_in_thirty_minutes_is_p0() -> None:
+    from app.services.prefilter import is_urgent_call_candidate
+
+    assert is_urgent_call_candidate("Please join the call in 30 minutes")
+
+
+def test_call_tomorrow_without_urgency_is_not_forced_p0(session) -> None:
+    message = msg(text="Can we call tomorrow?")
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(session, message, FakeLLM(status=P0Status.not_p0), email) is False
+    assert email.sent == []
+    assert repository.pending_alert_jobs(session) == []
+
+
+def test_llm_not_p0_is_overridden_for_urgent_call_candidate(session) -> None:
+    message = msg(text="Please call me back in one hour")
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(session, message, FakeLLM(status=P0Status.not_p0), email) is True
+
+    assert email.sent[0][0].startswith("[СРОЧНО]")
+    assert "deterministic_urgent_call_override" in email.sent[0][1]
+
+
+def test_override_keeps_deadline_text(session) -> None:
+    message = msg(text="Please call me back in one hour")
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    handle_p0_candidate(
+        session,
+        message,
+        FakeLLM(status=P0Status.not_p0, deadline_text="in 1 hour"),
+        email,
+    )
+
+    assert "in 1 hour" in email.sent[0][1]
+
+
+def test_override_creates_immediate_alert_job(session) -> None:
+    message = msg(text="Перезвони мне через 30 минут")
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    handle_p0_candidate(session, message, FakeLLM(status=P0Status.not_p0), email)
+
+    jobs = repository.pending_alert_jobs(session)
+    assert len(email.sent) == 1
+    assert jobs == []
+    stored = repository.get_message(session, message.chat_id, message.message_id)
+    assert stored.alert_sent is True

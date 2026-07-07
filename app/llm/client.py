@@ -185,6 +185,8 @@ class HaikuClient:
             "status, summary, action, deadline_text, deadline_at, confidence. status must be P0, "
             "NOT_P0, or REVIEW. Be conservative: if uncertain, use REVIEW. "
             "P0 means same-day urgent action or personal/family risk. "
+            "A direct request to call, call back, join, or connect within hours or today is P0. "
+            "Do not classify it as NOT_P0. "
             f"Reference timestamp: {reference_timestamp}. Timezone: {self.settings.timezone}. "
             "deadline_at must be exact ISO 8601 datetime or null. "
             "Put relative or human deadline wording only into deadline_text. "

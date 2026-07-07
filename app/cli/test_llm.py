@@ -8,7 +8,11 @@ def main() -> None:
     client = HaikuClient(get_settings())
     result = client.classify_p0(
         {
-            "message": {"chat_title": "Test", "sender_name": "Test", "text": "Позвони через час"},
+            "message": {
+                "chat_title": "Test",
+                "sender_name": "Test",
+                "text": "Please call me back in one hour.",
+            },
             "context": [],
         }
     )
@@ -17,4 +21,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

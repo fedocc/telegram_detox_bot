@@ -9,7 +9,7 @@ from app.email.sender import EmailSender
 from app.llm.client import HaikuClient, LLMError
 from app.models.schemas import ChatType, P0Status, StoredMessage
 from app.services.digest import safe_truncate
-from app.services.prefilter import is_p0_candidate
+from app.services.prefilter import is_p0_candidate, is_urgent_call_candidate
 
 SAFE_TEXT_LIMIT = 500
 
@@ -65,6 +65,24 @@ def _fallback_body(message: StoredMessage) -> tuple[str, str]:
     return text, html
 
 
+def _deadline_line(decision) -> str:
+    deadline_at = getattr(decision, "deadline_at", None)
+    if deadline_at:
+        return deadline_at.isoformat()
+    return getattr(decision, "deadline_text", None) or "-"
+
+
+def _decision_body(message: StoredMessage, decision, reason: str | None = None) -> str:
+    parts = [
+        f"{message.sender_name or 'Unknown'}: {decision.summary}",
+        f"Действие: {decision.action or '-'}",
+        f"Срок: {_deadline_line(decision)}",
+    ]
+    if reason:
+        parts.append(f"Reason: {reason}")
+    return "\n\n".join(parts)
+
+
 def handle_p0_candidate(
     session: Session,
     message: StoredMessage,
@@ -78,12 +96,25 @@ def handle_p0_candidate(
         return False
 
     obvious = is_p0_candidate(message.text, message.caption)
+    urgent_call = (
+        message.chat_type == ChatType.private
+        and is_urgent_call_candidate(message.text, message.caption)
+    )
     context = _context_with_reply_parent(session, message)
     try:
         decision = llm.classify_p0(_message_payload(message, context))
         if decision.status == P0Status.not_p0:
-            return False
-        if decision.status == P0Status.review:
+            if not urgent_call:
+                return False
+            subject = f"[СРОЧНО] Telegram: {message.chat_title}"
+            body = _decision_body(
+                message,
+                decision,
+                reason="deterministic_urgent_call_override",
+            )
+            html = None
+            alert_type = "p0"
+        elif decision.status == P0Status.review:
             if message.chat_type == ChatType.private:
                 subject = "[ПРОВЕРЬ] возможно важное личное сообщение"
                 body, html = _fallback_body(message)
@@ -93,10 +124,7 @@ def handle_p0_candidate(
                 return False
         else:
             subject = f"[СРОЧНО] Telegram: {message.chat_title}"
-            body = (
-                f"{message.sender_name or 'Unknown'}: {decision.summary}"
-                f"\n\nДействие: {decision.action or '-'}"
-            )
+            body = _decision_body(message, decision)
             html = None
             alert_type = "p0"
     except LLMError:
