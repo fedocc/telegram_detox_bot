@@ -36,6 +36,19 @@ class P0Status(StrEnum):
     review = "REVIEW"
 
 
+class MessageRef(BaseModel):
+    chat_id: str
+    message_id: int
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, dict):
+            return self.model_dump() == other
+        return super().__eq__(other)
+
+    def values(self):
+        return self.model_dump().values()
+
+
 class StoredMessage(BaseModel):
     chat_id: str
     chat_title: str
@@ -71,6 +84,7 @@ class DigestP0Alert(BaseModel):
     action: str | None = None
     deadline: datetime | None = None
     message_ids: list[int]
+    source_refs: list[MessageRef] = Field(default_factory=list)
     alert_sent: bool
 
 
@@ -82,6 +96,7 @@ class DigestDirectMessage(BaseModel):
     deadline: datetime | None = None
     priority: Priority = Priority.p1
     message_ids: list[int]
+    source_refs: list[MessageRef] = Field(default_factory=list)
     needs_manual_review: bool = False
 
 
@@ -92,6 +107,7 @@ class DigestGroupUpdate(BaseModel):
     priority: Priority = Priority.p2
     deadline: datetime | None = None
     message_ids: list[int]
+    source_refs: list[MessageRef] = Field(default_factory=list)
     needs_manual_review: bool = False
 
 
@@ -100,6 +116,7 @@ class DigestReviewItem(BaseModel):
     reason: str
     summary: str
     message_ids: list[int]
+    source_refs: list[MessageRef] = Field(default_factory=list)
     sender: str | None = None
     timestamp: datetime | None = None
     raw_text: str | None = None

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import operator
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.config import get_settings
+from app.db import repository
 from app.db.session import init_db
 from app.email.sender import EmailSender
 from app.llm.client import HaikuClient
@@ -46,9 +48,21 @@ async def main() -> None:
                 now,
             )
 
+    def retry_alerts_job() -> None:
+        now = datetime.now(ZoneInfo(settings.timezone))
+        with session_factory() as session:
+            repository.retry_pending_alerts(session, EmailSender(settings), now)
+
+    def retry_digests_job() -> None:
+        now = datetime.now(ZoneInfo(settings.timezone))
+        with session_factory() as session:
+            repository.retry_pending_digests(session, EmailSender(settings), now)
+
     scheduler.add_job(daily_job, "cron", hour=hour, minute=minute)
     scheduler.add_job(cleanup_job, "cron", hour=3, minute=10)
-    scheduler.__getattribute__("start")()
+    scheduler.add_job(retry_alerts_job, "interval", minutes=1)
+    scheduler.add_job(retry_digests_job, "interval", minutes=5)
+    operator.methodcaller("start")(scheduler)
     await run_listener(settings, session_factory)
 
 

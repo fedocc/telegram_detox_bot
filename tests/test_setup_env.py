@@ -19,3 +19,12 @@ def test_setup_env_quotes_special_characters_safely(tmp_path) -> None:
     assert parsed["AITUNNEL_API_KEY"] == values["AITUNNEL_API_KEY"]
     assert parsed["SMTP_PASSWORD"] == values["SMTP_PASSWORD"]
     assert parsed["TG_API_HASH"] == values["TG_API_HASH"]
+
+
+def test_makefile_uses_project_virtualenv() -> None:
+    text = __import__("pathlib").Path("Makefile").read_text(encoding="utf-8")
+
+    assert "PYTHON := .venv/bin/python" in text
+    assert "$(PYTHON) -m pytest" in text
+    assert "$(PYTHON) -m ruff check ." in text
+    assert "Virtualenv missing. Run make setup." in text

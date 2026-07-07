@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 from app.db import repository
 from app.email.render import render_html
@@ -45,6 +46,23 @@ class OmittingLLM:
         return DailyDigest(
             date=payload["date"],
             direct_messages=[],
+            noise_counts=[{"chat": "Маша", "count": 1}],
+        )
+
+
+class MaskingLLM:
+    def daily_digest(self, payload: dict) -> DailyDigest:
+        return DailyDigest(
+            date=payload["date"],
+            direct_messages=[
+                {
+                    "chat": "Other",
+                    "summary": "Wrong chat same message id.",
+                    "needs_reply": False,
+                    "message_ids": [1],
+                    "source_refs": [{"chat_id": "group-1", "message_id": 1}],
+                }
+            ],
             noise_counts=[{"chat": "Маша", "count": 1}],
         )
 
@@ -138,6 +156,7 @@ def test_digest_cannot_drop_private_message_when_llm_omits_it(session) -> None:
     assert digest.review
     item = digest.review[0]
     assert item.message_ids == [101]
+    assert item.source_refs == [{"chat_id": "1", "message_id": 101}]
     assert item.reason == "LLM did not classify this incoming private message"
     assert item.sender == "Sender"
     assert item.raw_text == "Ты сможешь сегодня?"
@@ -150,6 +169,59 @@ def test_private_message_never_becomes_p3(session) -> None:
 
     assert all(count.chat != "Маша" for count in digest.noise_counts)
     assert any(102 in item.message_ids for item in digest.review)
+
+
+def test_private_message_not_masked_by_group_same_message_id(session, now) -> None:
+    repository.save_message(session, msg(message_id=1, text="private", timestamp=now))
+    repository.save_message(
+        session,
+        msg(
+            chat_id="group-1",
+            chat_title="Group",
+            chat_type=ChatType.group,
+            message_id=1,
+            text="group",
+            timestamp=now,
+        ),
+    )
+
+    digest = generate_digest(session, MaskingLLM(), date(2026, 7, 7), "Europe/Moscow")
+
+    assert any(
+        item.source_refs == [{"chat_id": "1", "message_id": 1}]
+        and item.reason == "LLM did not classify this incoming private message"
+        for item in digest.review
+    )
+
+
+def test_private_message_not_masked_by_other_private_chat_same_message_id(session, now) -> None:
+    repository.save_message(
+        session,
+        msg(chat_id="p1", chat_title="Маша", message_id=1, timestamp=now),
+    )
+    repository.save_message(
+        session,
+        msg(chat_id="p2", chat_title="Иван", message_id=1, timestamp=now),
+    )
+
+    class OnePrivateOnlyLLM:
+        def daily_digest(self, payload: dict) -> DailyDigest:
+            return DailyDigest(
+                date=payload["date"],
+                direct_messages=[
+                    {
+                        "chat": "Маша",
+                        "summary": "One only.",
+                        "needs_reply": False,
+                        "message_ids": [1],
+                        "source_refs": [{"chat_id": "p1", "message_id": 1}],
+                    }
+                ],
+            )
+
+    digest = generate_digest(session, OnePrivateOnlyLLM(), date(2026, 7, 7), "Europe/Moscow")
+
+    assert any(item.source_refs == [{"chat_id": "p2", "message_id": 1}] for item in digest.review)
 
 
 def test_digest_llm_failure_keeps_all_private_messages(session) -> None:
@@ -180,6 +252,22 @@ def test_digest_llm_failure_sends_fallback_digest(session) -> None:
     assert email.sent[0][0].startswith("[FALLBACK] Telegram digest — 2026-07-07")
 
 
+def test_daily_digest_openai_error_sends_fallback_digest(session) -> None:
+    repository.save_message(session, msg(message_id=303, text="ping"))
+    email = FakeEmail()
+
+    digest = send_daily_digest_pipeline(
+        session,
+        FailingLLM(),
+        email,
+        date(2026, 7, 7),
+        "Europe/Moscow",
+    )
+
+    assert digest.generated_by == "fallback"
+    assert digest.email_status == "sent"
+
+
 def test_email_failure_creates_retryable_pending_digest(session) -> None:
     repository.save_message(session, msg(message_id=302, text="ping"))
 
@@ -198,6 +286,51 @@ def test_email_failure_creates_retryable_pending_digest(session) -> None:
     assert records[0].email_status == "pending"
 
 
+def test_digest_email_failure_creates_pending_digest(session) -> None:
+    repository.save_message(session, msg(message_id=304, text="ping"))
+
+    send_daily_digest_pipeline(
+        session,
+        FakeLLM(),
+        FakeEmail(fail=True),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+        max_email_attempts=1,
+    )
+
+    assert repository.pending_digests(session)[0].email_status == "pending"
+
+
+def test_pending_digest_retried_and_marked_sent(session) -> None:
+    repository.save_message(session, msg(message_id=305, text="ping"))
+    send_daily_digest_pipeline(
+        session,
+        FakeLLM(),
+        FakeEmail(fail=True),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+        max_email_attempts=1,
+    )
+    email = FakeEmail()
+
+    sent = repository.retry_pending_digests(
+        session,
+        email,
+        now=day_bounds(date(2026, 7, 7), "Europe/Moscow")[0],
+    )
+
+    assert sent == 1
+    assert repository.pending_digests(session) == []
+    assert email.sent
+
+
+def test_digest_now_uses_persistent_delivery_pipeline() -> None:
+    source = Path("app/cli/digest_now.py").read_text(encoding="utf-8")
+
+    assert "send_daily_digest_pipeline" in source
+    assert "send_and_store_digest" not in source
+
+
 def test_fallback_digest_includes_private_messages(now) -> None:
     digest = fallback_digest(
         date(2026, 7, 7),
@@ -206,6 +339,19 @@ def test_fallback_digest_includes_private_messages(now) -> None:
 
     assert digest.review[0].message_ids == [401]
     assert digest.review[0].raw_text == "secret personal"
+
+
+def test_fallback_digest_includes_all_private_messages(now) -> None:
+    digest = fallback_digest(
+        date(2026, 7, 7),
+        [
+            msg(chat_id="p1", message_id=1, text="one", timestamp=now),
+            msg(chat_id="p2", chat_title="Иван", message_id=1, text="two", timestamp=now),
+        ],
+    )
+
+    refs = {tuple(item.source_refs[0].values()) for item in digest.review if item.source_refs}
+    assert {("p1", 1), ("p2", 1)}.issubset(refs)
 
 
 def test_fallback_digest_includes_p0_review_candidates(session, now) -> None:
@@ -228,3 +374,36 @@ def test_fallback_digest_includes_p0_review_candidates(session, now) -> None:
 
     assert digest.review[0].reason == "P0 review candidate"
     assert digest.review[0].message_ids == [501]
+
+
+def test_fallback_digest_includes_review_and_media(session, now) -> None:
+    repository.save_message(
+        session,
+        msg(
+            chat_id="g1",
+            chat_title="Лаба",
+            chat_type=ChatType.group,
+            message_id=601,
+            text=None,
+            media_type=MediaType.photo,
+            timestamp=now,
+        ),
+    )
+    repository.save_message(
+        session,
+        msg(
+            chat_id="g1",
+            chat_title="Лаба",
+            chat_type=ChatType.group,
+            message_id=602,
+            text="check",
+            timestamp=now,
+        ),
+    )
+    repository.mark_p0_review_candidate(session, "g1", 602)
+    rows = repository.messages_between(session, *day_bounds(date(2026, 7, 7), "Europe/Moscow"))
+
+    digest = fallback_digest(date(2026, 7, 7), rows)
+
+    assert any("media" in item.reason or "медиа" in item.reason.lower() for item in digest.review)
+    assert any(item.reason == "P0 review candidate" for item in digest.review)

@@ -1,31 +1,35 @@
-.PHONY: setup test lint test-llm test-email telegram-login run digest-now cleanup
+PYTHON := .venv/bin/python
+
+.PHONY: setup check-venv test lint test-llm test-email telegram-login run digest-now cleanup
 
 setup:
 	python3.12 -m venv .venv
-	.venv/bin/python -m pip install -U pip
-	.venv/bin/python -m pip install -e ".[dev]"
+	$(PYTHON) -m pip install -U pip
+	$(PYTHON) -m pip install -e ".[dev]"
 
-test:
-	python -m pytest
+check-venv:
+	@test -x $(PYTHON) || (echo "Virtualenv missing. Run make setup."; exit 1)
 
-lint:
-	python -m ruff check .
+test: check-venv
+	$(PYTHON) -m pytest
 
-test-llm:
-	python -m app.cli.test_llm
+lint: check-venv
+	$(PYTHON) -m ruff check .
 
-test-email:
-	python -m app.cli.test_email
+test-llm: check-venv
+	$(PYTHON) -m app.cli.test_llm
 
-telegram-login:
-	python -m app.cli.telegram_login
+test-email: check-venv
+	$(PYTHON) -m app.cli.test_email
 
-run:
-	python -m app.cli.run
+telegram-login: check-venv
+	$(PYTHON) -m app.cli.telegram_login
 
-digest-now:
-	python -m app.cli.digest_now
+run: check-venv
+	$(PYTHON) -m app.cli.run
 
-cleanup:
-	python -m app.cli.cleanup
+digest-now: check-venv
+	$(PYTHON) -m app.cli.digest_now
 
+cleanup: check-venv
+	$(PYTHON) -m app.cli.cleanup

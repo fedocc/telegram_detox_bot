@@ -7,6 +7,48 @@ import pytest
 
 from app.telegram import client as telegram_client
 
+BANNED_WRITES = {
+    "send_message",
+    "forward_messages",
+    "delete_messages",
+    "edit_message",
+    "mark_read",
+    "send_reaction",
+    "react",
+    "join_channel",
+    "leave_channel",
+    "archive",
+    "mute",
+    "pin_message",
+    "unpin_message",
+}
+
+
+def scan_telegram_safety_source(source: str, path: str = "snippet.py") -> list[tuple[str, str]]:
+    tree = ast.parse(source)
+    offenders: list[tuple[str, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in BANNED_WRITES:
+            offenders.append((path, node.attr))
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in {"getattr", "setattr"}:
+                target = node.args[0] if node.args else None
+                attr = node.args[1] if len(node.args) > 1 else None
+                target_name = target.id if isinstance(target, ast.Name) else ""
+                attr_name = attr.value if isinstance(attr, ast.Constant) else ""
+                if target_name in {"client", "telegram_client"} or attr_name in BANNED_WRITES:
+                    offenders.append((path, func.id))
+            if isinstance(func, ast.Attribute) and func.attr in {"__getattribute__", "__getattr__"}:
+                offenders.append((path, func.attr))
+        if (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value in BANNED_WRITES
+        ):
+            offenders.append((path, node.value))
+    return offenders
+
 
 class FakeClient:
     def __init__(self, authorized: bool) -> None:
@@ -75,27 +117,34 @@ def test_only_telegram_login_cli_can_call_start() -> None:
 
 
 def test_no_telegram_write_methods_used_in_runtime_code() -> None:
-    forbidden = {
-        "send_message",
-        "forward_messages",
-        "delete_messages",
-        "edit_message",
-        "mark_read",
-        "send_reaction",
-        "react",
-        "join_channel",
-        "leave_channel",
-        "archive",
-        "mute",
-        "pin_message",
-        "unpin_message",
-    }
     root = Path(__file__).resolve().parents[1]
     offenders: list[tuple[str, str]] = []
-    for path in (root / "app").rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute) and node.attr in forbidden:
-                offenders.append((path.relative_to(root).as_posix(), node.attr))
+    for path in (root / "app" / "telegram").rglob("*.py"):
+        if path.name == "client.py":
+            source = path.read_text(encoding="utf-8")
+        else:
+            source = path.read_text(encoding="utf-8")
+        offenders.extend(scan_telegram_safety_source(source, path.relative_to(root).as_posix()))
 
     assert offenders == []
+
+
+def test_no_dynamic_telegram_dispatch_in_runtime_code() -> None:
+    root = Path(__file__).resolve().parents[1]
+    offenders = []
+    for path in (root / "app" / "telegram").rglob("*.py"):
+        offenders.extend(scan_telegram_safety_source(path.read_text(encoding="utf-8"), str(path)))
+
+    assert offenders == []
+
+
+def test_safety_scan_detects_getattr_write_attempt() -> None:
+    offenders = scan_telegram_safety_source('getattr(client, "send_message")("x")')
+
+    assert offenders
+
+
+def test_safety_scan_detects_direct_write_attempt() -> None:
+    offenders = scan_telegram_safety_source("client.send_message('x')")
+
+    assert offenders

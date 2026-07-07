@@ -87,6 +87,7 @@ def handle_p0_candidate(
             if message.chat_type == ChatType.private:
                 subject = "[ПРОВЕРЬ] возможно важное личное сообщение"
                 body, html = _fallback_body(message)
+                alert_type = "review_private"
             else:
                 repository.mark_p0_review_candidate(session, message.chat_id, message.message_id)
                 return False
@@ -97,6 +98,7 @@ def handle_p0_candidate(
                 f"\n\nДействие: {decision.action or '-'}"
             )
             html = None
+            alert_type = "p0"
     except LLMError:
         if message.chat_type == ChatType.private:
             subject = (
@@ -105,13 +107,27 @@ def handle_p0_candidate(
                 else "[ПРОВЕРЬ] новое личное сообщение"
             )
             body, html = _fallback_body(message)
+            alert_type = "p0" if obvious else "review_private"
         elif obvious:
             subject = f"[ВОЗМОЖНО СРОЧНО] Telegram: {message.chat_title}"
             body, html = _fallback_body(message)
+            alert_type = "fallback_group_p0"
         else:
             repository.mark_p0_review_candidate(session, message.chat_id, message.message_id)
             return False
 
-    email_sender.send(subject, body, html)
-    repository.mark_alert_sent(session, message.chat_id, message.message_id)
+    job = repository.create_alert_job(
+        session,
+        chat_id=message.chat_id,
+        message_id=message.message_id,
+        alert_type=alert_type,
+        subject=subject,
+        text_body=body,
+        html_body=html or "",
+        now=message.timestamp,
+    )
+    if job.status != "pending" or job.attempts > 0:
+        return True
+    if repository.send_alert_job(session, job, email_sender, message.timestamp):
+        repository.mark_alert_sent(session, message.chat_id, message.message_id)
     return True

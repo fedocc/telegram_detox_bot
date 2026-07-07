@@ -17,6 +17,7 @@ from app.models.schemas import (
     DigestDirectMessage,
     DigestNoiseCount,
     DigestReviewItem,
+    MessageRef,
 )
 
 APPROX_TOKEN_CHARS = 4
@@ -55,6 +56,7 @@ def build_structured_payload(rows: list) -> dict:
         chat["messages"].append(
             {
                 "message_id": row.message_id,
+                "source_ref": {"chat_id": row.chat_id, "message_id": row.message_id},
                 "timestamp": row.timestamp.isoformat(),
                 "sender_name": row.sender_name,
                 "is_outgoing": row.is_outgoing,
@@ -111,6 +113,7 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
                     reason=f"Необработанное медиа: {row.media_type}",
                     summary="Содержимое не анализировалось.",
                     message_ids=[row.message_id],
+                    source_refs=[MessageRef(chat_id=row.chat_id, message_id=row.message_id)],
                 )
             )
         if getattr(row, "p0_review_candidate", False):
@@ -120,6 +123,7 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
                     reason="P0 review candidate",
                     summary=safe_truncate(row.text or row.caption or "Needs manual review."),
                     message_ids=[row.message_id],
+                    source_refs=[MessageRef(chat_id=row.chat_id, message_id=row.message_id)],
                     sender=row.sender_name,
                     timestamp=row.timestamp,
                     raw_text=safe_truncate(row.text or row.caption),
@@ -135,6 +139,10 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
                     needs_reply=True,
                     action="Проверить чат.",
                     message_ids=[r.message_id for r in incoming],
+                    source_refs=[
+                        MessageRef(chat_id=r.chat_id, message_id=r.message_id)
+                        for r in incoming
+                    ],
                     needs_manual_review=True,
                 )
             )
@@ -147,6 +155,7 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
                             row.text or row.caption or "Личное сообщение без текста."
                         ),
                         message_ids=[row.message_id],
+                        source_refs=[MessageRef(chat_id=row.chat_id, message_id=row.message_id)],
                         sender=row.sender_name,
                         timestamp=row.timestamp,
                         raw_text=safe_truncate(row.text or row.caption),
@@ -163,34 +172,34 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
     )
 
 
-def _classified_message_ids(digest: DailyDigest) -> set[int]:
-    ids: set[int] = set()
+def _classified_refs(digest: DailyDigest) -> set[tuple[str, int]]:
+    refs: set[tuple[str, int]] = set()
     for item in [*digest.direct_messages, *digest.review]:
-        ids.update(item.message_ids)
-    return ids
+        refs.update((ref.chat_id, ref.message_id) for ref in item.source_refs)
+    return refs
 
 
 def _protect_private_messages(digest: DailyDigest, rows: list) -> DailyDigest:
-    classified = _classified_message_ids(digest)
-    private_ids = {
-        row.message_id
+    classified = _classified_refs(digest)
+    private_refs = {
+        (row.chat_id, row.message_id)
         for row in rows
         if row.chat_type == ChatType.private and not row.is_outgoing
     }
-    missing = private_ids - classified
+    missing = private_refs - classified
     if missing:
         digest.noise_counts = [
             count
             for count in digest.noise_counts
             if not any(
                 row.chat_title == count.chat
-                and row.message_id in private_ids
+                and (row.chat_id, row.message_id) in private_refs
                 and row.chat_type == ChatType.private
                 for row in rows
             )
         ]
     for row in rows:
-        if row.message_id not in missing:
+        if (row.chat_id, row.message_id) not in missing:
             continue
         digest.review.append(
             DigestReviewItem(
@@ -198,6 +207,7 @@ def _protect_private_messages(digest: DailyDigest, rows: list) -> DailyDigest:
                 reason="LLM did not classify this incoming private message",
                 summary=safe_truncate(row.text or row.caption or "Личное сообщение без текста."),
                 message_ids=[row.message_id],
+                source_refs=[MessageRef(chat_id=row.chat_id, message_id=row.message_id)],
                 sender=row.sender_name,
                 timestamp=row.timestamp,
                 raw_text=safe_truncate(row.text or row.caption),
@@ -242,6 +252,7 @@ def generate_digest(session: Session, llm: HaikuClient, day: date, timezone: str
                     reason=f"Необработанное медиа: {row.media_type}",
                     summary="Содержимое не анализировалось.",
                     message_ids=[row.message_id],
+                    source_refs=[MessageRef(chat_id=row.chat_id, message_id=row.message_id)],
                 )
             )
     return _protect_private_messages(digest, rows)
@@ -249,9 +260,15 @@ def generate_digest(session: Session, llm: HaikuClient, day: date, timezone: str
 
 def send_and_store_digest(session: Session, digest: DailyDigest, email_sender: EmailSender) -> None:
     html = render_html(digest)
-    email_sender.send(digest_subject(digest), render_plain_text(digest), html)
-    digest.email_status = "sent"
-    repository.save_digest(session, digest, html)
+    digest.email_status = "pending"
+    record = repository.save_digest(session, digest, html)
+    try:
+        email_sender.send(digest_subject(digest), render_plain_text(digest), html)
+    except EmailSendError as exc:
+        repository.mark_digest_pending(session, record, exc, datetime.now().astimezone())
+    else:
+        digest.email_status = "sent"
+        repository.mark_digest_sent(session, record)
 
 
 def _subject_for(digest: DailyDigest) -> str:
@@ -272,18 +289,19 @@ def send_daily_digest_pipeline(
     digest = generate_digest(session, llm, day, timezone)
     html = render_html(digest)
     text = render_plain_text(digest)
-    last_error: Exception | None = None
+    digest.email_status = "pending"
+    record = repository.save_digest(session, digest, html)
+    now = datetime.now().astimezone()
     for attempt in range(max_email_attempts):
         try:
             email_sender.send(_subject_for(digest), text, html)
             digest.email_status = "sent"
-            repository.save_digest(session, digest, html)
+            repository.mark_digest_sent(session, record)
             return digest
         except EmailSendError as exc:
-            last_error = exc
+            repository.mark_digest_pending(session, record, exc, now)
             if attempt < max_email_attempts - 1:
                 time_module.sleep(min(2**attempt, 8))
     digest.email_status = "pending"
-    digest.error_summary = safe_truncate(str(last_error), 200)
-    repository.save_digest(session, digest, html)
+    digest.error_summary = record.last_error_safe
     return digest

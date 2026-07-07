@@ -18,6 +18,10 @@ class LLMError(RuntimeError):
     pass
 
 
+def _safe_llm_error(exc: Exception) -> LLMError:
+    return LLMError(f"llm_error:{exc.__class__.__name__}")
+
+
 class HaikuClient:
     def __init__(self, settings: Settings):
         if not settings.aitunnel_api_key:
@@ -43,28 +47,36 @@ class HaikuClient:
                     "strict": True,
                 },
             }
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
         try:
-            response = self.client.chat.completions.create(
-                model=self.settings.aitunnel_model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                response_format=response_format,
-                temperature=0,
-            )
-        except OpenAIError:
-            if not prefer_schema:
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.settings.aitunnel_model,
+                    messages=messages,
+                    response_format=response_format,
+                    temperature=0,
+                )
+            except OpenAIError as first_error:
+                if not prefer_schema:
+                    raise _safe_llm_error(first_error) from first_error
+                try:
+                    response = self.client.chat.completions.create(
+                        model=self.settings.aitunnel_model,
+                        messages=messages,
+                        response_format={"type": "json_object"},
+                        temperature=0,
+                    )
+                except Exception as retry_error:
+                    raise _safe_llm_error(retry_error) from retry_error
+        except (TimeoutError, OSError) as exc:
+            raise _safe_llm_error(exc) from exc
+        except Exception as exc:
+            if isinstance(exc, LLMError):
                 raise
-            response = self.client.chat.completions.create(
-                model=self.settings.aitunnel_model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0,
-            )
+            raise _safe_llm_error(exc) from exc
         content = response.choices[0].message.content
         if not content:
             raise LLMError("empty LLM response")
@@ -75,13 +87,19 @@ class HaikuClient:
         try:
             return schema.model_validate_json(raw)
         except (ValidationError, ValueError, json.JSONDecodeError) as first_error:
-            logger.warning("LLM JSON invalid; trying one repair retry: %s", first_error)
+            logger.warning(
+                "LLM JSON invalid; trying one repair retry: %s",
+                first_error.__class__.__name__,
+            )
             repair_user = (
                 "Repair the following response into valid JSON matching the requested schema. "
                 "Return JSON only, no markdown.\n\n"
                 f"{raw}"
             )
-            repaired = self._json_completion(system, repair_user, schema, prefer_schema=False)
+            try:
+                repaired = self._json_completion(system, repair_user, schema, prefer_schema=False)
+            except Exception as repair_error:
+                raise _safe_llm_error(repair_error) from repair_error
             try:
                 return schema.model_validate_json(repaired)
             except (ValidationError, ValueError, json.JSONDecodeError) as second_error:
