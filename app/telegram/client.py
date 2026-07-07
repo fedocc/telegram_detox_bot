@@ -16,8 +16,7 @@ from app.telegram.mapper import event_to_stored_message
 
 
 def make_client(settings: Settings) -> TelegramClient:
-    if settings.tg_api_id is None or not settings.tg_api_hash:
-        raise RuntimeError("TG_API_ID and TG_API_HASH are required")
+    settings.require_telegram_credentials()
     Path(settings.tg_session_path).parent.mkdir(mode=0o700, exist_ok=True)
     return TelegramClient(str(settings.tg_session_path), settings.tg_api_id, settings.tg_api_hash)
 
