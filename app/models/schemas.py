@@ -69,7 +69,8 @@ class P0Decision(BaseModel):
     status: P0Status = P0Status.review
     summary: str
     action: str | None = None
-    deadline: datetime | None = None
+    deadline_text: str | None = None
+    deadline_at: datetime | None = None
     confidence: float = Field(ge=0, le=1)
 
     @property
@@ -82,7 +83,8 @@ class DigestP0Alert(BaseModel):
     sender: str | None = None
     summary: str
     action: str | None = None
-    deadline: datetime | None = None
+    deadline_text: str | None = None
+    deadline_at: datetime | None = None
     source_refs: list[MessageRef] = Field(default_factory=list)
     alert_sent: bool
 
@@ -92,7 +94,8 @@ class DigestDirectMessage(BaseModel):
     summary: str
     needs_reply: bool
     action: str | None = None
-    deadline: datetime | None = None
+    deadline_text: str | None = None
+    deadline_at: datetime | None = None
     priority: Priority = Priority.p1
     source_refs: list[MessageRef] = Field(default_factory=list)
     needs_manual_review: bool = False
@@ -103,7 +106,8 @@ class DigestGroupUpdate(BaseModel):
     summary: str
     action: str | None = None
     priority: Priority = Priority.p2
-    deadline: datetime | None = None
+    deadline_text: str | None = None
+    deadline_at: datetime | None = None
     source_refs: list[MessageRef] = Field(default_factory=list)
     needs_manual_review: bool = False
 

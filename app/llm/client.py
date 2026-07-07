@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from typing import TypeVar
 
 from openai import OpenAI, OpenAIError
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from app.config import Settings
 from app.models.schemas import DailyDigest, P0Decision
@@ -51,6 +52,47 @@ def _extract_json_document(content: str) -> str:
     if not text.startswith("{") or not text.endswith("}"):
         raise LLMError("llm_error:InvalidJsonEnvelope")
     return text
+
+
+def _is_valid_datetime(value: object) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        TypeAdapter(datetime).validate_python(value)
+    except (TypeError, ValueError, ValidationError):
+        return False
+    return True
+
+
+def _normalize_deadlines(value: object) -> object:
+    if isinstance(value, list):
+        return [_normalize_deadlines(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+
+    normalized = {key: _normalize_deadlines(item) for key, item in value.items()}
+    legacy_deadline = normalized.pop("deadline", None)
+    if legacy_deadline is not None:
+        if _is_valid_datetime(legacy_deadline):
+            normalized.setdefault("deadline_at", legacy_deadline)
+        elif not normalized.get("deadline_text"):
+            normalized["deadline_text"] = str(legacy_deadline)
+        normalized.setdefault("deadline_at", None)
+
+    deadline_at = normalized.get("deadline_at")
+    if deadline_at is not None and not _is_valid_datetime(deadline_at):
+        if not normalized.get("deadline_text"):
+            normalized["deadline_text"] = str(deadline_at)
+        normalized["deadline_at"] = None
+
+    return normalized
+
+
+def _normalize_json_document(content: str) -> str:
+    document = json.loads(content)
+    if not isinstance(document, dict):
+        raise ValueError("LLM JSON root must be an object")
+    return json.dumps(_normalize_deadlines(document), ensure_ascii=False)
 
 
 class HaikuClient:
@@ -114,7 +156,7 @@ class HaikuClient:
         raw = self._json_completion(system, user, schema)
         json_text = _extract_json_document(raw)
         try:
-            return schema.model_validate_json(json_text)
+            return schema.model_validate_json(_normalize_json_document(json_text))
         except (ValidationError, ValueError, json.JSONDecodeError) as first_error:
             logger.warning(
                 "LLM JSON invalid; trying one repair retry: %s",
@@ -131,26 +173,35 @@ class HaikuClient:
                 raise _safe_llm_error(repair_error) from repair_error
             repaired_json = _extract_json_document(repaired)
             try:
-                return schema.model_validate_json(repaired_json)
+                return schema.model_validate_json(_normalize_json_document(repaired_json))
             except (ValidationError, ValueError, json.JSONDecodeError) as second_error:
                 raise LLMError("LLM returned invalid JSON after repair retry") from second_error
 
     def classify_p0(self, payload: dict) -> P0Decision:
+        message = payload.get("message", {}) if isinstance(payload, dict) else {}
+        reference_timestamp = message.get("timestamp") or "unknown"
         system = (
             "Lightweight Telegram P0 classifier. Return JSON only with keys: "
-            "status, summary, action, deadline, confidence. status must be P0, "
+            "status, summary, action, deadline_text, deadline_at, confidence. status must be P0, "
             "NOT_P0, or REVIEW. Be conservative: if uncertain, use REVIEW. "
             "P0 means same-day urgent action or personal/family risk. "
+            f"Reference timestamp: {reference_timestamp}. Timezone: {self.settings.timezone}. "
+            "deadline_at must be exact ISO 8601 datetime or null. "
+            "Put relative or human deadline wording only into deadline_text. "
             "Return only valid JSON. No markdown. No code fences. No explanation."
         )
         return self._validated_json(P0Decision, system, json.dumps(payload, ensure_ascii=False))
 
     def daily_digest(self, payload: dict) -> DailyDigest:
+        reference_timestamp = payload.get("reference_timestamp") or payload.get("date") or "unknown"
         system = (
             "Create a short practical Telegram daily digest as strict JSON. "
             "Never hide direct messages. If unsure whether something is safe "
             "background, put it in review. "
             "Mention unprocessed media in review. Keep output concise and action-oriented. "
+            f"Reference timestamp: {reference_timestamp}. Timezone: {self.settings.timezone}. "
+            "Use deadline_text for relative or human deadline wording. "
+            "Use deadline_at only for exact ISO 8601 datetimes, otherwise null. "
             "Return only valid JSON. No markdown. No code fences. No explanation."
         )
         return self._validated_json(DailyDigest, system, json.dumps(payload, ensure_ascii=False))

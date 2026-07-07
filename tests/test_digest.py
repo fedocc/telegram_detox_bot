@@ -4,7 +4,7 @@ from datetime import date
 from pathlib import Path
 
 from app.db import repository
-from app.email.render import render_html
+from app.email.render import render_html, render_plain_text
 from app.email.sender import EmailSendError
 from app.llm.client import LLMError
 from app.models.schemas import ChatType, DailyDigest, DigestNoiseCount, MediaType
@@ -89,6 +89,47 @@ class CountingLLM(FakeLLM):
     def daily_digest(self, payload: dict) -> DailyDigest:
         self.calls += 1
         return super().daily_digest(payload)
+
+
+def test_email_renders_deadline_text_when_no_deadline_at() -> None:
+    digest = DailyDigest(
+        date="2026-07-07",
+        direct_messages=[
+            {
+                "chat": "Маша",
+                "summary": "Просит позвонить.",
+                "needs_reply": True,
+                "deadline_text": "через час",
+            }
+        ],
+    )
+
+    text = render_plain_text(digest)
+    html = render_html(digest)
+
+    assert "через час" in text
+    assert "через час" in html
+
+
+def test_email_prefers_deadline_at_when_present() -> None:
+    digest = DailyDigest(
+        date="2026-07-07",
+        direct_messages=[
+            {
+                "chat": "Маша",
+                "summary": "Просит позвонить.",
+                "needs_reply": True,
+                "deadline_text": "через час",
+                "deadline_at": "2026-07-07T19:00:00+03:00",
+            }
+        ],
+    )
+
+    text = render_plain_text(digest)
+    html = render_html(digest)
+
+    assert "2026-07-07T19:00:00+03:00" in text
+    assert "2026-07-07T19:00:00+03:00" in html
 
 
 def test_personal_message_always_appears_in_digest(session) -> None:

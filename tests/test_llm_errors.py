@@ -7,6 +7,7 @@ from openai import APIConnectionError
 
 from app.config import Settings
 from app.llm.client import HaikuClient, LLMError
+from app.models.schemas import DailyDigest
 
 
 class BrokenCompletions:
@@ -192,3 +193,107 @@ def test_invalid_fenced_json_becomes_llm_error(settings: Settings) -> None:
 
     with pytest.raises(LLMError):
         client.classify_p0({"message": {"text": "ping"}, "context": []})
+
+
+def test_relative_deadline_becomes_deadline_text(settings: Settings) -> None:
+    client = HaikuClient(settings)
+    client.client = FakeClient(
+        MalformedCompletions(
+            response_with('{"status":"P0","summary":"ok","deadline_at":null,'
+                          '"deadline_text":"через час","confidence":0.95}')
+        )
+    )
+
+    result = client.classify_p0({"message": {"text": "позвони через час"}, "context": []})
+
+    assert result.deadline_text == "через час"
+    assert result.deadline_at is None
+
+
+def test_valid_iso_deadline_remains_deadline_at(settings: Settings) -> None:
+    client = HaikuClient(settings)
+    client.client = FakeClient(
+        MalformedCompletions(
+            response_with('{"status":"P0","summary":"ok",'
+                          '"deadline_at":"2026-07-07T19:00:00+03:00",'
+                          '"deadline_text":"сегодня в 19:00","confidence":0.95}')
+        )
+    )
+
+    result = client.classify_p0({"message": {"text": "позвони сегодня в 19:00"}, "context": []})
+
+    assert result.deadline_at is not None
+    assert result.deadline_at.isoformat() == "2026-07-07T19:00:00+03:00"
+    assert result.deadline_text == "сегодня в 19:00"
+
+
+def test_invalid_deadline_at_moves_to_deadline_text(settings: Settings) -> None:
+    client = HaikuClient(settings)
+    client.client = FakeClient(
+        MalformedCompletions(
+            response_with('{"status":"P0","summary":"ok","deadline_at":"через час",'
+                          '"deadline_text":null,"confidence":0.95}')
+        )
+    )
+
+    result = client.classify_p0({"message": {"text": "позвони через час"}, "context": []})
+
+    assert result.deadline_text == "через час"
+    assert result.deadline_at is None
+
+
+def test_legacy_deadline_field_is_normalized(settings: Settings) -> None:
+    client = HaikuClient(settings)
+    client.client = FakeClient(
+        MalformedCompletions(
+            response_with('{"status":"P0","summary":"ok","deadline":"1 hour","confidence":0.95}')
+        )
+    )
+
+    result = client.classify_p0({"message": {"text": "call in 1 hour"}, "context": []})
+
+    assert result.deadline_text == "1 hour"
+    assert result.deadline_at is None
+
+
+def test_p0_relative_deadline_does_not_trigger_llm_error(settings: Settings) -> None:
+    client = HaikuClient(settings)
+    client.client = FakeClient(
+        MalformedCompletions(
+            response_with('{"status":"P0","summary":"ok","deadline":"1 hour","confidence":0.95}')
+        )
+    )
+
+    result = client.classify_p0({"message": {"text": "call in 1 hour"}, "context": []})
+
+    assert result.is_p0
+
+
+def test_daily_digest_relative_deadline_does_not_fail(settings: Settings) -> None:
+    client = HaikuClient(settings)
+    client.client = FakeClient(
+        MalformedCompletions(
+            response_with(
+                '{"date":"2026-07-07","direct_messages":[{"chat":"Маша",'
+                '"summary":"Просит ответить через час.","needs_reply":true,'
+                '"deadline_at":"через час","deadline_text":null,'
+                '"source_refs":[{"chat_id":"1","message_id":1}]}]}'
+            )
+        )
+    )
+
+    digest = client.daily_digest({"date": "2026-07-07", "chats": []})
+
+    assert digest.direct_messages[0].deadline_text == "через час"
+    assert digest.direct_messages[0].deadline_at is None
+
+
+def test_digest_models_use_deadline_text_and_deadline_at() -> None:
+    for model in [
+        DailyDigest.model_fields["p0_alerts"].annotation.__args__[0],
+        DailyDigest.model_fields["direct_messages"].annotation.__args__[0],
+        DailyDigest.model_fields["group_updates"].annotation.__args__[0],
+    ]:
+        assert "deadline" not in model.model_fields
+        assert "deadline_text" in model.model_fields
+        assert "deadline_at" in model.model_fields
