@@ -18,6 +18,15 @@ FIELDS = [
 ]
 
 
+def quote_dotenv_value(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return f'"{escaped}"'
+
+
+def format_env(values: dict[str, str]) -> str:
+    return "\n".join(f"{key}={quote_dotenv_value(value)}" for key, value in values.items()) + "\n"
+
+
 def main() -> None:
     values = {
         "AITUNNEL_BASE_URL": "https://api.aitunnel.ru/v1/",
@@ -32,8 +41,7 @@ def main() -> None:
         value = getpass.getpass(prompt) if secret else input(prompt)
         values[name] = value or default
     path = Path(".env")
-    lines = [f"{key}={value}" for key, value in values.items()]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.write_text(format_env(values), encoding="utf-8")
     os.chmod(path, 0o600)
     print("Created .env with variables:")
     for key in values:
@@ -42,4 +50,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

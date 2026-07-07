@@ -30,6 +30,12 @@ class Priority(StrEnum):
     review = "REVIEW"
 
 
+class P0Status(StrEnum):
+    p0 = "P0"
+    not_p0 = "NOT_P0"
+    review = "REVIEW"
+
+
 class StoredMessage(BaseModel):
     chat_id: str
     chat_title: str
@@ -47,11 +53,15 @@ class StoredMessage(BaseModel):
 
 
 class P0Decision(BaseModel):
-    is_p0: bool
+    status: P0Status = P0Status.review
     summary: str
     action: str | None = None
     deadline: datetime | None = None
     confidence: float = Field(ge=0, le=1)
+
+    @property
+    def is_p0(self) -> bool:
+        return self.status == P0Status.p0
 
 
 class DigestP0Alert(BaseModel):
@@ -90,6 +100,9 @@ class DigestReviewItem(BaseModel):
     reason: str
     summary: str
     message_ids: list[int]
+    sender: str | None = None
+    timestamp: datetime | None = None
+    raw_text: str | None = None
 
 
 class DigestNoiseCount(BaseModel):
@@ -106,4 +119,6 @@ class DailyDigest(BaseModel):
     group_updates: list[DigestGroupUpdate] = Field(default_factory=list)
     review: list[DigestReviewItem] = Field(default_factory=list)
     noise_counts: list[DigestNoiseCount] = Field(default_factory=list)
-
+    generated_by: str = "llm"
+    email_status: str = "pending"
+    error_summary: str | None = None

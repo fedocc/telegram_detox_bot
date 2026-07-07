@@ -89,10 +89,10 @@ class HaikuClient:
 
     def classify_p0(self, payload: dict) -> P0Decision:
         system = (
-            "You classify Telegram messages for critical immediate alerts. "
-            "Return JSON only with keys: is_p0, summary, action, deadline, confidence. "
-            "P0 means the user cannot safely wait until the evening digest. "
-            "If unsure, set is_p0=false unless the message implies same-day urgent action."
+            "Lightweight Telegram P0 classifier. Return JSON only with keys: "
+            "status, summary, action, deadline, confidence. status must be P0, "
+            "NOT_P0, or REVIEW. Be conservative: if uncertain, use REVIEW. "
+            "P0 means same-day urgent action or personal/family risk."
         )
         return self._validated_json(P0Decision, system, json.dumps(payload, ensure_ascii=False))
 

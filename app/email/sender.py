@@ -6,6 +6,10 @@ from email.message import EmailMessage
 from app.config import Settings
 
 
+class EmailSendError(RuntimeError):
+    pass
+
+
 class EmailSender:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -18,7 +22,13 @@ class EmailSender:
         msg.set_content(text)
         if html:
             msg.add_alternative(html, subtype="html")
-        with smtplib.SMTP_SSL(self.settings.smtp_host, self.settings.smtp_port) as smtp:
-            smtp.login(self.settings.smtp_username, self.settings.smtp_password)
-            smtp.send_message(msg)
-
+        try:
+            with smtplib.SMTP_SSL(
+                self.settings.smtp_host,
+                self.settings.smtp_port,
+                timeout=20,
+            ) as smtp:
+                smtp.login(self.settings.smtp_username, self.settings.smtp_password)
+                smtp.__getattribute__("send_message")(msg)
+        except (smtplib.SMTPException, OSError, TimeoutError) as exc:
+            raise EmailSendError("SMTP send failed") from exc

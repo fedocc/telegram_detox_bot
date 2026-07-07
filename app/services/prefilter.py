@@ -19,6 +19,10 @@ P0_PATTERNS = [
     r"\bперезвони\b",
     r"\bдедлайн\b",
     r"\bнужно сегодня\b",
+    r"\basap\b",
+    r"\bas soon as possible\b",
+    r"\bdeadline in \d+ hours?\b",
+    r"\bчерез \d+ (минут|час|часа|часов)\b",
 ]
 P0_RE = re.compile("|".join(P0_PATTERNS), re.IGNORECASE)
 
@@ -26,4 +30,3 @@ P0_RE = re.compile("|".join(P0_PATTERNS), re.IGNORECASE)
 def is_p0_candidate(text: str | None, caption: str | None = None) -> bool:
     combined = " ".join(part for part in [text, caption] if part)
     return bool(combined and P0_RE.search(combined))
-

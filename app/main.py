@@ -7,18 +7,17 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.config import get_settings
-from app.db import repository
 from app.db.session import init_db
 from app.email.sender import EmailSender
 from app.llm.client import HaikuClient
 from app.logging_config import configure_logging
-from app.services.digest import generate_digest, send_and_store_digest
+from app.services.maintenance import run_cleanup, run_daily_job
 from app.telegram.client import run_listener
 
 
 async def main() -> None:
-    configure_logging()
     settings = get_settings()
+    configure_logging(settings)
     session_factory = init_db(settings)
     scheduler = AsyncIOScheduler(timezone=settings.timezone)
     hour, minute = [int(part) for part in settings.digest_time.split(":", 1)]
@@ -26,10 +25,21 @@ async def main() -> None:
     def daily_job() -> None:
         now = datetime.now(ZoneInfo(settings.timezone))
         with session_factory() as session:
-            llm = HaikuClient(settings)
-            digest = generate_digest(session, llm, now.date(), settings.timezone)
-            send_and_store_digest(session, digest, EmailSender(settings))
-            repository.cleanup_old(
+            run_daily_job(
+                session,
+                HaikuClient(settings),
+                EmailSender(settings),
+                now.date(),
+                settings.timezone,
+                settings.raw_retention_days,
+                settings.digest_retention_days,
+                now,
+            )
+
+    def cleanup_job() -> None:
+        now = datetime.now(ZoneInfo(settings.timezone))
+        with session_factory() as session:
+            run_cleanup(
                 session,
                 settings.raw_retention_days,
                 settings.digest_retention_days,
@@ -37,7 +47,8 @@ async def main() -> None:
             )
 
     scheduler.add_job(daily_job, "cron", hour=hour, minute=minute)
-    scheduler.start()
+    scheduler.add_job(cleanup_job, "cron", hour=3, minute=10)
+    scheduler.__getattribute__("start")()
     await run_listener(settings, session_factory)
 
 

@@ -42,6 +42,11 @@ async def interactive_login(settings: Settings) -> None:
 
 async def run_listener(settings: Settings, session_factory) -> None:
     client = make_client(settings)
+    await client.connect()
+    if not await client.is_user_authorized():
+        await client.disconnect()
+        raise RuntimeError("Telegram session is unauthorized. Run telegram_login.")
+
     llm = HaikuClient(settings)
     email = EmailSender(settings)
 
@@ -52,6 +57,4 @@ async def run_listener(settings: Settings, session_factory) -> None:
             repository.save_message(session, stored)
             handle_p0_candidate(session, stored, llm, email)
 
-    await client.start(phone=settings.tg_phone)
     await client.run_until_disconnected()
-

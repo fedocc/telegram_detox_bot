@@ -28,6 +28,7 @@ class MessageRecord(Base):
     media_type: Mapped[str] = mapped_column(String(32), default="none")
     caption: Mapped[str | None] = mapped_column(Text, nullable=True)
     alert_sent: Mapped[bool] = mapped_column(Boolean, default=False)
+    p0_review_candidate: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class DigestRecord(Base):
@@ -38,4 +39,6 @@ class DigestRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     json_payload: Mapped[str] = mapped_column(Text)
     html_payload: Mapped[str] = mapped_column(Text)
-
+    generated_by: Mapped[str] = mapped_column(String(32), default="llm")
+    email_status: Mapped[str] = mapped_column(String(32), default="pending")
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)

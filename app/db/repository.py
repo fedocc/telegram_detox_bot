@@ -47,6 +47,13 @@ def mark_alert_sent(session: Session, chat_id: str, message_id: int) -> None:
         session.commit()
 
 
+def mark_p0_review_candidate(session: Session, chat_id: str, message_id: int) -> None:
+    record = get_message(session, chat_id, message_id)
+    if record:
+        record.p0_review_candidate = True
+        session.commit()
+
+
 def recent_chat_context(session: Session, chat_id: str, limit: int = 10) -> list[MessageRecord]:
     rows = session.scalars(
         select(MessageRecord)
@@ -74,9 +81,22 @@ def save_digest(session: Session, digest: DailyDigest, html: str) -> None:
             created_at=datetime.now().astimezone(),
             json_payload=digest.model_dump_json(),
             html_payload=html,
+            generated_by=digest.generated_by,
+            email_status=digest.email_status,
+            error_summary=digest.error_summary,
         )
     )
     session.commit()
+
+
+def pending_digests(session: Session) -> list[DigestRecord]:
+    return list(
+        session.scalars(
+            select(DigestRecord)
+            .where(DigestRecord.email_status == "pending")
+            .order_by(DigestRecord.created_at)
+        )
+    )
 
 
 def cleanup_old(
