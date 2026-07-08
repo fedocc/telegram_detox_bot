@@ -8,9 +8,13 @@ from collections.abc import Iterable
 from app.config import Settings
 
 SECRET_PATTERNS = [
-    re.compile(r"(AITUNNEL_API_KEY|SMTP_PASSWORD|TG_API_HASH)=([^,\s]+)", re.I),
     re.compile(
-        r"(api[_-]?key|password|api[_-]?hash|session)"
+        r"(AITUNNEL_API_KEY|SMTP_PASSWORD|TG_API_HASH|"
+        r"GMAIL_OAUTH_CLIENT_SECRET_PATH|GMAIL_OAUTH_TOKEN_PATH)=([^,\s]+)",
+        re.I,
+    ),
+    re.compile(
+        r"(api[_-]?key|password|api[_-]?hash|session|access[_-]?token|refresh[_-]?token)"
         r"(['\"]?\s*[:=]\s*['\"]?)([^'\"\s,]+)",
         re.I,
     ),
@@ -69,6 +73,8 @@ def configure_logging(settings: Settings | None = None) -> None:
             settings.smtp_password,
             settings.tg_api_hash,
             settings.tg_session_path,
+            settings.gmail_oauth_client_secret_path,
+            settings.gmail_oauth_token_path,
         ]
     redactor = SecretRedactor(secret_values)
     root = logging.getLogger()

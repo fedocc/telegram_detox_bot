@@ -19,6 +19,11 @@ class FakeEmail:
         self.sent.append((subject, text, html))
 
 
+class FailingGmailApiEmail(FakeEmail):
+    def send(self, subject: str, text: str, html: str | None = None, **kwargs) -> None:
+        raise EmailSendError("Gmail API send failed")
+
+
 class FakeLLM:
     def __init__(
         self,
@@ -142,6 +147,17 @@ def test_p0_smtp_failure_creates_pending_alert_job(session) -> None:
     jobs = repository.pending_alert_jobs(session)
     assert len(jobs) == 1
     assert jobs[0].status == "pending"
+
+
+def test_pending_p0_retry_works_when_gmail_api_send_fails(session) -> None:
+    message = msg(text="Позвони через час")
+    repository.save_message(session, message)
+
+    assert handle_p0_candidate(session, message, FakeLLM(fail=True), FailingGmailApiEmail())
+
+    jobs = repository.pending_alert_jobs(session)
+    assert len(jobs) == 1
+    assert jobs[0].last_error_safe == "EmailSendError"
 
 
 def test_pending_p0_alert_is_retried_and_marked_sent(session, now) -> None:

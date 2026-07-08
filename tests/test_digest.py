@@ -82,6 +82,11 @@ class FakeEmail:
         self.sent.append((subject, text, html))
 
 
+class FailingGmailApiEmail(FakeEmail):
+    def send(self, subject: str, text: str, html: str | None = None) -> None:
+        raise EmailSendError("Gmail API send failed")
+
+
 class CountingLLM(FakeLLM):
     def __init__(self) -> None:
         self.calls = 0
@@ -346,6 +351,23 @@ def test_digest_email_failure_creates_pending_digest(session) -> None:
     )
 
     assert repository.pending_digests(session)[0].email_status == "pending"
+
+
+def test_pending_digest_retry_works_when_gmail_api_send_fails(session) -> None:
+    repository.save_message(session, msg(message_id=305, text="ping"))
+
+    send_daily_digest_pipeline(
+        session,
+        FakeLLM(),
+        FailingGmailApiEmail(),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+        max_email_attempts=1,
+    )
+
+    record = repository.pending_digests(session)[0]
+    assert record.email_status == "pending"
+    assert record.last_error_safe == "EmailSendError"
 
 
 def test_new_pending_digest_is_immediately_retryable(session) -> None:

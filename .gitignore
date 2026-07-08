@@ -5,6 +5,7 @@
 *.session-journal
 data/
 logs/
+secrets/
 *.sqlite
 *.sqlite3
 *.db

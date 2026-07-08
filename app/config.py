@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     aitunnel_model: str = "claude-haiku-4.5"
     aitunnel_api_key: str = ""
 
+    email_transport: str = "gmail_api"
+    gmail_oauth_client_secret_path: Path = Path("secrets/google_oauth_client.json")
+    gmail_oauth_token_path: Path = Path("data/gmail_oauth_token.json")
+
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 465
     smtp_tls_mode: str = "ssl"
@@ -52,6 +56,14 @@ class Settings(BaseSettings):
         normalized = value.lower().strip()
         if normalized not in {"ssl", "starttls"}:
             raise ValueError("SMTP_TLS_MODE must be one of: ssl, starttls")
+        return normalized
+
+    @field_validator("email_transport")
+    @classmethod
+    def validate_email_transport(cls, value: str) -> str:
+        normalized = value.lower().strip()
+        if normalized not in {"gmail_api", "smtp"}:
+            raise ValueError("EMAIL_TRANSPORT must be one of: gmail_api, smtp")
         return normalized
 
     def ensure_runtime_dirs(self) -> None:

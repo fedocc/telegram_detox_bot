@@ -6,16 +6,20 @@ from pathlib import Path
 
 FIELDS = [
     ("AITUNNEL_API_KEY", True, ""),
-    ("SMTP_USERNAME", False, ""),
-    ("SMTP_PASSWORD", True, ""),
-    ("SMTP_TLS_MODE", False, "ssl"),
-    ("EMAIL_FROM", False, ""),
-    ("EMAIL_TO", False, ""),
     ("TG_API_ID", False, ""),
     ("TG_API_HASH", True, ""),
     ("TG_PHONE", False, ""),
     ("TIMEZONE", False, "Europe/Moscow"),
     ("DIGEST_TIME", False, "20:30"),
+]
+SMTP_FIELDS = [
+    ("SMTP_USERNAME", False, ""),
+    ("SMTP_PASSWORD", True, ""),
+    ("SMTP_TLS_MODE", False, "ssl"),
+]
+EMAIL_FIELDS = [
+    ("EMAIL_FROM", False, ""),
+    ("EMAIL_TO", False, ""),
 ]
 
 
@@ -29,15 +33,23 @@ def format_env(values: dict[str, str]) -> str:
 
 
 def main() -> None:
+    email_transport = input("Email transport [gmail_api]: ") or "gmail_api"
     values = {
         "AITUNNEL_BASE_URL": "https://api.aitunnel.ru/v1/",
         "AITUNNEL_MODEL": "claude-haiku-4.5",
+        "EMAIL_TRANSPORT": email_transport,
         "SMTP_HOST": "smtp.gmail.com",
         "SMTP_PORT": "465",
         "DATABASE_URL": "sqlite:///data/telegram_digest.db",
         "TG_SESSION_PATH": "data/telegram_digest.session",
     }
-    for name, secret, default in FIELDS:
+    if email_transport == "gmail_api":
+        values["GMAIL_OAUTH_CLIENT_SECRET_PATH"] = "secrets/google_oauth_client.json"  # noqa: S105
+        values["GMAIL_OAUTH_TOKEN_PATH"] = "data/gmail_oauth_token.json"  # noqa: S105
+        flow_fields = [*EMAIL_FIELDS, *FIELDS]
+    else:
+        flow_fields = [*SMTP_FIELDS, *EMAIL_FIELDS, *FIELDS]
+    for name, secret, default in flow_fields:
         hint = " (ssl = port 465, starttls = port 587)" if name == "SMTP_TLS_MODE" else ""
         prompt = f"{name}{hint}" + (f" [{default}]" if default else "") + ": "
         value = getpass.getpass(prompt) if secret else input(prompt)

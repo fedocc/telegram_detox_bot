@@ -6,7 +6,14 @@ from pathlib import Path
 
 def test_env_and_session_files_are_ignored_by_git() -> None:
     root = Path(__file__).resolve().parents[1]
-    targets = [".env", "data/telegram_digest.session", "data/telegram_digest.db", "logs/app.log"]
+    targets = [
+        ".env",
+        "data/telegram_digest.session",
+        "data/telegram_digest.db",
+        "logs/app.log",
+        "secrets/google_oauth_client.json",
+        "data/gmail_oauth_token.json",
+    ]
     result = subprocess.run(  # noqa: S603
         ["/usr/bin/git", "check-ignore", *targets],
         cwd=root,

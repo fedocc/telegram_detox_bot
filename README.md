@@ -35,6 +35,7 @@ make setup
 source .venv/bin/activate
 python -m app.cli.setup_env
 python -m app.cli.test_llm
+python -m app.cli.gmail_auth
 python -m app.cli.test_email
 python -m app.cli.telegram_login
 python -m app.cli.run
@@ -58,16 +59,37 @@ python -m app.cli.telegram_login
 
 Команда спросит Telegram code интерактивно и 2FA password через hidden prompt, если 2FA включена. Listener после login не запускается автоматически.
 
-## Gmail App Password
+## Gmail API setup
 
-Для V1 используется Gmail SMTP через App Password:
+Default email transport is Gmail API over HTTPS:
 
-- `SMTP_HOST=smtp.gmail.com`
-- `SMTP_PORT=465`
-- `SMTP_USERNAME`
-- `SMTP_PASSWORD`
 - `EMAIL_FROM`
 - `EMAIL_TO`
+- `EMAIL_TRANSPORT=gmail_api`
+- `GMAIL_OAUTH_CLIENT_SECRET_PATH=secrets/google_oauth_client.json`
+- `GMAIL_OAUTH_TOKEN_PATH=data/gmail_oauth_token.json`
+
+Setup:
+
+1. Create a Google Cloud project.
+2. Enable Gmail API.
+3. Create OAuth client: Desktop app.
+4. Download OAuth client JSON.
+5. Save it as `secrets/google_oauth_client.json`.
+6. Run `python -m app.cli.gmail_auth`.
+7. Complete Google login under the same account as `EMAIL_FROM`.
+8. Run `python -m app.cli.test_email`.
+
+OAuth scope is only `https://www.googleapis.com/auth/gmail.send`.
+
+## SMTP legacy mode
+
+SMTP is optional legacy transport. Set `EMAIL_TRANSPORT=smtp` and configure:
+
+- `SMTP_HOST=smtp.gmail.com`
+- `SMTP_PORT=465` with `SMTP_TLS_MODE=ssl`, or `SMTP_PORT=587` with `SMTP_TLS_MODE=starttls`
+- `SMTP_USERNAME`
+- `SMTP_PASSWORD`
 
 Проверка:
 
@@ -115,6 +137,7 @@ python -m app.cli.telegram_login
 python -m app.cli.run
 python -m app.cli.digest_now
 python -m app.cli.cleanup
+python -m app.cli.gmail_auth
 ```
 
 ## Docker
@@ -133,8 +156,10 @@ docker compose up -d
 2. Скопируйте код без `.env`, `data/`, `logs/`.
 3. Создайте `.env` на VPS через `python -m app.cli.setup_env` или безопасно перенесите локальный `.env`.
 4. Перенесите `data/telegram_digest.session` только по SSH/SCP на доверенный сервер.
-5. Выполните `chmod 600 data/telegram_digest.session .env`.
-6. Запустите `docker compose up -d`.
+5. Для Gmail API перенесите `secrets/google_oauth_client.json` и `data/gmail_oauth_token.json` только по защищённому каналу. Это секреты, их нельзя класть в Git.
+6. Выполните `chmod 600 data/telegram_digest.session .env secrets/google_oauth_client.json data/gmail_oauth_token.json`.
+7. На VPS сервис использует refresh token и не открывает browser.
+8. Запустите `docker compose up -d`.
 
 ## Как остановить сервис
 
@@ -163,8 +188,8 @@ rm -rf logs/*
 - Postgres поддерживается через `DATABASE_URL`.
 - Raw messages удаляются через 14 дней.
 - Digests хранятся 90 дней.
-- Тексты сообщений, API keys, SMTP credentials и session details не пишутся намеренно в логи; logging filter редактирует секретоподобные значения.
-- `.env`, session-файлы, data, logs и database files не должны попадать в Git/GitHub.
+- Тексты сообщений, API keys, SMTP credentials, OAuth tokens, OAuth client secrets и session details не пишутся намеренно в логи; logging filter редактирует секретоподобные значения.
+- `.env`, session-файлы, data, logs, secrets и database files не должны попадать в Git/GitHub.
 
 ## Тесты без Telegram и сети
 
