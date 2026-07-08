@@ -80,7 +80,9 @@ Setup:
 7. Complete Google login under the same account as `EMAIL_FROM`.
 8. Run `python -m app.cli.test_email`.
 
-OAuth scope is only `https://www.googleapis.com/auth/gmail.send`.
+OAuth scope is only `https://www.googleapis.com/auth/gmail.send`. With this minimum scope,
+`gmail_auth` cannot read the Gmail profile to verify the account. `test_email` is the
+real verification: it confirms the OAuth account can send as `EMAIL_FROM`.
 
 ## SMTP legacy mode
 
