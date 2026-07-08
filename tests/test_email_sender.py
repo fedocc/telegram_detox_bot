@@ -9,6 +9,7 @@ from email.policy import default
 from pathlib import Path
 
 import pytest
+from googleapiclient.errors import HttpError
 from pydantic import ValidationError
 
 from app.config import Settings
@@ -108,6 +109,31 @@ class FakeGmailService:
 
     def users(self):
         return FakeUsers(self)
+
+
+class FakeHttpResponse:
+    def __init__(self, status: int, reason: str = "Forbidden") -> None:
+        self.status = status
+        self.reason = reason
+
+
+def gmail_http_error(
+    status: int,
+    reason: str,
+    message: str,
+    *,
+    extra: dict | None = None,
+) -> HttpError:
+    payload = {
+        "error": {
+            "code": status,
+            "message": message,
+            "errors": [{"reason": reason, "message": message}],
+        }
+    }
+    if extra:
+        payload["error"].update(extra)
+    return HttpError(FakeHttpResponse(status), json.dumps(payload).encode("utf-8"))
 
 
 class FakeCredentials:
@@ -285,6 +311,79 @@ def test_gmail_api_sender_wraps_google_api_error_as_email_send_error(tmp_path, m
     monkeypatch.setattr("app.email.sender.build", lambda *args, **kwargs: service)
 
     with pytest.raises(EmailSendError, match="Gmail API send failed"):
+        GmailApiSender(settings).send("Subject", "plain", "<p>html</p>")
+
+
+def test_gmail_http_error_exposes_safe_status_reason(tmp_path, monkeypatch) -> None:
+    settings = gmail_settings(tmp_path)
+    token_file(settings.gmail_oauth_token_path)
+    error = gmail_http_error(
+        403,
+        "insufficientPermissions",
+        "Request had insufficient authentication scopes.",
+    )
+    service = FakeGmailService(error=error)
+    monkeypatch.setattr("app.email.sender.Credentials", FakeCredentials)
+    monkeypatch.setattr("app.email.sender.build", lambda *args, **kwargs: service)
+
+    with pytest.raises(EmailSendError) as exc_info:
+        GmailApiSender(settings).send("Subject", "plain", "<p>html</p>")
+
+    message = str(exc_info.value)
+    assert "status=403" in message
+    assert "reason=insufficientPermissions" in message
+    assert "message=Request had insufficient authentication scopes." in message
+
+
+def test_gmail_http_error_does_not_leak_tokens(tmp_path, monkeypatch) -> None:
+    settings = gmail_settings(tmp_path)
+    token_file(settings.gmail_oauth_token_path)
+    error = gmail_http_error(
+        403,
+        "insufficientPermissions",
+        "Request had insufficient authentication scopes.",
+        extra={
+            "access_token": "access-secret-value",
+            "refresh_token": "refresh-secret-value",
+            "client_secret": "client-secret-value",
+            "authorization": "Bearer bearer-secret-value",
+        },
+    )
+    service = FakeGmailService(error=error)
+    monkeypatch.setattr("app.email.sender.Credentials", FakeCredentials)
+    monkeypatch.setattr("app.email.sender.build", lambda *args, **kwargs: service)
+
+    with pytest.raises(EmailSendError) as exc_info:
+        GmailApiSender(settings).send("Subject", "plain", "<p>html</p>")
+
+    message = str(exc_info.value)
+    assert "access-secret-value" not in message
+    assert "refresh-secret-value" not in message
+    assert "client-secret-value" not in message
+    assert "bearer-secret-value" not in message
+
+
+def test_gmail_api_access_not_configured_hint(tmp_path, monkeypatch) -> None:
+    settings = gmail_settings(tmp_path)
+    token_file(settings.gmail_oauth_token_path)
+    error = gmail_http_error(403, "accessNotConfigured", "Gmail API has not been used.")
+    service = FakeGmailService(error=error)
+    monkeypatch.setattr("app.email.sender.Credentials", FakeCredentials)
+    monkeypatch.setattr("app.email.sender.build", lambda *args, **kwargs: service)
+
+    with pytest.raises(EmailSendError, match="enable Gmail API in Google Cloud project"):
+        GmailApiSender(settings).send("Subject", "plain", "<p>html</p>")
+
+
+def test_gmail_api_invalid_argument_hint(tmp_path, monkeypatch) -> None:
+    settings = gmail_settings(tmp_path)
+    token_file(settings.gmail_oauth_token_path)
+    error = gmail_http_error(400, "invalidArgument", "Invalid raw payload.")
+    service = FakeGmailService(error=error)
+    monkeypatch.setattr("app.email.sender.Credentials", FakeCredentials)
+    monkeypatch.setattr("app.email.sender.build", lambda *args, **kwargs: service)
+
+    with pytest.raises(EmailSendError, match="MIME/raw payload issue"):
         GmailApiSender(settings).send("Subject", "plain", "<p>html</p>")
 
 

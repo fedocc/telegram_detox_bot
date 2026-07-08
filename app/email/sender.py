@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import smtplib
 import ssl
@@ -13,16 +14,28 @@ try:
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
 except ImportError:  # pragma: no cover - exercised only without optional deps installed
     Request = None
     Credentials = None
     build = None
+    HttpError = None
 
 GMAIL_SEND_SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
 
 
 class EmailSendError(RuntimeError):
     pass
+
+
+GMAIL_ERROR_HINTS = {
+    (403, "insufficientPermissions"): "Delete Gmail OAuth token and rerun gmail_auth.",
+    (403, "accessNotConfigured"): "enable Gmail API in Google Cloud project.",
+    (400, "invalidArgument"): "Check MIME/raw payload issue.",
+    (401, "invalidCredentials"): "Delete Gmail OAuth token and rerun gmail_auth.",
+    (403, "forbidden"): "Check Gmail account or workspace restrictions.",
+    (403, "failedPrecondition"): "Check Gmail account or workspace restrictions.",
+}
 
 
 def _chmod_600(path: Path) -> None:
@@ -59,6 +72,41 @@ def _build_message(
     if html:
         msg.add_alternative(html, subtype="html")
     return msg
+
+
+def _safe_text(value: object, *, limit: int = 300) -> str:
+    text = str(value or "").replace("\n", " ").replace("\r", " ").strip()
+    for marker in ["access_token", "refresh_token", "client_secret", "Authorization", "Bearer"]:
+        if marker.lower() in text.lower():
+            return "[REDACTED]"
+    return text[:limit]
+
+
+def _gmail_http_error_summary(exc) -> str:
+    status = int(getattr(getattr(exc, "resp", None), "status", 0) or 0)
+    http_reason = _safe_text(getattr(getattr(exc, "resp", None), "reason", ""))
+    google_reason = http_reason
+    google_message = http_reason or "Gmail API request failed."
+    try:
+        payload = json.loads(exc.content.decode("utf-8"))
+        error = payload.get("error", {})
+        google_message = _safe_text(error.get("message") or google_message)
+        errors = error.get("errors") or []
+        if errors and isinstance(errors[0], dict):
+            google_reason = _safe_text(errors[0].get("reason") or google_reason)
+    except (AttributeError, TypeError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        google_message = google_message or "Gmail API request failed."
+
+    lines = [
+        "Gmail API send failed:",
+        f"status={status}",
+        f"reason={google_reason or 'unknown'}",
+        f"message={google_message or 'Gmail API request failed.'}",
+    ]
+    hint = GMAIL_ERROR_HINTS.get((status, google_reason))
+    if hint:
+        lines.append(f"hint={hint}")
+    return "\n".join(lines)
 
 
 class SmtpEmailSender:
@@ -155,6 +203,8 @@ class GmailApiSender:
         try:
             service = build("gmail", "v1", credentials=creds, cache_discovery=False)
             service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        except HttpError as exc:
+            raise EmailSendError(_gmail_http_error_summary(exc)) from exc
         except Exception as exc:
             raise EmailSendError("Gmail API send failed") from exc
 
