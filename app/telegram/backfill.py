@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from app.config import Settings
 from app.db import repository
@@ -26,8 +26,10 @@ class BackfillStats:
 
 
 def _message_date(message) -> datetime:
-    value = message.date or datetime.now().astimezone()
-    return value.astimezone() if value.tzinfo else value.astimezone()
+    value = message.date or datetime.now(UTC)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 async def _message_sender(message):
@@ -68,7 +70,8 @@ async def run_startup_backfill(
     if not settings.backfill_enabled:
         return stats
 
-    now = now or datetime.now().astimezone()
+    now = now or datetime.now(UTC)
+    now = now.astimezone(UTC) if now.tzinfo else now.replace(tzinfo=UTC)
     fallback_since = now - timedelta(hours=settings.backfill_hours)
     remaining = settings.backfill_max_total_messages
 
@@ -83,15 +86,23 @@ async def run_startup_backfill(
             latest_id = latest.message_id if latest else None
 
         per_chat_limit = min(settings.backfill_max_messages_per_chat, remaining)
-        async for tg_message in client.iter_messages(entity, limit=per_chat_limit):
+        iter_kwargs = {
+            "limit": per_chat_limit,
+            "reverse": True,
+        }
+        if latest_id is not None:
+            iter_kwargs["min_id"] = latest_id
+        else:
+            iter_kwargs["offset_date"] = fallback_since
+        async for tg_message in client.iter_messages(entity, **iter_kwargs):
             if remaining <= 0:
                 break
             message_id = int(tg_message.id)
             if latest_id is not None and message_id <= latest_id:
-                break
+                continue
             timestamp = _message_date(tg_message)
             if latest_id is None and timestamp < fallback_since:
-                break
+                continue
             sender = await _message_sender(tg_message)
             stored = telegram_message_to_stored_message(
                 tg_message,

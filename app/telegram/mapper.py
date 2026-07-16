@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from telethon.tl.types import Channel, Chat, MessageMediaDocument, MessageMediaPhoto, User
 
@@ -66,7 +66,7 @@ def telegram_message_to_stored_message(
         sender_id=str(getattr(sender, "id", "")) if sender else None,
         sender_name=display_name(sender) if sender else None,
         message_id=msg.id,
-        timestamp=(msg.date or datetime.now().astimezone()).astimezone(),
+        timestamp=(msg.date or datetime.now(UTC)).astimezone(UTC),
         is_outgoing=bool(msg.out),
         reply_to_message_id=getattr(msg, "reply_to_msg_id", None),
         text=text if mtype == MediaType.none else None,
@@ -86,5 +86,5 @@ async def event_to_stored_message(event) -> StoredMessage:
         chat=chat,
         sender=sender,
         chat_id=str(event.chat_id),
-        ingested_at=datetime.now().astimezone(),
+        ingested_at=datetime.now(UTC),
     )

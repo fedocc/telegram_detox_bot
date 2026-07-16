@@ -427,11 +427,14 @@ def test_non_text_media_does_not_trigger_llm_and_goes_to_manual_review(session, 
     repository.save_message(session, message)
     llm = FakeLLM()
 
-    handle_p0_candidate(session, message, llm, FakeEmail(), settings=settings)
+    email = FakeEmail()
+    handle_p0_candidate(session, message, llm, email, settings=settings)
 
     stored = repository.get_message(session, message.chat_id, message.message_id)
     assert llm.calls == 0
     assert stored.p0_review_candidate is True
+    assert len(email.sent) == 1
+    assert email.sent[0][0] == "[ПРОВЕРЬ] возможно важное личное сообщение"
 
 
 def test_group_message_without_routing_does_not_trigger_immediate_llm(session, settings) -> None:

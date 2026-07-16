@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import getpass
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 from telethon import TelegramClient, events
@@ -11,6 +12,7 @@ from app.config import Settings
 from app.db import repository
 from app.email.sender import EmailSender
 from app.llm.client import HaikuClient
+from app.services.maintenance import recover_missed_daily_digests
 from app.services.p0 import handle_p0_candidate
 from app.telegram.backfill import run_startup_backfill
 from app.telegram.mapper import event_to_stored_message
@@ -49,13 +51,6 @@ async def run_listener(settings: Settings, session_factory) -> None:
 
     llm = HaikuClient(settings)
     email = EmailSender(settings)
-    await run_startup_backfill(
-        client=client,
-        settings=settings,
-        session_factory=session_factory,
-        llm=llm,
-        email_sender=email,
-    )
 
     @client.on(events.NewMessage(incoming=None, outgoing=None))
     async def handler(event) -> None:
@@ -63,5 +58,21 @@ async def run_listener(settings: Settings, session_factory) -> None:
         with session_factory() as session:
             repository.save_message(session, stored)
             handle_p0_candidate(session, stored, llm, email, settings=settings)
+
+    await run_startup_backfill(
+        client=client,
+        settings=settings,
+        session_factory=session_factory,
+        llm=llm,
+        email_sender=email,
+    )
+    with session_factory() as session:
+        recover_missed_daily_digests(
+            session,
+            llm,
+            email,
+            settings.timezone,
+            datetime.now(UTC),
+        )
 
     await client.run_until_disconnected()

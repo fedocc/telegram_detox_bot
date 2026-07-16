@@ -44,7 +44,11 @@ class FakeTelegramMessage:
 
 
 class FakeTelegramClient:
-    def __init__(self, dialogs: list[FakeDialog], messages: dict[int, list[FakeTelegramMessage]]) -> None:
+    def __init__(
+        self,
+        dialogs: list[FakeDialog],
+        messages: dict[int, list[FakeTelegramMessage]],
+    ) -> None:
         self.dialogs = dialogs
         self.messages = messages
 
@@ -52,9 +56,23 @@ class FakeTelegramClient:
         for dialog in self.dialogs:
             yield dialog
 
-    async def iter_messages(self, entity, limit: int):
+    async def iter_messages(
+        self,
+        entity,
+        limit: int,
+        reverse: bool = False,
+        min_id: int | None = None,
+        offset_date: datetime | None = None,
+    ):
         count = 0
-        for message in self.messages.get(entity.id, []):
+        rows = sorted(self.messages.get(entity.id, []), key=lambda item: item.id)
+        if not reverse:
+            rows = list(reversed(rows))
+        for message in rows:
+            if min_id is not None and message.id <= min_id:
+                continue
+            if offset_date is not None and message.date < offset_date:
+                continue
             if count >= limit:
                 break
             count += 1
@@ -125,7 +143,12 @@ async def test_backfill_inserts_missed_messages(settings, session_factory, now) 
     client = _client_with_private_messages(
         [
             FakeTelegramMessage(message_id=2, text="new", timestamp=now, sender=sender),
-            FakeTelegramMessage(message_id=1, text="old", timestamp=now - timedelta(minutes=5), sender=sender),
+            FakeTelegramMessage(
+                message_id=1,
+                text="old",
+                timestamp=now - timedelta(minutes=5),
+                sender=sender,
+            ),
         ]
     )
 
@@ -139,7 +162,11 @@ async def test_backfill_inserts_missed_messages(settings, session_factory, now) 
     )
 
     with session_factory() as session:
-        rows = repository.messages_between(session, now - timedelta(days=1), now + timedelta(days=1))
+        rows = repository.messages_between(
+            session,
+            now - timedelta(days=1),
+            now + timedelta(days=1),
+        )
     assert stats.messages_inserted == 2
     assert {(row.chat_id, row.message_id) for row in rows} == {("1", 1), ("1", 2)}
     assert all(row.is_backfilled for row in rows)
@@ -177,7 +204,14 @@ async def test_backfill_dedupes_by_chat_id_and_message_id(settings, session_fact
     with session_factory() as session:
         repository.save_message(session, msg(chat_id="2", message_id=1, text="other chat"))
     client = _client_with_private_messages(
-        [FakeTelegramMessage(message_id=1, text="same id different chat", timestamp=now, sender=sender)]
+        [
+            FakeTelegramMessage(
+                message_id=1,
+                text="same id different chat",
+                timestamp=now,
+                sender=sender,
+            )
+        ]
     )
 
     stats = await run_startup_backfill(
@@ -216,6 +250,38 @@ async def test_backfill_respects_max_total_messages(settings, session_factory, n
     )
 
     assert stats.messages_inserted == 2
+
+
+async def test_backfill_oldest_first_after_latest_does_not_skip_older_missed_messages(
+    settings,
+    session_factory,
+    now,
+) -> None:
+    settings.backfill_max_messages_per_chat = 2
+    sender = _user(42, "Sender")
+    with session_factory() as session:
+        repository.save_message(session, msg(chat_id="1", message_id=10, text="last stored"))
+    client = _client_with_private_messages(
+        [
+            FakeTelegramMessage(message_id=13, text="newest", timestamp=now, sender=sender),
+            FakeTelegramMessage(message_id=12, text="middle", timestamp=now, sender=sender),
+            FakeTelegramMessage(message_id=11, text="oldest missed", timestamp=now, sender=sender),
+        ]
+    )
+
+    await run_startup_backfill(
+        client=client,
+        settings=settings,
+        session_factory=session_factory,
+        llm=FakeP0LLM(),
+        email_sender=FakeEmail(),
+        now=now,
+    )
+
+    with session_factory() as session:
+        assert repository.get_message(session, "1", 11) is not None
+        assert repository.get_message(session, "1", 12) is not None
+        assert repository.get_message(session, "1", 13) is None
 
 
 async def test_old_backfilled_messages_do_not_trigger_immediate_p0_spam(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from app.db import repository
@@ -14,6 +14,7 @@ from app.services.digest import (
     generate_digest,
     send_daily_digest_pipeline,
 )
+from app.services.maintenance import recover_missed_daily_digests
 from tests.fixtures.messages import msg
 
 
@@ -152,8 +153,16 @@ def test_multiple_private_messages_from_same_sender_render_as_one_line(now) -> N
     digest = fallback_digest(
         date(2026, 7, 7),
         [
-            msg(message_id=1, text="еду в Китай", timestamp=datetime.fromisoformat("2026-07-07T18:42:00+03:00")),
-            msg(message_id=2, text="до 15 августа", timestamp=datetime.fromisoformat("2026-07-07T19:10:00+03:00")),
+            msg(
+                message_id=1,
+                text="еду в Китай",
+                timestamp=datetime.fromisoformat("2026-07-07T18:42:00+03:00"),
+            ),
+            msg(
+                message_id=2,
+                text="до 15 августа",
+                timestamp=datetime.fromisoformat("2026-07-07T19:10:00+03:00"),
+            ),
         ],
     )
 
@@ -860,7 +869,11 @@ def test_new_messages_after_successful_digest_appear_in_next_digest(session) -> 
 def test_processed_digested_messages_are_excluded_from_next_window(session) -> None:
     message = msg(message_id=704, text="done")
     repository.save_message(session, message)
-    repository.mark_messages_digested(session, [message], datetime.fromisoformat("2026-07-07T20:30:00+03:00"))
+    repository.mark_messages_digested(
+        session,
+        [message],
+        datetime.fromisoformat("2026-07-07T20:30:00+03:00"),
+    )
 
     rows = repository.messages_between(
         session,
@@ -868,6 +881,87 @@ def test_processed_digested_messages_are_excluded_from_next_window(session) -> N
     )
 
     assert rows == []
+
+
+def test_day_bounds_are_local_day_converted_to_utc() -> None:
+    start, end = day_bounds(date(2026, 7, 7), "Europe/Moscow")
+
+    assert start == datetime(2026, 7, 6, 21, 0, tzinfo=UTC)
+    assert end == datetime(2026, 7, 7, 21, 0, tzinfo=UTC)
+
+
+def test_digest_query_uses_utc_internal_window_for_local_day(session) -> None:
+    repository.save_message(
+        session,
+        msg(
+            message_id=801,
+            text="local midnight",
+            timestamp=datetime.fromisoformat("2026-07-07T00:30:00+03:00"),
+        ),
+    )
+
+    digest = generate_digest(session, FakeLLM(), date(2026, 7, 7), "Europe/Moscow")
+
+    refs = {
+        (ref.chat_id, ref.message_id)
+        for item in digest.direct_messages
+        for ref in item.source_refs
+    }
+    assert ("1", 801) in refs
+
+
+def test_missed_daily_digest_recovery_sends_previous_undigested_day(session) -> None:
+    email = FakeEmail()
+    repository.save_message(
+        session,
+        msg(
+            message_id=802,
+            text="missed yesterday",
+            timestamp=datetime.fromisoformat("2026-07-06T18:00:00+03:00"),
+        ),
+    )
+
+    recovered = recover_missed_daily_digests(
+        session,
+        FakeLLM(),
+        email,
+        "Europe/Moscow",
+        datetime.fromisoformat("2026-07-07T09:00:00+03:00"),
+    )
+
+    assert recovered == [date(2026, 7, 6)]
+    assert len(email.sent) == 1
+    rows = repository.messages_between(
+        session,
+        *day_bounds(date(2026, 7, 6), "Europe/Moscow"),
+        only_undigested=False,
+    )
+    assert rows[0].digested_at is not None
+
+
+def test_pending_digest_prevents_manual_duplicate_send(session) -> None:
+    repository.save_message(session, msg(message_id=803, text="pending"))
+    email = FakeEmail(fail=True)
+    first = send_daily_digest_pipeline(
+        session,
+        FakeLLM(),
+        email,
+        date(2026, 7, 7),
+        "Europe/Moscow",
+        max_email_attempts=1,
+    )
+    second_email = FakeEmail()
+    second = send_daily_digest_pipeline(
+        session,
+        FakeLLM(),
+        second_email,
+        date(2026, 7, 7),
+        "Europe/Moscow",
+    )
+
+    assert first.email_status == "pending"
+    assert second.email_status == "pending"
+    assert second_email.sent == []
 
 
 def test_aggregation_uses_configured_limits(session) -> None:
@@ -908,8 +1002,10 @@ def test_daily_digest_uses_grouped_batch_summarization(session) -> None:
     assert all("messages" in chat for chat in llm.payloads[0]["chats"])
 
 
-def test_startup_backfill_runs_before_live_handler_registration() -> None:
+def test_live_handler_is_registered_before_startup_backfill() -> None:
     source = Path("app/telegram/client.py").read_text(encoding="utf-8")
 
     assert "run_startup_backfill" in source
-    assert source.index("run_startup_backfill") < source.index("@client.on")
+    backfill_call = source.index("await run_startup_backfill")
+    assert source.index("@client.on") < backfill_call
+    assert backfill_call < source.index("run_until_disconnected")

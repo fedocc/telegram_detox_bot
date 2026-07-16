@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time as time_module
 from collections import defaultdict
-from datetime import date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
@@ -54,8 +54,8 @@ def _chat_type_value(row) -> str:
 def day_bounds(day: date, timezone: str) -> tuple[datetime, datetime]:
     tz = ZoneInfo(timezone)
     start = datetime.combine(day, time.min, tzinfo=tz)
-    end = datetime.combine(day, time.max, tzinfo=tz)
-    return start, end
+    end = datetime.combine(day + timedelta(days=1), time.min, tzinfo=tz)
+    return start.astimezone(UTC), end.astimezone(UTC)
 
 
 def build_structured_payload(
@@ -441,6 +441,11 @@ def send_daily_digest_pipeline(
     *,
     max_email_attempts: int = 3,
 ) -> DailyDigest:
+    pending = repository.pending_digest_for_date(session, day.isoformat())
+    if pending:
+        digest = repository.digest_from_record(pending)
+        digest.email_status = pending.email_status
+        return digest
     start, end = day_bounds(day, timezone)
     rows = repository.messages_between(
         session,

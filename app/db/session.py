@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from sqlalchemy import create_engine
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
@@ -39,9 +38,13 @@ def init_db(settings: Settings) -> sessionmaker[Session]:
             if "ingested_at" not in columns:
                 connection.execute(text("ALTER TABLE messages ADD COLUMN ingested_at DATETIME"))
             if "p0_classified_at" not in columns:
-                connection.execute(text("ALTER TABLE messages ADD COLUMN p0_classified_at DATETIME"))
+                connection.execute(
+                    text("ALTER TABLE messages ADD COLUMN p0_classified_at DATETIME")
+                )
             if "p0_classification" not in columns:
-                connection.execute(text("ALTER TABLE messages ADD COLUMN p0_classification VARCHAR(32)"))
+                connection.execute(
+                    text("ALTER TABLE messages ADD COLUMN p0_classification VARCHAR(32)")
+                )
     return sessionmaker(engine, expire_on_commit=False, future=True)
 
 

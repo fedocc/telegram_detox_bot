@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import delete, func, select, update
@@ -26,12 +26,19 @@ def _db_time(value: datetime) -> datetime:
     return value.replace(tzinfo=None) if value.tzinfo else value
 
 
+def _utc_db_time(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)
+
+
 def save_message(session: Session, message: StoredMessage) -> None:
     values = message.model_dump(mode="python")
     values["chat_type"] = message.chat_type.value
     values["media_type"] = message.media_type.value
+    values["timestamp"] = _utc_db_time(values["timestamp"])
     if values.get("ingested_at") is not None:
-        values["ingested_at"] = _db_time(values["ingested_at"])
+        values["ingested_at"] = _utc_db_time(values["ingested_at"])
     if session.bind and session.bind.dialect.name == "sqlite":
         stmt = sqlite_insert(MessageRecord).values(**values)
         stmt = stmt.on_conflict_do_nothing(index_elements=["chat_id", "message_id"])
@@ -97,7 +104,7 @@ def mark_p0_classified(
 ) -> None:
     record = get_message(session, chat_id, message_id)
     if record:
-        record.p0_classified_at = _db_time(classified_at)
+        record.p0_classified_at = _utc_db_time(classified_at)
         record.p0_classification = status
         session.commit()
 
@@ -107,7 +114,7 @@ def p0_llm_calls_since(session: Session, since: datetime) -> int:
         session.scalar(
             select(func.count())
             .select_from(MessageRecord)
-            .where(MessageRecord.p0_classified_at >= _db_time(since))
+            .where(MessageRecord.p0_classified_at >= _utc_db_time(since))
         )
         or 0
     )
@@ -131,6 +138,8 @@ def messages_between(
     only_undigested: bool = True,
     limit: int | None = None,
 ) -> list[MessageRecord]:
+    start = _utc_db_time(start)
+    end = _utc_db_time(end)
     stmt = (
         select(MessageRecord)
         .where(MessageRecord.timestamp >= start, MessageRecord.timestamp < end)
@@ -148,7 +157,7 @@ def mark_messages_digested(session: Session, rows: list, digested_at: datetime) 
     if not refs:
         return 0
     count = 0
-    digested_at = _db_time(digested_at)
+    digested_at = _utc_db_time(digested_at)
     for chat_id, message_id in refs:
         result = session.execute(
             update(MessageRecord)
@@ -169,7 +178,7 @@ def save_digest(
     subject: str = "",
     text: str = "",
 ) -> DigestRecord:
-    now = _db_time(datetime.now().astimezone())
+    now = _utc_db_time(datetime.now(UTC))
     record = DigestRecord(
         digest_date=digest.date,
         created_at=now,
@@ -203,7 +212,7 @@ def mark_digest_pending(
     error: Exception | str,
     now: datetime,
 ) -> None:
-    now = _db_time(now)
+    now = _utc_db_time(now)
     record.email_status = "pending"
     record.attempts += 1
     record.last_error_safe = safe_error(error)
@@ -223,8 +232,30 @@ def pending_digests(session: Session) -> list[DigestRecord]:
     )
 
 
+def pending_digest_for_date(session: Session, digest_date: str) -> DigestRecord | None:
+    return session.scalar(
+        select(DigestRecord)
+        .where(DigestRecord.digest_date == digest_date)
+        .where(DigestRecord.email_status.in_(["pending", "sending"]))
+        .order_by(DigestRecord.created_at.desc())
+        .limit(1)
+    )
+
+
+def undigested_message_timestamps_before(session: Session, before: datetime) -> list[datetime]:
+    before = _utc_db_time(before)
+    return list(
+        session.scalars(
+            select(MessageRecord.timestamp)
+            .where(MessageRecord.digested_at.is_(None))
+            .where(MessageRecord.timestamp < before)
+            .order_by(MessageRecord.timestamp)
+        )
+    )
+
+
 def retry_pending_digests(session: Session, email_sender, now: datetime) -> int:
-    now = _db_time(now)
+    now = _utc_db_time(now)
     release_stale_digest_claims(session, now)
     candidates = list(
         session.scalars(
@@ -249,7 +280,7 @@ def claim_pending_digest(
     now: datetime,
     claim_token: str,
 ) -> DigestRecord | None:
-    now = _db_time(now)
+    now = _utc_db_time(now)
     result = session.execute(
         update(DigestRecord)
         .where(DigestRecord.id == record_id)
@@ -295,7 +326,7 @@ def send_claimed_digest(
 
 
 def release_stale_digest_claims(session: Session, now: datetime, stale_minutes: int = 10) -> int:
-    cutoff = _db_time(now) - timedelta(minutes=stale_minutes)
+    cutoff = _utc_db_time(now) - timedelta(minutes=stale_minutes)
     result = session.execute(
         update(DigestRecord)
         .where(DigestRecord.email_status == "sending")
@@ -326,7 +357,7 @@ def create_alert_job(
     )
     if existing:
         return existing
-    now = _db_time(now)
+    now = _utc_db_time(now)
     job = AlertJob(
         chat_id=chat_id,
         message_id=message_id,
@@ -360,7 +391,7 @@ def claim_pending_alert(
     now: datetime,
     claim_token: str,
 ) -> AlertJob | None:
-    now = _db_time(now)
+    now = _utc_db_time(now)
     result = session.execute(
         update(AlertJob)
         .where(AlertJob.id == job_id)
@@ -398,7 +429,7 @@ def _mark_alert_pending(
 
 def _mark_alert_sent(session: Session, job: AlertJob, now: datetime) -> None:
     job.status = "sent"
-    job.sent_at = _db_time(now)
+    job.sent_at = _utc_db_time(now)
     job.last_error_safe = None
     job.next_attempt_at = None
     job.claimed_at = None
@@ -453,7 +484,7 @@ def send_claimed_alert(
 
 
 def retry_pending_alerts(session: Session, email_sender, now: datetime) -> int:
-    now = _db_time(now)
+    now = _utc_db_time(now)
     release_stale_alert_claims(session, now)
     job_ids = list(
         session.scalars(
@@ -473,7 +504,7 @@ def retry_pending_alerts(session: Session, email_sender, now: datetime) -> int:
 
 
 def release_stale_alert_claims(session: Session, now: datetime, stale_minutes: int = 10) -> int:
-    cutoff = _db_time(now) - timedelta(minutes=stale_minutes)
+    cutoff = _utc_db_time(now) - timedelta(minutes=stale_minutes)
     result = session.execute(
         update(AlertJob)
         .where(AlertJob.status == "sending")
@@ -492,7 +523,9 @@ def cleanup_old(
 ) -> tuple[int, int]:
     raw_cutoff = now - timedelta(days=raw_days)
     digest_cutoff = now - timedelta(days=digest_days)
-    raw = session.execute(delete(MessageRecord).where(MessageRecord.timestamp < raw_cutoff)).rowcount
+    raw = session.execute(
+        delete(MessageRecord).where(MessageRecord.timestamp < raw_cutoff)
+    ).rowcount
     digests = session.execute(
         delete(DigestRecord).where(DigestRecord.created_at < digest_cutoff)
     ).rowcount

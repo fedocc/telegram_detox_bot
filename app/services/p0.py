@@ -245,6 +245,17 @@ def handle_p0_candidate(
 
     if _is_non_text_media(message):
         repository.mark_p0_review_candidate(session, message.chat_id, message.message_id)
+        if _is_private(message):
+            body, html = _fallback_body(message)
+            return _send_immediate_alert(
+                session,
+                message,
+                email_sender,
+                subject="[ПРОВЕРЬ] возможно важное личное сообщение",
+                body=body,
+                html=html,
+                alert_type="review_private",
+            )
         return False
 
     obvious = is_p0_candidate(message.text, message.caption)
