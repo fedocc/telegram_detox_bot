@@ -252,6 +252,64 @@ async def test_backfill_respects_max_total_messages(settings, session_factory, n
     assert stats.messages_inserted == 2
 
 
+async def test_backfill_pending_chat_keeps_frozen_window_after_total_limit(
+    settings,
+    session_factory,
+    now,
+) -> None:
+    settings.backfill_max_total_messages = 1
+    sender = _user(42, "Sender")
+    first = _user(1, "First")
+    second = _user(2, "Second")
+    old_time = now - timedelta(hours=2)
+    client = FakeTelegramClient(
+        [FakeDialog(1, first), FakeDialog(2, second)],
+        {
+            1: [FakeTelegramMessage(message_id=1, text="first", timestamp=old_time, sender=sender)],
+            2: [
+                FakeTelegramMessage(
+                    message_id=1,
+                    text="second",
+                    timestamp=old_time,
+                    sender=sender,
+                )
+            ],
+        },
+    )
+
+    first_stats = await run_startup_backfill(
+        client=client,
+        settings=settings,
+        session_factory=session_factory,
+        llm=FakeP0LLM(),
+        email_sender=FakeEmail(),
+        now=now,
+    )
+    settings.backfill_max_total_messages = 10
+    second_stats = await run_startup_backfill(
+        client=client,
+        settings=settings,
+        session_factory=session_factory,
+        llm=FakeP0LLM(),
+        email_sender=FakeEmail(),
+        now=now + timedelta(hours=settings.backfill_hours + 1),
+    )
+
+    with session_factory() as session:
+        assert repository.get_message(session, "1", 1) is not None
+        assert repository.get_message(session, "2", 1) is not None
+        rows = repository.messages_between(
+            session,
+            now - timedelta(days=2),
+            now + timedelta(days=2),
+            only_undigested=False,
+        )
+    assert first_stats.messages_inserted == 1
+    assert second_stats.messages_inserted == 1
+    assert len([(row.chat_id, row.message_id) for row in rows]) == 2
+    assert len({(row.chat_id, row.message_id) for row in rows}) == 2
+
+
 async def test_backfill_oldest_first_after_latest_does_not_skip_older_missed_messages(
     settings,
     session_factory,

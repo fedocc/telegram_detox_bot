@@ -45,6 +45,25 @@ def init_db(settings: Settings) -> sessionmaker[Session]:
                 connection.execute(
                     text("ALTER TABLE messages ADD COLUMN p0_classification VARCHAR(32)")
                 )
+            if "claimed_digest_id" not in columns:
+                connection.execute(
+                    text("ALTER TABLE messages ADD COLUMN claimed_digest_id INTEGER")
+                )
+                connection.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_messages_claimed_digest_id "
+                         "ON messages (claimed_digest_id)")
+                )
+            digest_columns = {
+                row[1]
+                for row in connection.execute(text("PRAGMA table_info(digests)")).fetchall()
+            }
+            if "digest_key" not in digest_columns:
+                connection.execute(text("ALTER TABLE digests ADD COLUMN digest_key VARCHAR(256)"))
+                connection.execute(
+                    text("CREATE UNIQUE INDEX IF NOT EXISTS uq_digest_key ON digests (digest_key)")
+                )
+            if "delivery_id" not in digest_columns:
+                connection.execute(text("ALTER TABLE digests ADD COLUMN delivery_id VARCHAR(256)"))
     return sessionmaker(engine, expire_on_commit=False, future=True)
 
 

@@ -38,13 +38,17 @@ class MessageRecord(Base):
         nullable=True,
     )
     p0_classification: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    claimed_digest_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
 
 class DigestRecord(Base):
     __tablename__ = "digests"
+    __table_args__ = (UniqueConstraint("digest_key", name="uq_digest_key"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     digest_date: Mapped[str] = mapped_column(String(16), index=True)
+    digest_key: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    delivery_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     subject: Mapped[str] = mapped_column(String(512), default="")
     text_payload: Mapped[str] = mapped_column(Text, default="")
@@ -58,6 +62,23 @@ class DigestRecord(Base):
     last_error_safe: Mapped[str | None] = mapped_column(Text, nullable=True)
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class BackfillState(Base):
+    __tablename__ = "backfill_states"
+    __table_args__ = (UniqueConstraint("chat_id", name="uq_backfill_state_chat"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[str] = mapped_column(String(128), index=True)
+    chat_title: Mapped[str] = mapped_column(String(512))
+    chat_type: Mapped[str] = mapped_column(String(32), default="group")
+    window_start_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    window_end_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    last_processed_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    messages_processed: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class AlertJob(Base):

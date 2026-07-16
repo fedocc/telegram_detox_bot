@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from uuid import uuid4
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
-from app.db.tables import AlertJob, DigestRecord, MessageRecord
+from app.db.tables import AlertJob, BackfillState, DigestRecord, MessageRecord
 from app.models.schemas import DailyDigest, StoredMessage
 
 
@@ -81,6 +82,64 @@ def latest_message_for_chat(session: Session, chat_id: str) -> MessageRecord | N
     )
 
 
+def ensure_backfill_state(
+    session: Session,
+    *,
+    chat_id: str,
+    chat_title: str,
+    chat_type: str,
+    window_start_utc: datetime,
+    window_end_utc: datetime,
+    last_processed_message_id: int | None,
+) -> BackfillState:
+    existing = session.scalar(select(BackfillState).where(BackfillState.chat_id == chat_id))
+    if existing:
+        return existing
+    now = _utc_db_time(datetime.now(UTC))
+    state = BackfillState(
+        chat_id=chat_id,
+        chat_title=chat_title,
+        chat_type=chat_type,
+        window_start_utc=_utc_db_time(window_start_utc),
+        window_end_utc=_utc_db_time(window_end_utc),
+        completed=False,
+        last_processed_message_id=last_processed_message_id,
+        messages_processed=0,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(state)
+    session.commit()
+    return state
+
+
+def pending_backfill_states(session: Session) -> list[BackfillState]:
+    return list(
+        session.scalars(
+            select(BackfillState)
+            .where(BackfillState.completed.is_(False))
+            .order_by(BackfillState.updated_at, BackfillState.id)
+        )
+    )
+
+
+def advance_backfill_state(
+    session: Session,
+    state: BackfillState,
+    *,
+    last_processed_message_id: int | None,
+    completed: bool,
+    increment_processed: bool,
+) -> None:
+    if last_processed_message_id is not None:
+        state.last_processed_message_id = last_processed_message_id
+    state.completed = completed
+    if increment_processed:
+        state.messages_processed += 1
+    state.updated_at = _utc_db_time(datetime.now(UTC))
+    session.commit()
+
+
 def mark_alert_sent(session: Session, chat_id: str, message_id: int) -> None:
     record = get_message(session, chat_id, message_id)
     if record:
@@ -147,9 +206,20 @@ def messages_between(
     )
     if only_undigested:
         stmt = stmt.where(MessageRecord.digested_at.is_(None))
+        stmt = stmt.where(MessageRecord.claimed_digest_id.is_(None))
     if limit is not None:
         stmt = stmt.limit(limit)
     return list(session.scalars(stmt))
+
+
+def messages_claimed_by_digest(session: Session, digest_id: int) -> list[MessageRecord]:
+    return list(
+        session.scalars(
+            select(MessageRecord)
+            .where(MessageRecord.claimed_digest_id == digest_id)
+            .order_by(MessageRecord.chat_title, MessageRecord.timestamp, MessageRecord.message_id)
+        )
+    )
 
 
 def mark_messages_digested(session: Session, rows: list, digested_at: datetime) -> int:
@@ -163,11 +233,96 @@ def mark_messages_digested(session: Session, rows: list, digested_at: datetime) 
             update(MessageRecord)
             .where(MessageRecord.chat_id == chat_id)
             .where(MessageRecord.message_id == message_id)
-            .values(digested_at=digested_at)
+            .values(digested_at=digested_at, claimed_digest_id=None)
         )
         count += int(result.rowcount or 0)
     session.commit()
     return count
+
+
+def _digest_key_for_rows(digest_date: str, rows: list) -> str:
+    refs = sorted((row.chat_id, row.message_id) for row in rows)
+    material = json.dumps([digest_date, refs], ensure_ascii=True, separators=(",", ":"))
+    return f"digest:{digest_date}:{sha256(material.encode('utf-8')).hexdigest()}"
+
+
+def _delivery_id_for_key(digest_key: str) -> str:
+    digest_hash = sha256(digest_key.encode("utf-8")).hexdigest()
+    return f"<telegram-digest-{digest_hash}@local>"
+
+
+def claim_digest_run_for_rows(
+    session: Session,
+    *,
+    digest_date: str,
+    rows: list[MessageRecord],
+) -> tuple[DigestRecord | None, list[MessageRecord], bool]:
+    if not rows:
+        return None, [], False
+    digest_key = _digest_key_for_rows(digest_date, rows)
+    existing = session.scalar(select(DigestRecord).where(DigestRecord.digest_key == digest_key))
+    if existing:
+        return existing, messages_claimed_by_digest(session, existing.id), False
+
+    now = _utc_db_time(datetime.now(UTC))
+    record = DigestRecord(
+        digest_date=digest_date,
+        digest_key=digest_key,
+        delivery_id=_delivery_id_for_key(digest_key),
+        created_at=now,
+        subject="",
+        text_payload="",
+        json_payload=DailyDigest(date=digest_date).model_dump_json(),
+        html_payload="",
+        generated_by="llm",
+        email_status="pending",
+        attempts=0,
+        next_attempt_at=now,
+    )
+    session.add(record)
+    try:
+        session.flush()
+        claimed_refs: list[tuple[str, int]] = []
+        for row in rows:
+            result = session.execute(
+                update(MessageRecord)
+                .where(MessageRecord.chat_id == row.chat_id)
+                .where(MessageRecord.message_id == row.message_id)
+                .where(MessageRecord.digested_at.is_(None))
+                .where(MessageRecord.claimed_digest_id.is_(None))
+                .values(claimed_digest_id=record.id)
+            )
+            if result.rowcount:
+                claimed_refs.append((row.chat_id, row.message_id))
+        if not claimed_refs:
+            session.rollback()
+            return None, [], False
+        session.commit()
+    except Exception:
+        session.rollback()
+        existing = session.scalar(select(DigestRecord).where(DigestRecord.digest_key == digest_key))
+        if existing:
+            return existing, messages_claimed_by_digest(session, existing.id), False
+        raise
+    return record, messages_claimed_by_digest(session, record.id), True
+
+
+def update_digest_payload(
+    session: Session,
+    record: DigestRecord,
+    digest: DailyDigest,
+    *,
+    subject: str,
+    text: str,
+    html: str,
+) -> None:
+    record.subject = subject
+    record.text_payload = text
+    record.html_payload = html
+    record.json_payload = digest.model_dump_json()
+    record.generated_by = digest.generated_by
+    record.error_summary = digest.error_summary
+    session.commit()
 
 
 def save_digest(
@@ -181,6 +336,8 @@ def save_digest(
     now = _utc_db_time(datetime.now(UTC))
     record = DigestRecord(
         digest_date=digest.date,
+        digest_key=None,
+        delivery_id=f"<telegram-digest-{uuid4().hex}@local>",
         created_at=now,
         subject=subject,
         text_payload=text,
@@ -203,6 +360,21 @@ def mark_digest_sent(session: Session, record: DigestRecord) -> None:
     record.next_attempt_at = None
     record.claimed_at = None
     record.claim_token = None
+    session.commit()
+
+
+def finalize_digest_sent(session: Session, record: DigestRecord, sent_at: datetime) -> None:
+    sent_at = _utc_db_time(sent_at)
+    record.email_status = "sent"
+    record.last_error_safe = None
+    record.next_attempt_at = None
+    record.claimed_at = None
+    record.claim_token = None
+    session.execute(
+        update(MessageRecord)
+        .where(MessageRecord.claimed_digest_id == record.id)
+        .values(digested_at=sent_at, claimed_digest_id=None)
+    )
     session.commit()
 
 
@@ -317,11 +489,19 @@ def send_claimed_digest(
     if not record:
         return False
     try:
-        email_sender.send(record.subject, record.text_payload, record.html_payload)
+        try:
+            email_sender.send(
+                record.subject,
+                record.text_payload,
+                record.html_payload,
+                message_id=record.delivery_id,
+            )
+        except TypeError:
+            email_sender.send(record.subject, record.text_payload, record.html_payload)
     except Exception as exc:
         mark_digest_pending(session, record, exc, now)
         return False
-    mark_digest_sent(session, record)
+    finalize_digest_sent(session, record, now)
     return True
 
 

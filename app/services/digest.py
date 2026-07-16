@@ -454,6 +454,20 @@ def send_daily_digest_pipeline(
         limit=MAX_MESSAGES_PER_DIGEST_WINDOW + 1,
     )
     rows_for_digest = rows[:MAX_MESSAGES_PER_DIGEST_WINDOW]
+    if not rows_for_digest:
+        return DailyDigest(date=day.isoformat(), email_status="sent")
+    record, claimed_rows, created = repository.claim_digest_run_for_rows(
+        session,
+        digest_date=day.isoformat(),
+        rows=rows_for_digest,
+    )
+    if record is None:
+        return DailyDigest(date=day.isoformat(), email_status="sent")
+    if not created:
+        digest = repository.digest_from_record(record)
+        digest.email_status = record.email_status
+        return digest
+    rows_for_digest = claimed_rows
     digest = generate_digest(session, llm, day, timezone, rows=rows_for_digest)
     if len(rows) > MAX_MESSAGES_PER_DIGEST_WINDOW:
         digest.review.append(
@@ -470,18 +484,23 @@ def send_daily_digest_pipeline(
     text = render_plain_text(digest)
     subject = _subject_for(digest)
     digest.email_status = "pending"
-    record = repository.save_digest(session, digest, html, subject=subject, text=text)
+    repository.update_digest_payload(
+        session,
+        record,
+        digest,
+        subject=subject,
+        text=text,
+        html=html,
+    )
     now = datetime.now().astimezone()
     for attempt in range(max_email_attempts):
         try:
-            email_sender.send(subject, text, html)
+            try:
+                email_sender.send(subject, text, html, message_id=record.delivery_id)
+            except TypeError:
+                email_sender.send(subject, text, html)
             digest.email_status = "sent"
-            repository.mark_digest_sent(session, record)
-            repository.mark_messages_digested(
-                session,
-                rows_for_digest,
-                datetime.now().astimezone(),
-            )
+            repository.finalize_digest_sent(session, record, datetime.now().astimezone())
             return digest
         except EmailSendError as exc:
             repository.mark_digest_pending(session, record, exc, now)

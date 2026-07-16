@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 from app.db import repository
+from app.db.session import init_db
 from app.email.render import render_html, render_plain_text
 from app.email.sender import EmailSendError
 from app.llm.client import LLMError
@@ -81,6 +82,35 @@ class FakeEmail:
         if self.fail:
             raise EmailSendError("smtp down")
         self.sent.append((subject, text, html))
+
+
+class MessageIdEmail(FakeEmail):
+    def __init__(self, fail: bool = False) -> None:
+        super().__init__(fail=fail)
+        self.message_ids: list[str | None] = []
+
+    def send(
+        self,
+        subject: str,
+        text: str,
+        html: str | None = None,
+        **kwargs,
+    ) -> None:
+        self.message_ids.append(kwargs.get("message_id"))
+        super().send(subject, text, html)
+
+
+class CrashAfterSendEmail(MessageIdEmail):
+    def send(
+        self,
+        subject: str,
+        text: str,
+        html: str | None = None,
+        **kwargs,
+    ) -> None:
+        self.message_ids.append(kwargs.get("message_id"))
+        self.sent.append((subject, text, html))
+        raise RuntimeError("crash after provider accepted email")
 
 
 class FailingGmailApiEmail(FakeEmail):
@@ -839,8 +869,7 @@ def test_running_digest_twice_does_not_resend_same_messages(session) -> None:
 
     assert first.direct_messages
     assert not second.direct_messages
-    assert len(email.sent) == 2
-    assert "first" not in email.sent[1][1]
+    assert len(email.sent) == 1
 
 
 def test_new_messages_after_successful_digest_appear_in_next_digest(session) -> None:
@@ -962,6 +991,109 @@ def test_pending_digest_prevents_manual_duplicate_send(session) -> None:
     assert first.email_status == "pending"
     assert second.email_status == "pending"
     assert second_email.sent == []
+
+
+def test_two_sessions_do_not_send_duplicate_digest_batch(settings) -> None:
+    factory = init_db(settings)
+    with factory() as first_session:
+        repository.save_message(first_session, msg(message_id=804, text="one batch"))
+    email = MessageIdEmail()
+
+    with factory() as first_session:
+        first = send_daily_digest_pipeline(
+            first_session,
+            FakeLLM(),
+            email,
+            date(2026, 7, 7),
+            "Europe/Moscow",
+        )
+    with factory() as second_session:
+        second = send_daily_digest_pipeline(
+            second_session,
+            FakeLLM(),
+            email,
+            date(2026, 7, 7),
+            "Europe/Moscow",
+        )
+        rows = repository.messages_between(
+            second_session,
+            *day_bounds(date(2026, 7, 7), "Europe/Moscow"),
+            only_undigested=False,
+        )
+        records = repository.pending_digests(second_session)
+
+    assert first.email_status == "sent"
+    assert second.direct_messages == []
+    assert len(email.sent) == 1
+    assert rows[0].digested_at is not None
+    assert rows[0].claimed_digest_id is None
+    assert records == []
+
+
+def test_crash_after_email_send_does_not_create_new_independent_digest(session) -> None:
+    repository.save_message(session, msg(message_id=805, text="crash window"))
+    crashing_email = CrashAfterSendEmail()
+
+    try:
+        send_daily_digest_pipeline(
+            session,
+            FakeLLM(),
+            crashing_email,
+            date(2026, 7, 7),
+            "Europe/Moscow",
+        )
+    except RuntimeError:
+        pass
+    later_email = MessageIdEmail()
+    digest = send_daily_digest_pipeline(
+        session,
+        FakeLLM(),
+        later_email,
+        date(2026, 7, 7),
+        "Europe/Moscow",
+    )
+    rows = repository.messages_between(
+        session,
+        *day_bounds(date(2026, 7, 7), "Europe/Moscow"),
+        only_undigested=False,
+    )
+
+    assert len(crashing_email.sent) == 1
+    assert later_email.sent == []
+    assert digest.email_status == "pending"
+    assert rows[0].claimed_digest_id is not None
+    assert rows[0].digested_at is None
+
+
+def test_failed_digest_send_keeps_claimed_messages_retryable_without_rebuild(session) -> None:
+    repository.save_message(session, msg(message_id=806, text="retry same run"))
+    email = MessageIdEmail(fail=True)
+    llm = CountingLLM()
+
+    digest = send_daily_digest_pipeline(
+        session,
+        llm,
+        email,
+        date(2026, 7, 7),
+        "Europe/Moscow",
+        max_email_attempts=1,
+    )
+    record = repository.pending_digests(session)[0]
+    first_delivery_id = record.delivery_id
+    rows = repository.messages_between(
+        session,
+        *day_bounds(date(2026, 7, 7), "Europe/Moscow"),
+        only_undigested=False,
+    )
+    assert digest.email_status == "pending"
+    assert rows[0].digested_at is None
+    assert rows[0].claimed_digest_id == record.id
+    assert llm.calls == 1
+    retry_email = MessageIdEmail()
+    sent = repository.retry_pending_digests(session, retry_email, now=record.next_attempt_at)
+
+    assert sent == 1
+    assert retry_email.message_ids == [first_delivery_id]
 
 
 def test_aggregation_uses_configured_limits(session) -> None:
