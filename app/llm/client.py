@@ -108,7 +108,7 @@ class HaikuClient:
         user: str,
         schema: type[BaseModel],
         *,
-        prefer_schema: bool = True,
+        prefer_schema: bool = False,
     ) -> str:
         response_format: dict = {"type": "json_object"}
         if prefer_schema:
