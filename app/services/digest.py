@@ -15,6 +15,7 @@ from app.models.schemas import (
     ChatType,
     DailyDigest,
     DigestDirectMessage,
+    DigestGroupUpdate,
     DigestNoiseCount,
     DigestReviewItem,
     MessageRef,
@@ -23,6 +24,10 @@ from app.models.schemas import (
 APPROX_TOKEN_CHARS = 4
 MAX_INPUT_TOKENS = 150_000
 REVIEW_TEXT_LIMIT = 500
+MAX_MESSAGES_PER_DIGEST_WINDOW = 5_000
+MAX_MESSAGES_PER_CHAT = 100
+MAX_CHARS_PER_GROUP = 12_000
+BAD_SUMMARY_PHRASES = ("короткая переписка",)
 
 
 def safe_truncate(text: str | None, limit: int = REVIEW_TEXT_LIMIT) -> str:
@@ -34,6 +39,18 @@ def safe_truncate(text: str | None, limit: int = REVIEW_TEXT_LIMIT) -> str:
     return compact[: limit - 3] + "..."
 
 
+def _clean_summary(text: str | None) -> str:
+    summary = safe_truncate(text or "обновление", 280)
+    for phrase in BAD_SUMMARY_PHRASES:
+        summary = summary.replace(phrase, "обсуждение")
+    return summary
+
+
+def _chat_type_value(row) -> str:
+    value = row.chat_type
+    return value.value if hasattr(value, "value") else str(value)
+
+
 def day_bounds(day: date, timezone: str) -> tuple[datetime, datetime]:
     tz = ZoneInfo(timezone)
     start = datetime.combine(day, time.min, tzinfo=tz)
@@ -41,8 +58,14 @@ def day_bounds(day: date, timezone: str) -> tuple[datetime, datetime]:
     return start, end
 
 
-def build_structured_payload(rows: list) -> dict:
+def build_structured_payload(
+    rows: list,
+    *,
+    max_messages_per_chat: int = MAX_MESSAGES_PER_CHAT,
+    max_chars_per_group: int = MAX_CHARS_PER_GROUP,
+) -> dict:
     chats: dict[str, dict] = {}
+    overflow_notes: list[dict] = []
     for row in rows:
         chat = chats.setdefault(
             row.chat_id,
@@ -51,8 +74,18 @@ def build_structured_payload(rows: list) -> dict:
                 "chat_title": row.chat_title,
                 "chat_type": row.chat_type,
                 "messages": [],
+                "omitted_messages": 0,
+                "omitted_chars": 0,
             },
         )
+        current_chars = sum(len(str(message.get("text") or "")) for message in chat["messages"])
+        text = safe_truncate(row.text or row.caption, REVIEW_TEXT_LIMIT)
+        if len(chat["messages"]) >= max_messages_per_chat:
+            chat["omitted_messages"] += 1
+            continue
+        if current_chars + len(text) > max_chars_per_group:
+            chat["omitted_chars"] += len(text)
+            continue
         chat["messages"].append(
             {
                 "message_id": row.message_id,
@@ -61,12 +94,23 @@ def build_structured_payload(rows: list) -> dict:
                 "sender_name": row.sender_name,
                 "is_outgoing": row.is_outgoing,
                 "reply_to_message_id": row.reply_to_message_id,
-                "text": row.text or row.caption,
+                "text": text,
                 "media_type": row.media_type,
                 "alert_sent": row.alert_sent,
             }
         )
-    return {"chats": list(chats.values())}
+    for chat in chats.values():
+        if chat["omitted_messages"] or chat["omitted_chars"]:
+            overflow_notes.append(
+                {
+                    "chat": chat["chat_title"],
+                    "summary": (
+                        "Часть сообщений не отправлена в LLM из-за лимита: "
+                        f"{chat['omitted_messages']} сообщений, {chat['omitted_chars']} символов."
+                    ),
+                }
+            )
+    return {"chats": list(chats.values()), "overflow_notes": overflow_notes}
 
 
 def _estimated_tokens(payload: dict) -> int:
@@ -101,6 +145,7 @@ def _chat_chunks(chats: list[dict]) -> list[list[dict]]:
 
 def fallback_digest(day: date, rows: list) -> DailyDigest:
     direct: list[DigestDirectMessage] = []
+    group_updates: list[DigestGroupUpdate] = []
     review: list[DigestReviewItem] = []
     noise_counts: list[DigestNoiseCount] = []
     grouped = defaultdict(list)
@@ -129,25 +174,59 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
             )
     for chat, chat_rows in grouped.items():
         incoming = [r for r in chat_rows if not r.is_outgoing]
-        if incoming and incoming[0].chat_type == ChatType.private:
+        if incoming and _chat_type_value(incoming[0]) == ChatType.private.value:
+            first = min(r.timestamp for r in incoming)
+            last = max(r.timestamp for r in incoming)
             direct.append(
                 DigestDirectMessage(
                     chat=chat,
                     summary=f"{len(incoming)} входящих личных сообщений.",
-                    needs_reply=True,
-                    action="Проверить чат.",
+                    needs_reply=False,
+                    action=None,
                     source_refs=[
                         MessageRef(chat_id=r.chat_id, message_id=r.message_id)
                         for r in incoming
                     ],
                     needs_manual_review=True,
+                    message_count=len(incoming),
+                    first_message_at=first,
+                    last_message_at=last,
                 )
             )
         else:
-            noise_counts.append(DigestNoiseCount(chat=chat, count=len(chat_rows)))
+            first = min(r.timestamp for r in chat_rows)
+            last = max(r.timestamp for r in chat_rows)
+            summary = "; ".join(
+                safe_truncate(r.text or r.caption, 80)
+                for r in chat_rows[:3]
+                if r.text or r.caption
+            )
+            direct_refs = [
+                MessageRef(chat_id=r.chat_id, message_id=r.message_id)
+                for r in chat_rows
+            ]
+            if chat_rows and _chat_type_value(chat_rows[0]) in {
+                ChatType.group.value,
+                ChatType.supergroup.value,
+                ChatType.channel.value,
+            }:
+                # Use group updates for fallback digests so user sees one concise group line.
+                group_updates.append(
+                    DigestGroupUpdate(
+                        chat=chat,
+                        summary=_clean_summary(summary or f"{len(chat_rows)} сообщений."),
+                        source_refs=direct_refs,
+                        message_count=len(chat_rows),
+                        first_message_at=first,
+                        last_message_at=last,
+                    )
+                )
+            else:
+                noise_counts.append(DigestNoiseCount(chat=chat, count=len(chat_rows)))
     return DailyDigest(
         date=day.isoformat(),
         direct_messages=direct,
+        group_updates=group_updates,
         review=review,
         noise_counts=noise_counts,
         generated_by="fallback",
@@ -186,10 +265,70 @@ def _protect_private_messages(digest: DailyDigest, rows: list) -> DailyDigest:
         digest.direct_messages.append(
             DigestDirectMessage(
                 chat=row.chat_title,
-                summary=safe_truncate(row.text or row.caption or "Личное сообщение без текста."),
+                summary="Личное сообщение.",
                 needs_reply=False,
                 source_refs=[MessageRef(chat_id=row.chat_id, message_id=row.message_id)],
                 needs_manual_review=False,
+                message_count=1,
+                first_message_at=row.timestamp,
+                last_message_at=row.timestamp,
+            )
+        )
+    return digest
+
+
+def _row_lookup(rows: list) -> dict[tuple[str, int], object]:
+    return {(row.chat_id, row.message_id): row for row in rows}
+
+
+def _refs(item) -> list[tuple[str, int]]:
+    return [(ref.chat_id, ref.message_id) for ref in item.source_refs]
+
+
+def _metrics_for_refs(item, rows_by_ref: dict[tuple[str, int], object]) -> None:
+    rows = [rows_by_ref[ref] for ref in _refs(item) if ref in rows_by_ref]
+    if not rows:
+        return
+    item.message_count = len(rows)
+    item.first_message_at = min(row.timestamp for row in rows)
+    item.last_message_at = max(row.timestamp for row in rows)
+    item.summary = _clean_summary(item.summary)
+
+
+def _merge_items_by_chat(items: list) -> list:
+    merged = {}
+    for item in items:
+        existing = merged.get(item.chat)
+        item.summary = _clean_summary(item.summary)
+        if not existing:
+            merged[item.chat] = item
+            continue
+        existing_refs = {(ref.chat_id, ref.message_id) for ref in existing.source_refs}
+        for ref in item.source_refs:
+            if (ref.chat_id, ref.message_id) not in existing_refs:
+                existing.source_refs.append(ref)
+        if item.summary and item.summary not in existing.summary:
+            existing.summary = _clean_summary(f"{existing.summary}; {item.summary}")
+        existing.needs_reply = bool(
+            getattr(existing, "needs_reply", False) or getattr(item, "needs_reply", False)
+        )
+        if not getattr(existing, "action", None) and getattr(item, "action", None):
+            existing.action = item.action
+    return list(merged.values())
+
+
+def _enrich_digest(digest: DailyDigest, rows: list, overflow_notes: list[dict]) -> DailyDigest:
+    rows_by_ref = _row_lookup(rows)
+    digest.direct_messages = _merge_items_by_chat(digest.direct_messages)
+    digest.group_updates = _merge_items_by_chat(digest.group_updates)
+    for item in [*digest.direct_messages, *digest.group_updates, *digest.p0_alerts]:
+        _metrics_for_refs(item, rows_by_ref)
+    for note in overflow_notes:
+        digest.review.append(
+            DigestReviewItem(
+                chat=note["chat"],
+                reason="Лимит обработки",
+                summary=note["summary"],
             )
         )
     return digest
@@ -204,10 +343,45 @@ def _call_daily_digest(llm: HaikuClient, payload: dict, day: date, rows: list) -
         return digest
 
 
-def generate_digest(session: Session, llm: HaikuClient, day: date, timezone: str) -> DailyDigest:
+def generate_digest(
+    session: Session,
+    llm: HaikuClient,
+    day: date,
+    timezone: str,
+    *,
+    rows: list | None = None,
+    max_messages_per_window: int = MAX_MESSAGES_PER_DIGEST_WINDOW,
+    max_messages_per_chat: int = MAX_MESSAGES_PER_CHAT,
+    max_chars_per_group: int = MAX_CHARS_PER_GROUP,
+) -> DailyDigest:
     start, end = day_bounds(day, timezone)
-    rows = repository.messages_between(session, start, end)
-    payload = build_structured_payload(rows)
+    overflow_notes: list[dict] = []
+    if rows is None:
+        fetched = repository.messages_between(
+            session,
+            start,
+            end,
+            limit=max_messages_per_window + 1,
+        )
+        if len(fetched) > max_messages_per_window:
+            overflow_notes.append(
+                {
+                    "chat": "Digest",
+                    "summary": (
+                        "Достигнут лимит digest window; часть сообщений будет обработана "
+                        "в следующем запуске."
+                    ),
+                }
+            )
+            rows = fetched[:max_messages_per_window]
+        else:
+            rows = fetched
+    payload = build_structured_payload(
+        rows,
+        max_messages_per_chat=max_messages_per_chat,
+        max_chars_per_group=max_chars_per_group,
+    )
+    overflow_notes.extend(payload.pop("overflow_notes", []))
     if _estimated_tokens(payload) <= MAX_INPUT_TOKENS:
         digest = _call_daily_digest(llm, {"date": day.isoformat(), **payload}, day, rows)
     else:
@@ -233,7 +407,8 @@ def generate_digest(session: Session, llm: HaikuClient, day: date, timezone: str
                     source_refs=[MessageRef(chat_id=row.chat_id, message_id=row.message_id)],
                 )
             )
-    return _protect_private_messages(digest, rows)
+    digest = _protect_private_messages(digest, rows)
+    return _enrich_digest(digest, rows, overflow_notes)
 
 
 def send_and_store_digest(session: Session, digest: DailyDigest, email_sender: EmailSender) -> None:
@@ -266,7 +441,26 @@ def send_daily_digest_pipeline(
     *,
     max_email_attempts: int = 3,
 ) -> DailyDigest:
-    digest = generate_digest(session, llm, day, timezone)
+    start, end = day_bounds(day, timezone)
+    rows = repository.messages_between(
+        session,
+        start,
+        end,
+        limit=MAX_MESSAGES_PER_DIGEST_WINDOW + 1,
+    )
+    rows_for_digest = rows[:MAX_MESSAGES_PER_DIGEST_WINDOW]
+    digest = generate_digest(session, llm, day, timezone, rows=rows_for_digest)
+    if len(rows) > MAX_MESSAGES_PER_DIGEST_WINDOW:
+        digest.review.append(
+            DigestReviewItem(
+                chat="Digest",
+                reason="Лимит обработки",
+                summary=(
+                    "Достигнут лимит digest window; часть сообщений будет обработана "
+                    "в следующем запуске."
+                ),
+            )
+        )
     html = render_html(digest)
     text = render_plain_text(digest)
     subject = _subject_for(digest)
@@ -278,6 +472,11 @@ def send_daily_digest_pipeline(
             email_sender.send(subject, text, html)
             digest.email_status = "sent"
             repository.mark_digest_sent(session, record)
+            repository.mark_messages_digested(
+                session,
+                rows_for_digest,
+                datetime.now().astimezone(),
+            )
             return digest
         except EmailSendError as exc:
             repository.mark_digest_pending(session, record, exc, now)

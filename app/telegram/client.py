@@ -46,6 +46,8 @@ async def run_listener(settings: Settings, session_factory) -> None:
         await client.disconnect()
         raise RuntimeError("Telegram session is unauthorized. Run telegram_login.")
 
+    # TODO: Add bounded startup backfill for recent messages, e.g. last 24h or
+    # since last successful digest, deduplicated by (chat_id, message_id).
     llm = HaikuClient(settings)
     email = EmailSender(settings)
 

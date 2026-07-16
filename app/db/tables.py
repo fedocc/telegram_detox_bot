@@ -29,6 +29,10 @@ class MessageRecord(Base):
     caption: Mapped[str | None] = mapped_column(Text, nullable=True)
     alert_sent: Mapped[bool] = mapped_column(Boolean, default=False)
     p0_review_candidate: Mapped[bool] = mapped_column(Boolean, default=False)
+    digested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    raw_redacted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    p0_classified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    p0_classification: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class DigestRecord(Base):

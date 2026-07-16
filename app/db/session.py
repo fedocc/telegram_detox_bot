@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 from sqlalchemy import create_engine
+from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
@@ -21,6 +22,16 @@ def make_engine(settings: Settings):
 def init_db(settings: Settings) -> sessionmaker[Session]:
     engine = make_engine(settings)
     Base.metadata.create_all(engine)
+    if engine.dialect.name == "sqlite":
+        with engine.begin() as connection:
+            columns = {
+                row[1]
+                for row in connection.execute(text("PRAGMA table_info(messages)")).fetchall()
+            }
+            if "digested_at" not in columns:
+                connection.execute(text("ALTER TABLE messages ADD COLUMN digested_at DATETIME"))
+            if "raw_redacted_at" not in columns:
+                connection.execute(text("ALTER TABLE messages ADD COLUMN raw_redacted_at DATETIME"))
     return sessionmaker(engine, expire_on_commit=False, future=True)
 
 

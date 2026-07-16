@@ -22,6 +22,10 @@ def _deadline_value(item) -> str | None:
     return getattr(item, "deadline_text", None)
 
 
+def _summary(text: str) -> str:
+    return (text or "").replace("короткая переписка", "обсуждение").strip()
+
+
 def _plain_deadline(item) -> str:
     deadline = _deadline_value(item)
     return f"; срок: {deadline}" if deadline else ""
@@ -30,6 +34,31 @@ def _plain_deadline(item) -> str:
 def _html_deadline(item) -> str:
     deadline = _deadline_value(item)
     return f" Срок: {_line(deadline)}." if deadline else ""
+
+
+def _time(value) -> str | None:
+    return value.strftime("%H:%M") if value else None
+
+
+def _metrics(item) -> str:
+    parts = []
+    if getattr(item, "message_count", None):
+        parts.append(f"Сообщений: {item.message_count}.")
+    first = _time(getattr(item, "first_message_at", None))
+    last = _time(getattr(item, "last_message_at", None))
+    if first:
+        parts.append(f"Первое: {first}.")
+    if last:
+        parts.append(f"Последнее: {last}.")
+    return " " + " ".join(parts) if parts else ""
+
+
+def _action_text(item) -> str:
+    if getattr(item, "action", None):
+        return f" Действие: {item.action}."
+    if getattr(item, "needs_reply", False):
+        return " Нужно ответить."
+    return " Действий нет."
 
 
 def _review_reason(reason: str | None) -> str:
@@ -46,13 +75,12 @@ def render_plain_text(digest: DailyDigest) -> str:
     ] or ["- Нет"]
     parts += ["", "ЛИЧНЫЕ СООБЩЕНИЯ"]
     parts += [
-        f"- {x.chat}: {x.summary}; ответ: {'да' if x.needs_reply else 'нет'}"
-        f"{_plain_deadline(x)}"
+        f"- {x.chat}: {_summary(x.summary)}.{_metrics(x)}{_plain_deadline(x)}{_action_text(x)}"
         for x in digest.direct_messages
     ] or ["- Нет"]
     parts += ["", "ГРУППЫ"]
     parts += [
-        f"- {x.chat}: {x.summary}{_plain_deadline(x)}"
+        f"- {x.chat}: {_summary(x.summary)}.{_metrics(x)}{_plain_deadline(x)}"
         for x in digest.group_updates
     ] or ["- Нет"]
     parts += ["", "ПРОВЕРИТЬ ЛИЧНО"]
@@ -78,13 +106,13 @@ def render_html(digest: DailyDigest) -> str:
         for x in digest.p0_alerts
     ])
     direct = items([
-        f"<b>{_line(x.chat)}</b>: {_line(x.summary)} "
-        f"Ответ нужен: {'да' if x.needs_reply else 'нет'}."
-        f"{_html_deadline(x)}"
+        f"<b>{_line(x.chat)}</b>: {_line(_summary(x.summary))}."
+        f"{_line(_metrics(x))}{_html_deadline(x)}{_line(_action_text(x))}"
         for x in digest.direct_messages
     ])
     groups = items([
-        f"<b>{_line(x.chat)}</b>: {_line(x.summary)}{_html_deadline(x)}"
+        f"<b>{_line(x.chat)}</b>: {_line(_summary(x.summary))}."
+        f"{_line(_metrics(x))}{_html_deadline(x)}"
         for x in digest.group_updates
     ])
     review = items([

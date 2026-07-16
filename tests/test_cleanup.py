@@ -68,6 +68,17 @@ def test_cleanup_deletes_raw_messages_after_14_days(session, now) -> None:
     assert repository.get_message(session, "1", 4) is not None
 
 
+def test_cleanup_removes_old_processed_messages(session, now) -> None:
+    old_message = msg(message_id=30, timestamp=now - timedelta(days=15), text="old private")
+    repository.save_message(session, old_message)
+    repository.mark_messages_digested(session, [old_message], now - timedelta(days=14))
+
+    raw, _ = run_cleanup(session, 14, 90, now)
+
+    assert raw == 1
+    assert repository.get_message(session, "1", 30) is None
+
+
 def test_cleanup_keeps_digests_for_90_days(session, now) -> None:
     session.add(
         DigestRecord(

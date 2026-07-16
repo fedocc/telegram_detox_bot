@@ -79,14 +79,42 @@ def recent_chat_context(session: Session, chat_id: str, limit: int = 10) -> list
     return list(reversed(rows))
 
 
-def messages_between(session: Session, start: datetime, end: datetime) -> list[MessageRecord]:
-    return list(
-        session.scalars(
-            select(MessageRecord)
-            .where(MessageRecord.timestamp >= start, MessageRecord.timestamp < end)
-            .order_by(MessageRecord.chat_title, MessageRecord.timestamp, MessageRecord.message_id)
-        )
+def messages_between(
+    session: Session,
+    start: datetime,
+    end: datetime,
+    *,
+    only_undigested: bool = True,
+    limit: int | None = None,
+) -> list[MessageRecord]:
+    stmt = (
+        select(MessageRecord)
+        .where(MessageRecord.timestamp >= start, MessageRecord.timestamp < end)
+        .order_by(MessageRecord.chat_title, MessageRecord.timestamp, MessageRecord.message_id)
     )
+    if only_undigested:
+        stmt = stmt.where(MessageRecord.digested_at.is_(None))
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    return list(session.scalars(stmt))
+
+
+def mark_messages_digested(session: Session, rows: list, digested_at: datetime) -> int:
+    refs = [(row.chat_id, row.message_id) for row in rows]
+    if not refs:
+        return 0
+    count = 0
+    digested_at = _db_time(digested_at)
+    for chat_id, message_id in refs:
+        result = session.execute(
+            update(MessageRecord)
+            .where(MessageRecord.chat_id == chat_id)
+            .where(MessageRecord.message_id == message_id)
+            .values(digested_at=digested_at)
+        )
+        count += int(result.rowcount or 0)
+    session.commit()
+    return count
 
 
 def save_digest(
@@ -420,9 +448,7 @@ def cleanup_old(
 ) -> tuple[int, int]:
     raw_cutoff = now - timedelta(days=raw_days)
     digest_cutoff = now - timedelta(days=digest_days)
-    raw = session.execute(
-        delete(MessageRecord).where(MessageRecord.timestamp < raw_cutoff)
-    ).rowcount
+    raw = session.execute(delete(MessageRecord).where(MessageRecord.timestamp < raw_cutoff)).rowcount
     digests = session.execute(
         delete(DigestRecord).where(DigestRecord.created_at < digest_cutoff)
     ).rowcount

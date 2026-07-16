@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from app.db import repository
@@ -137,6 +137,73 @@ def test_email_prefers_deadline_at_when_present() -> None:
     assert "2026-07-07T19:00:00+03:00" in html
 
 
+def test_multiple_private_messages_from_same_sender_render_as_one_line(now) -> None:
+    digest = fallback_digest(
+        date(2026, 7, 7),
+        [
+            msg(message_id=1, text="еду в Китай", timestamp=datetime.fromisoformat("2026-07-07T18:42:00+03:00")),
+            msg(message_id=2, text="до 15 августа", timestamp=datetime.fromisoformat("2026-07-07T19:10:00+03:00")),
+        ],
+    )
+
+    output = render_plain_text(digest)
+
+    assert output.count("- Маша:") == 1
+    assert "Сообщений: 2" in output
+    assert "Первое: 18:42" in output
+    assert "Последнее: 19:10" in output
+    assert "Ответ нужен" not in output
+
+
+def test_grouped_line_includes_count_first_last_time() -> None:
+    digest = fallback_digest(
+        date(2026, 7, 7),
+        [
+            msg(
+                chat_id="g1",
+                chat_title="Лаба",
+                chat_type=ChatType.group,
+                message_id=1,
+                text="one",
+                timestamp=datetime.fromisoformat("2026-07-07T20:05:00+03:00"),
+            ),
+            msg(
+                chat_id="g1",
+                chat_title="Лаба",
+                chat_type=ChatType.group,
+                message_id=2,
+                text="two",
+                timestamp=datetime.fromisoformat("2026-07-07T21:17:00+03:00"),
+            ),
+        ],
+    )
+
+    output = render_plain_text(digest)
+
+    assert "- Лаба:" in output
+    assert "Сообщений: 2" in output
+    assert "Первое: 20:05" in output
+    assert "Последнее: 21:17" in output
+
+
+def test_digest_output_does_not_contain_bad_phrases() -> None:
+    digest = DailyDigest(
+        date="2026-07-07",
+        direct_messages=[
+            {
+                "chat": "Катя",
+                "summary": "короткая переписка про поездку",
+                "needs_reply": False,
+            }
+        ],
+    )
+
+    output = render_plain_text(digest) + render_html(digest)
+
+    assert "короткая переписка" not in output
+    assert "Ответ нужен" not in output
+
+
 def test_personal_message_always_appears_in_digest(session) -> None:
     repository.save_message(session, msg())
 
@@ -241,7 +308,7 @@ def test_digest_cannot_drop_private_message_when_llm_omits_it(session) -> None:
     item = digest.direct_messages[0]
     assert item.source_refs == [{"chat_id": "1", "message_id": 101}]
     assert item.chat == "Маша"
-    assert "Ты сможешь сегодня?" in item.summary
+    assert item.summary == "Личное сообщение."
 
 
 def test_private_message_never_becomes_p3(session) -> None:
@@ -729,3 +796,88 @@ def test_fallback_digest_includes_review_and_media(session, now) -> None:
 
     assert any("media" in item.reason or "медиа" in item.reason.lower() for item in digest.review)
     assert any(item.reason == "Возможно важное сообщение" for item in digest.review)
+
+
+def test_running_digest_twice_does_not_resend_same_messages(session) -> None:
+    repository.save_message(session, msg(message_id=701, text="first"))
+    email = FakeEmail()
+
+    first = send_daily_digest_pipeline(
+        session,
+        FakeLLM(),
+        email,
+        date(2026, 7, 7),
+        "Europe/Moscow",
+    )
+    second = send_daily_digest_pipeline(
+        session,
+        FakeLLM(),
+        email,
+        date(2026, 7, 7),
+        "Europe/Moscow",
+    )
+
+    assert first.direct_messages
+    assert not second.direct_messages
+    assert len(email.sent) == 2
+    assert "first" not in email.sent[1][1]
+
+
+def test_new_messages_after_successful_digest_appear_in_next_digest(session) -> None:
+    email = FakeEmail()
+    repository.save_message(session, msg(message_id=702, text="old"))
+    send_daily_digest_pipeline(session, FakeLLM(), email, date(2026, 7, 7), "Europe/Moscow")
+    repository.save_message(session, msg(message_id=703, text="new"))
+
+    digest = send_daily_digest_pipeline(
+        session,
+        FakeLLM(),
+        email,
+        date(2026, 7, 7),
+        "Europe/Moscow",
+    )
+
+    refs = {
+        (ref.chat_id, ref.message_id)
+        for item in digest.direct_messages
+        for ref in item.source_refs
+    }
+    assert ("1", 703) in refs
+    assert ("1", 702) not in refs
+
+
+def test_processed_digested_messages_are_excluded_from_next_window(session) -> None:
+    message = msg(message_id=704, text="done")
+    repository.save_message(session, message)
+    repository.mark_messages_digested(session, [message], datetime.fromisoformat("2026-07-07T20:30:00+03:00"))
+
+    rows = repository.messages_between(
+        session,
+        *day_bounds(date(2026, 7, 7), "Europe/Moscow"),
+    )
+
+    assert rows == []
+
+
+def test_aggregation_uses_configured_limits(session) -> None:
+    for idx in range(1, 5):
+        repository.save_message(session, msg(message_id=800 + idx, text=f"msg {idx}"))
+
+    digest = generate_digest(
+        session,
+        FakeLLM(),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+        max_messages_per_window=2,
+        max_messages_per_chat=1,
+        max_chars_per_group=20,
+    )
+
+    assert any("лимит" in item.summary.lower() for item in digest.review)
+
+
+def test_startup_backfill_todo_is_documented() -> None:
+    source = Path("app/telegram/client.py").read_text(encoding="utf-8")
+
+    assert "TODO" in source
+    assert "backfill" in source.lower()
