@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
@@ -67,6 +67,31 @@ def mark_p0_review_candidate(session: Session, chat_id: str, message_id: int) ->
     if record:
         record.p0_review_candidate = True
         session.commit()
+
+
+def mark_p0_classified(
+    session: Session,
+    chat_id: str,
+    message_id: int,
+    status: str,
+    classified_at: datetime,
+) -> None:
+    record = get_message(session, chat_id, message_id)
+    if record:
+        record.p0_classified_at = _db_time(classified_at)
+        record.p0_classification = status
+        session.commit()
+
+
+def p0_llm_calls_since(session: Session, since: datetime) -> int:
+    return int(
+        session.scalar(
+            select(func.count())
+            .select_from(MessageRecord)
+            .where(MessageRecord.p0_classified_at >= _db_time(since))
+        )
+        or 0
+    )
 
 
 def recent_chat_context(session: Session, chat_id: str, limit: int = 10) -> list[MessageRecord]:

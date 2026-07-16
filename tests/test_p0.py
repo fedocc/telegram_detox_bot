@@ -3,7 +3,7 @@ from __future__ import annotations
 from app.db import repository
 from app.email.sender import EmailSendError
 from app.llm.client import LLMError
-from app.models.schemas import P0Decision, P0Status
+from app.models.schemas import ChatType, MediaType, P0Decision, P0Status
 from app.services.p0 import SAFE_TEXT_LIMIT, handle_p0_candidate
 from tests.fixtures.messages import msg
 
@@ -34,8 +34,12 @@ class FakeLLM:
         self.fail = fail
         self.status = status
         self.deadline_text = deadline_text
+        self.calls = 0
+        self.payloads: list[dict] = []
 
     def classify_p0(self, payload: dict) -> P0Decision:
+        self.calls += 1
+        self.payloads.append(payload)
         if self.fail:
             raise LLMError("down")
         return P0Decision(
@@ -396,3 +400,149 @@ def test_override_creates_immediate_alert_job(session) -> None:
     assert jobs == []
     stored = repository.get_message(session, message.chat_id, message.message_id)
     assert stored.alert_sent is True
+
+
+def test_incoming_private_text_triggers_immediate_llm_p0_classification(session, settings) -> None:
+    message = msg(text="привет")
+    repository.save_message(session, message)
+    llm = FakeLLM(status=P0Status.not_p0)
+
+    handle_p0_candidate(session, message, llm, FakeEmail(), settings=settings)
+
+    assert llm.calls == 1
+
+
+def test_outgoing_message_does_not_trigger_llm(session, settings) -> None:
+    message = msg(text="я отвечу", is_outgoing=True)
+    repository.save_message(session, message)
+    llm = FakeLLM()
+
+    handle_p0_candidate(session, message, llm, FakeEmail(), settings=settings)
+
+    assert llm.calls == 0
+
+
+def test_non_text_media_does_not_trigger_llm_and_goes_to_manual_review(session, settings) -> None:
+    message = msg(text=None, media_type=MediaType.voice)
+    repository.save_message(session, message)
+    llm = FakeLLM()
+
+    handle_p0_candidate(session, message, llm, FakeEmail(), settings=settings)
+
+    stored = repository.get_message(session, message.chat_id, message.message_id)
+    assert llm.calls == 0
+    assert stored.p0_review_candidate is True
+
+
+def test_group_message_without_routing_does_not_trigger_immediate_llm(session, settings) -> None:
+    message = msg(chat_id="g1", chat_type=ChatType.group, text="обычное обсуждение")
+    repository.save_message(session, message)
+    llm = FakeLLM()
+
+    handle_p0_candidate(session, message, llm, FakeEmail(), settings=settings)
+
+    assert llm.calls == 0
+
+
+def test_group_mention_triggers_immediate_llm(session, settings) -> None:
+    message = msg(chat_id="g1", chat_type=ChatType.group, text="@me проверь пожалуйста")
+    repository.save_message(session, message)
+    llm = FakeLLM(status=P0Status.not_p0)
+
+    handle_p0_candidate(session, message, llm, FakeEmail(), settings=settings)
+
+    assert llm.calls == 1
+
+
+def test_group_reply_triggers_immediate_llm(session, settings) -> None:
+    parent = msg(chat_id="g1", chat_type=ChatType.group, message_id=1, is_outgoing=True)
+    message = msg(
+        chat_id="g1",
+        chat_type=ChatType.group,
+        message_id=2,
+        text="ответ",
+        reply_to_message_id=1,
+    )
+    repository.save_message(session, parent)
+    repository.save_message(session, message)
+    llm = FakeLLM(status=P0Status.not_p0)
+
+    handle_p0_candidate(session, message, llm, FakeEmail(), settings=settings)
+
+    assert llm.calls == 1
+
+
+def test_group_watchlist_triggers_immediate_llm(session, settings) -> None:
+    settings.p0_watchlist_chat_ids = "g1"
+    message = msg(chat_id="g1", chat_type=ChatType.group, text="обычное обсуждение")
+    repository.save_message(session, message)
+    llm = FakeLLM(status=P0Status.not_p0)
+
+    handle_p0_candidate(session, message, llm, FakeEmail(), settings=settings)
+
+    assert llm.calls == 1
+
+
+def test_p0_and_review_both_send_immediate_email(session, settings) -> None:
+    p0_message = msg(message_id=11, text="проверь")
+    review_message = msg(message_id=12, text="проверь")
+    repository.save_message(session, p0_message)
+    repository.save_message(session, review_message)
+    email = FakeEmail()
+
+    handle_p0_candidate(session, p0_message, FakeLLM(status=P0Status.p0), email, settings=settings)
+    handle_p0_candidate(
+        session,
+        review_message,
+        FakeLLM(status=P0Status.review),
+        email,
+        settings=settings,
+    )
+
+    assert len(email.sent) == 2
+
+
+def test_not_p0_does_not_send_immediate_email(session, settings) -> None:
+    message = msg(text="привет")
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    handle_p0_candidate(session, message, FakeLLM(status=P0Status.not_p0), email, settings=settings)
+
+    assert email.sent == []
+
+
+def test_same_message_is_not_classified_twice(session, settings) -> None:
+    message = msg(text="привет")
+    repository.save_message(session, message)
+    llm = FakeLLM(status=P0Status.not_p0)
+
+    handle_p0_candidate(session, message, llm, FakeEmail(), settings=settings)
+    handle_p0_candidate(session, message, llm, FakeEmail(), settings=settings)
+
+    assert llm.calls == 1
+
+
+def test_hourly_llm_cap_hit_private_fails_open_review_email(session, settings) -> None:
+    settings.p0_max_llm_calls_per_hour = 0
+    message = msg(text="привет")
+    repository.save_message(session, message)
+    email = FakeEmail()
+    llm = FakeLLM(status=P0Status.not_p0)
+
+    handle_p0_candidate(session, message, llm, email, settings=settings)
+
+    assert llm.calls == 0
+    assert len(email.sent) == 1
+    assert "budget cap hit" in email.sent[0][1]
+
+
+def test_p0_classifier_message_text_is_capped(session, settings) -> None:
+    settings.p0_max_message_chars = 20
+    message = msg(text="x" * 100)
+    repository.save_message(session, message)
+    llm = FakeLLM(status=P0Status.not_p0)
+
+    handle_p0_candidate(session, message, llm, FakeEmail(), settings=settings)
+
+    assert len(llm.payloads[0]["message"]["text"]) <= 20

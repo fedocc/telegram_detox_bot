@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     digest_time: str = "20:30"
     raw_retention_days: int = Field(default=14, ge=1)
     digest_retention_days: int = Field(default=90, ge=1)
+    p0_classify_private_text: bool = True
+    p0_classify_all_groups: bool = False
+    p0_classify_mentions: bool = True
+    p0_classify_replies: bool = True
+    p0_classify_watchlist_chats: bool = True
+    p0_watchlist_chat_ids: str = ""
+    p0_max_context_messages: int = Field(default=5, ge=0, le=20)
+    p0_max_message_chars: int = Field(default=1000, ge=100, le=5000)
+    p0_max_llm_calls_per_hour: int = Field(default=100, ge=0)
 
     @field_validator("tg_api_id", mode="before")
     @classmethod

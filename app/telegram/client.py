@@ -56,6 +56,6 @@ async def run_listener(settings: Settings, session_factory) -> None:
         stored = await event_to_stored_message(event)
         with session_factory() as session:
             repository.save_message(session, stored)
-            handle_p0_candidate(session, stored, llm, email)
+            handle_p0_candidate(session, stored, llm, email, settings=settings)
 
     await client.run_until_disconnected()

@@ -96,6 +96,17 @@ class CountingLLM(FakeLLM):
         return super().daily_digest(payload)
 
 
+class InspectingBatchLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.payloads: list[dict] = []
+
+    def daily_digest(self, payload: dict) -> DailyDigest:
+        self.calls += 1
+        self.payloads.append(payload)
+        return DailyDigest(date=payload["date"])
+
+
 def test_email_renders_deadline_text_when_no_deadline_at() -> None:
     digest = DailyDigest(
         date="2026-07-07",
@@ -874,6 +885,27 @@ def test_aggregation_uses_configured_limits(session) -> None:
     )
 
     assert any("лимит" in item.summary.lower() for item in digest.review)
+
+
+def test_daily_digest_uses_grouped_batch_summarization(session) -> None:
+    repository.save_message(session, msg(message_id=901, text="private one"))
+    repository.save_message(
+        session,
+        msg(
+            chat_id="g1",
+            chat_title="Лаба",
+            chat_type=ChatType.group,
+            message_id=902,
+            text="group one",
+        ),
+    )
+    llm = InspectingBatchLLM()
+
+    generate_digest(session, llm, date(2026, 7, 7), "Europe/Moscow")
+
+    assert llm.calls == 1
+    assert len(llm.payloads[0]["chats"]) == 2
+    assert all("messages" in chat for chat in llm.payloads[0]["chats"])
 
 
 def test_startup_backfill_todo_is_documented() -> None:
