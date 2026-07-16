@@ -30,6 +30,8 @@ def save_message(session: Session, message: StoredMessage) -> None:
     values = message.model_dump(mode="python")
     values["chat_type"] = message.chat_type.value
     values["media_type"] = message.media_type.value
+    if values.get("ingested_at") is not None:
+        values["ingested_at"] = _db_time(values["ingested_at"])
     if session.bind and session.bind.dialect.name == "sqlite":
         stmt = sqlite_insert(MessageRecord).values(**values)
         stmt = stmt.on_conflict_do_nothing(index_elements=["chat_id", "message_id"])
@@ -46,12 +48,29 @@ def save_message(session: Session, message: StoredMessage) -> None:
     session.commit()
 
 
+def insert_message_if_missing(session: Session, message: StoredMessage) -> bool:
+    existing = get_message(session, message.chat_id, message.message_id)
+    if existing:
+        return False
+    save_message(session, message)
+    return True
+
+
 def get_message(session: Session, chat_id: str, message_id: int) -> MessageRecord | None:
     return session.scalar(
         select(MessageRecord).where(
             MessageRecord.chat_id == chat_id,
             MessageRecord.message_id == message_id,
         )
+    )
+
+
+def latest_message_for_chat(session: Session, chat_id: str) -> MessageRecord | None:
+    return session.scalar(
+        select(MessageRecord)
+        .where(MessageRecord.chat_id == chat_id)
+        .order_by(MessageRecord.message_id.desc())
+        .limit(1)
     )
 
 

@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     p0_max_context_messages: int = Field(default=5, ge=0, le=20)
     p0_max_message_chars: int = Field(default=1000, ge=100, le=5000)
     p0_max_llm_calls_per_hour: int = Field(default=100, ge=0)
+    backfill_enabled: bool = True
+    backfill_hours: int = Field(default=24, ge=1)
+    backfill_max_messages_per_chat: int = Field(default=200, ge=1)
+    backfill_max_total_messages: int = Field(default=5000, ge=1)
+    p0_backfill_immediate_window_minutes: int = Field(default=30, ge=0)
 
     @field_validator("tg_api_id", mode="before")
     @classmethod

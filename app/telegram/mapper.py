@@ -48,14 +48,19 @@ def media_type(message) -> MediaType:
     return MediaType.other
 
 
-async def event_to_stored_message(event) -> StoredMessage:
-    msg = event.message
-    chat = await event.get_chat()
-    sender = await event.get_sender()
+def telegram_message_to_stored_message(
+    msg,
+    *,
+    chat,
+    sender,
+    chat_id: str,
+    is_backfilled: bool = False,
+    ingested_at: datetime | None = None,
+) -> StoredMessage:
     text = msg.raw_text or None
     mtype = media_type(msg)
     return StoredMessage(
-        chat_id=str(event.chat_id),
+        chat_id=chat_id,
         chat_title=display_name(chat),
         chat_type=chat_type(chat),
         sender_id=str(getattr(sender, "id", "")) if sender else None,
@@ -67,4 +72,19 @@ async def event_to_stored_message(event) -> StoredMessage:
         text=text if mtype == MediaType.none else None,
         media_type=mtype,
         caption=text if mtype != MediaType.none else None,
+        is_backfilled=is_backfilled,
+        ingested_at=ingested_at,
+    )
+
+
+async def event_to_stored_message(event) -> StoredMessage:
+    msg = event.message
+    chat = await event.get_chat()
+    sender = await event.get_sender()
+    return telegram_message_to_stored_message(
+        msg,
+        chat=chat,
+        sender=sender,
+        chat_id=str(event.chat_id),
+        ingested_at=datetime.now().astimezone(),
     )

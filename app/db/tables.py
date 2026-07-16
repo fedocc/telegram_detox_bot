@@ -28,6 +28,8 @@ class MessageRecord(Base):
     media_type: Mapped[str] = mapped_column(String(32), default="none")
     caption: Mapped[str | None] = mapped_column(Text, nullable=True)
     alert_sent: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_backfilled: Mapped[bool] = mapped_column(Boolean, default=False)
+    ingested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     p0_review_candidate: Mapped[bool] = mapped_column(Boolean, default=False)
     digested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     raw_redacted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

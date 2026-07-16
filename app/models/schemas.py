@@ -63,6 +63,8 @@ class StoredMessage(BaseModel):
     media_type: MediaType = MediaType.none
     caption: str | None = None
     alert_sent: bool = False
+    is_backfilled: bool = False
+    ingested_at: datetime | None = None
 
 
 class P0Decision(BaseModel):

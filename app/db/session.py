@@ -32,6 +32,12 @@ def init_db(settings: Settings) -> sessionmaker[Session]:
                 connection.execute(text("ALTER TABLE messages ADD COLUMN digested_at DATETIME"))
             if "raw_redacted_at" not in columns:
                 connection.execute(text("ALTER TABLE messages ADD COLUMN raw_redacted_at DATETIME"))
+            if "is_backfilled" not in columns:
+                connection.execute(
+                    text("ALTER TABLE messages ADD COLUMN is_backfilled BOOLEAN DEFAULT 0")
+                )
+            if "ingested_at" not in columns:
+                connection.execute(text("ALTER TABLE messages ADD COLUMN ingested_at DATETIME"))
             if "p0_classified_at" not in columns:
                 connection.execute(text("ALTER TABLE messages ADD COLUMN p0_classified_at DATETIME"))
             if "p0_classification" not in columns:

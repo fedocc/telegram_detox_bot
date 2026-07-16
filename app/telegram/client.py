@@ -12,6 +12,7 @@ from app.db import repository
 from app.email.sender import EmailSender
 from app.llm.client import HaikuClient
 from app.services.p0 import handle_p0_candidate
+from app.telegram.backfill import run_startup_backfill
 from app.telegram.mapper import event_to_stored_message
 
 
@@ -46,10 +47,15 @@ async def run_listener(settings: Settings, session_factory) -> None:
         await client.disconnect()
         raise RuntimeError("Telegram session is unauthorized. Run telegram_login.")
 
-    # TODO: Add bounded startup backfill for recent messages, e.g. last 24h or
-    # since last successful digest, deduplicated by (chat_id, message_id).
     llm = HaikuClient(settings)
     email = EmailSender(settings)
+    await run_startup_backfill(
+        client=client,
+        settings=settings,
+        session_factory=session_factory,
+        llm=llm,
+        email_sender=email,
+    )
 
     @client.on(events.NewMessage(incoming=None, outgoing=None))
     async def handler(event) -> None:

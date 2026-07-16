@@ -908,8 +908,8 @@ def test_daily_digest_uses_grouped_batch_summarization(session) -> None:
     assert all("messages" in chat for chat in llm.payloads[0]["chats"])
 
 
-def test_startup_backfill_todo_is_documented() -> None:
+def test_startup_backfill_runs_before_live_handler_registration() -> None:
     source = Path("app/telegram/client.py").read_text(encoding="utf-8")
 
-    assert "TODO" in source
-    assert "backfill" in source.lower()
+    assert "run_startup_backfill" in source
+    assert source.index("run_startup_backfill") < source.index("@client.on")
