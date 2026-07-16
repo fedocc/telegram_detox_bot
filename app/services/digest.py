@@ -119,7 +119,7 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
             review.append(
                 DigestReviewItem(
                     chat=row.chat_title,
-                    reason="P0 review candidate",
+                    reason="Возможно важное сообщение",
                     summary=safe_truncate(row.text or row.caption or "Needs manual review."),
                     source_refs=[MessageRef(chat_id=row.chat_id, message_id=row.message_id)],
                     sender=row.sender_name,
@@ -143,20 +143,6 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
                     needs_manual_review=True,
                 )
             )
-            for row in incoming:
-                review.append(
-                    DigestReviewItem(
-                        chat=row.chat_title,
-                        reason="Fallback digest includes incoming private message",
-                        summary=safe_truncate(
-                            row.text or row.caption or "Личное сообщение без текста."
-                        ),
-                        source_refs=[MessageRef(chat_id=row.chat_id, message_id=row.message_id)],
-                        sender=row.sender_name,
-                        timestamp=row.timestamp,
-                        raw_text=safe_truncate(row.text or row.caption),
-                    )
-                )
         else:
             noise_counts.append(DigestNoiseCount(chat=chat, count=len(chat_rows)))
     return DailyDigest(
@@ -197,15 +183,13 @@ def _protect_private_messages(digest: DailyDigest, rows: list) -> DailyDigest:
     for row in rows:
         if (row.chat_id, row.message_id) not in missing:
             continue
-        digest.review.append(
-            DigestReviewItem(
+        digest.direct_messages.append(
+            DigestDirectMessage(
                 chat=row.chat_title,
-                reason="LLM did not classify this incoming private message",
                 summary=safe_truncate(row.text or row.caption or "Личное сообщение без текста."),
+                needs_reply=False,
                 source_refs=[MessageRef(chat_id=row.chat_id, message_id=row.message_id)],
-                sender=row.sender_name,
-                timestamp=row.timestamp,
-                raw_text=safe_truncate(row.text or row.caption),
+                needs_manual_review=False,
             )
         )
     return digest

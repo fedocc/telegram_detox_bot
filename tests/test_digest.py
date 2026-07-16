@@ -196,6 +196,36 @@ def test_html_email_renders_without_errors() -> None:
     assert "Общий" in html
 
 
+def test_digest_output_does_not_contain_llm_did_not_classify(session) -> None:
+    repository.save_message(session, msg(message_id=901, text="привет"))
+
+    digest = generate_digest(session, OmittingLLM(), date(2026, 7, 7), "Europe/Moscow")
+    output = render_plain_text(digest) + render_html(digest)
+
+    assert "LLM did not classify" not in output
+    assert "LLM did not classify this incoming private message" not in output
+
+
+def test_digest_section_title_is_groups_only() -> None:
+    digest = DailyDigest(date="2026-07-07")
+    output = render_plain_text(digest) + render_html(digest)
+
+    assert "ГРУППЫ" in output
+    assert "ГРУППЫ / ЛАБОРАТОРИЯ" not in output
+
+
+def test_non_urgent_private_message_not_routed_to_review_with_internal_text(session) -> None:
+    repository.save_message(session, msg(message_id=902, text="Ок, спасибо"))
+
+    digest = generate_digest(session, OmittingLLM(), date(2026, 7, 7), "Europe/Moscow")
+    output = render_plain_text(digest)
+
+    assert digest.direct_messages
+    assert not digest.review
+    assert "ПРОВЕРИТЬ ЛИЧНО\n- Нет" in output
+    assert "LLM did not classify" not in output
+
+
 def test_fallback_digest_keeps_direct_messages(now) -> None:
     digest = fallback_digest(date(2026, 7, 7), [msg(timestamp=now)])
 
@@ -207,12 +237,11 @@ def test_digest_cannot_drop_private_message_when_llm_omits_it(session) -> None:
 
     digest = generate_digest(session, OmittingLLM(), date(2026, 7, 7), "Europe/Moscow")
 
-    assert digest.review
-    item = digest.review[0]
+    assert digest.direct_messages
+    item = digest.direct_messages[0]
     assert item.source_refs == [{"chat_id": "1", "message_id": 101}]
-    assert item.reason == "LLM did not classify this incoming private message"
-    assert item.sender == "Sender"
-    assert item.raw_text == "Ты сможешь сегодня?"
+    assert item.chat == "Маша"
+    assert "Ты сможешь сегодня?" in item.summary
 
 
 def test_private_message_never_becomes_p3(session) -> None:
@@ -221,7 +250,10 @@ def test_private_message_never_becomes_p3(session) -> None:
     digest = generate_digest(session, OmittingLLM(), date(2026, 7, 7), "Europe/Moscow")
 
     assert all(count.chat != "Маша" for count in digest.noise_counts)
-    assert any(item.source_refs == [{"chat_id": "1", "message_id": 102}] for item in digest.review)
+    assert any(
+        item.source_refs == [{"chat_id": "1", "message_id": 102}]
+        for item in digest.direct_messages
+    )
 
 
 def test_private_message_not_masked_by_group_same_message_id(session, now) -> None:
@@ -242,8 +274,7 @@ def test_private_message_not_masked_by_group_same_message_id(session, now) -> No
 
     assert any(
         item.source_refs == [{"chat_id": "1", "message_id": 1}]
-        and item.reason == "LLM did not classify this incoming private message"
-        for item in digest.review
+        for item in digest.direct_messages
     )
 
 
@@ -273,7 +304,10 @@ def test_private_message_not_masked_by_other_private_chat_same_message_id(sessio
 
     digest = generate_digest(session, OnePrivateOnlyLLM(), date(2026, 7, 7), "Europe/Moscow")
 
-    assert any(item.source_refs == [{"chat_id": "p2", "message_id": 1}] for item in digest.review)
+    assert any(
+        item.source_refs == [{"chat_id": "p2", "message_id": 1}]
+        for item in digest.direct_messages
+    )
 
 
 def test_digest_llm_failure_keeps_all_private_messages(session) -> None:
@@ -282,7 +316,11 @@ def test_digest_llm_failure_keeps_all_private_messages(session) -> None:
 
     digest = generate_digest(session, FailingLLM(), date(2026, 7, 7), "Europe/Moscow")
 
-    refs = {(ref.chat_id, ref.message_id) for item in digest.review for ref in item.source_refs}
+    refs = {
+        (ref.chat_id, ref.message_id)
+        for item in digest.direct_messages
+        for ref in item.source_refs
+    }
     assert {("1", 201), ("1", 202)}.issubset(refs)
     assert digest.generated_by == "fallback"
 
@@ -617,8 +655,8 @@ def test_fallback_digest_includes_private_messages(now) -> None:
         [msg(message_id=401, text="secret personal", timestamp=now)],
     )
 
-    assert digest.review[0].source_refs == [{"chat_id": "1", "message_id": 401}]
-    assert digest.review[0].raw_text == "secret personal"
+    assert digest.direct_messages[0].source_refs == [{"chat_id": "1", "message_id": 401}]
+    assert "1 входящих" in digest.direct_messages[0].summary
 
 
 def test_fallback_digest_includes_all_private_messages(now) -> None:
@@ -630,7 +668,11 @@ def test_fallback_digest_includes_all_private_messages(now) -> None:
         ],
     )
 
-    refs = {tuple(item.source_refs[0].values()) for item in digest.review if item.source_refs}
+    refs = {
+        tuple(ref.values())
+        for item in digest.direct_messages
+        for ref in item.source_refs
+    }
     assert {("p1", 1), ("p2", 1)}.issubset(refs)
 
 
@@ -652,7 +694,7 @@ def test_fallback_digest_includes_p0_review_candidates(session, now) -> None:
     )
     digest = fallback_digest(date(2026, 7, 7), rows)
 
-    assert digest.review[0].reason == "P0 review candidate"
+    assert digest.review[0].reason == "Возможно важное сообщение"
     assert digest.review[0].source_refs == [{"chat_id": "g1", "message_id": 501}]
 
 
@@ -686,4 +728,4 @@ def test_fallback_digest_includes_review_and_media(session, now) -> None:
     digest = fallback_digest(date(2026, 7, 7), rows)
 
     assert any("media" in item.reason or "медиа" in item.reason.lower() for item in digest.review)
-    assert any(item.reason == "P0 review candidate" for item in digest.review)
+    assert any(item.reason == "Возможно важное сообщение" for item in digest.review)
