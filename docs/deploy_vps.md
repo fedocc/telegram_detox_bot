@@ -16,11 +16,12 @@ sudo install -d -o telegram-detox -g telegram-detox -m 700 /opt/telegram-detox
 
 ```bash
 sudo -u telegram-detox git clone <PRIVATE_REPOSITORY_URL> /opt/telegram-detox
-sudo -u telegram-detox python3.12 -m venv /opt/telegram-detox/.venv
-sudo -u telegram-detox /opt/telegram-detox/.venv/bin/python -m pip install --upgrade pip
-sudo -u telegram-detox /opt/telegram-detox/.venv/bin/python -m pip install -e '/opt/telegram-detox[dev]'
-sudo -u telegram-detox cp /opt/telegram-detox/.env.example /opt/telegram-detox/.env
-sudo -u telegram-detox install -d -m 700 /opt/telegram-detox/data /opt/telegram-detox/secrets
+cd /opt/telegram-detox
+sudo -u telegram-detox python3.12 -m venv .venv
+sudo -u telegram-detox .venv/bin/python -m pip install --upgrade pip
+sudo -u telegram-detox .venv/bin/python -m pip install -e '.[dev]'
+sudo -u telegram-detox cp .env.example .env
+sudo -u telegram-detox install -d -m 700 data secrets
 ```
 
 Edit `/opt/telegram-detox/.env` manually. Keep it out of shell history and Git.
@@ -37,15 +38,16 @@ Transfer these files only through a secure channel, then set ownership and permi
 ```
 
 ```bash
-sudo chown -R telegram-detox:telegram-detox /opt/telegram-detox/data /opt/telegram-detox/secrets /opt/telegram-detox/.env
-sudo chmod 600 /opt/telegram-detox/.env
-sudo chmod 600 /opt/telegram-detox/data/*.session
-sudo chmod 600 /opt/telegram-detox/data/gmail_oauth_token.json
-sudo chmod 600 /opt/telegram-detox/secrets/google_oauth_client.json
-sudo chmod 700 /opt/telegram-detox/data /opt/telegram-detox/secrets
-sudo -u telegram-detox /opt/telegram-detox/.venv/bin/python -m app.cli.security_check
-sudo -u telegram-detox /opt/telegram-detox/.venv/bin/python -m app.cli.healthcheck
-sudo -u telegram-detox /opt/telegram-detox/.venv/bin/python -m app.cli.cancel_legacy_alerts
+cd /opt/telegram-detox
+sudo chown -R telegram-detox:telegram-detox data secrets .env
+sudo chmod 600 .env
+sudo chmod 600 data/*.session
+sudo chmod 600 data/gmail_oauth_token.json
+sudo chmod 600 secrets/google_oauth_client.json
+sudo chmod 700 data secrets
+sudo -u telegram-detox .venv/bin/python -m app.cli.security_check
+sudo -u telegram-detox .venv/bin/python -m app.cli.healthcheck
+sudo -u telegram-detox .venv/bin/python -m app.cli.cancel_legacy_alerts
 ```
 
 The OAuth client JSON and token are secrets. After copying them to a VPS, keep mode
@@ -66,15 +68,41 @@ sudo journalctl -u telegram-detox -f
 
 The unit logs to `journalctl`; it contains no secrets.
 
-## 5. Update
+## 5. Safe existing-server update
+
+Push the verified local branch before the VPS pulls it.
+
+On Mac:
 
 ```bash
-sudo -u telegram-detox git -C /opt/telegram-detox pull
-sudo -u telegram-detox /opt/telegram-detox/.venv/bin/python -m app.cli.cleanup
-sudo -u telegram-detox /opt/telegram-detox/.venv/bin/python -m pytest
-sudo -u telegram-detox /opt/telegram-detox/.venv/bin/python -m ruff check .
-sudo systemctl restart telegram-detox
+cd ~/Projects/telegram-digest
+pytest
+ruff check .
+git status
+git push
 ```
+
+On VPS, connect as root or a user that can run `runuser` and manage systemd:
+
+```bash
+ssh <VPS_HOST>
+cd /opt/telegram-detox
+systemctl stop telegram-detox || true
+runuser -u telegram-detox -- git pull
+runuser -u telegram-detox -- .venv/bin/python -m pip install -e .
+runuser -u telegram-detox -- .venv/bin/python -m pytest
+runuser -u telegram-detox -- .venv/bin/python -m ruff check .
+runuser -u telegram-detox -- .venv/bin/python -m app.cli.healthcheck
+runuser -u telegram-detox -- .venv/bin/python -m app.cli.security_check
+runuser -u telegram-detox -- .venv/bin/python -m app.cli.cancel_legacy_alerts
+sqlite3 data/telegram_digest.db "SELECT status, alert_type AS kind, COUNT(*) FROM alert_jobs GROUP BY status, alert_type ORDER BY status, alert_type;"
+systemctl start telegram-detox
+systemctl status telegram-detox --no-pager -l
+journalctl -u telegram-detox -n 120 --no-pager
+```
+
+`alert_type AS kind` keeps the queue inspection output stable while using the actual
+database column name.
 
 ## Backup
 
