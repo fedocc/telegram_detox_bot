@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.db import repository
 from app.email.render import digest_subject, render_html, render_plain_text
-from app.email.sender import EmailSender, EmailSendError
+from app.email.sender import EmailSender
 from app.llm.client import HaikuClient, LLMError
 from app.models.schemas import (
     ChatType,
@@ -410,21 +410,6 @@ def generate_digest(
     return _enrich_digest(digest, rows, overflow_notes)
 
 
-def send_and_store_digest(session: Session, digest: DailyDigest, email_sender: EmailSender) -> None:
-    html = render_html(digest)
-    text = render_plain_text(digest)
-    subject = digest_subject(digest)
-    digest.email_status = "pending"
-    record = repository.save_digest(session, digest, html, subject=subject, text=text)
-    try:
-        email_sender.send(subject, text, html)
-    except EmailSendError as exc:
-        repository.mark_digest_pending(session, record, exc, datetime.now().astimezone())
-    else:
-        digest.email_status = "sent"
-        repository.mark_digest_sent(session, record)
-
-
 def _subject_for(digest: DailyDigest) -> str:
     if digest.generated_by == "fallback":
         return f"[FALLBACK] Telegram digest — {digest.date}"
@@ -442,6 +427,36 @@ def _deliver_pending_digest(
     if not claimed:
         return False
     return repository.send_claimed_digest(session, claimed.id, token, email_sender, now)
+
+
+def _deliver_after_payload_update(
+    session: Session,
+    record_id: int,
+    digest: DailyDigest,
+    email_sender: EmailSender,
+    now: datetime,
+    *,
+    payload_updated: bool,
+) -> DailyDigest:
+    """Reload state after a CAS payload update, then use the sole claimed send path."""
+    record = repository.get_digest_record(session, record_id)
+    if not record:
+        digest.email_status = "pending"
+        return digest
+    if not payload_updated and record.email_status in {"building", "sending", "sent"}:
+        digest.email_status = record.email_status
+        digest.error_summary = record.last_error_safe
+        return digest
+    if record.email_status == "pending" and _deliver_pending_digest(
+        session, record, email_sender, now
+    ):
+        digest.email_status = "sent"
+        return digest
+    refreshed = repository.get_digest_record(session, record_id)
+    if refreshed:
+        digest.email_status = refreshed.email_status
+        digest.error_summary = refreshed.last_error_safe
+    return digest
 
 
 def send_daily_digest_pipeline(
@@ -466,7 +481,7 @@ def send_daily_digest_pipeline(
             text = render_plain_text(digest)
             subject = _subject_for(digest)
             digest.email_status = "pending"
-            repository.update_digest_payload(
+            payload_updated = repository.update_digest_payload(
                 session,
                 record,
                 digest,
@@ -475,13 +490,14 @@ def send_daily_digest_pipeline(
                 html=html,
             )
             now = datetime.now().astimezone()
-            if _deliver_pending_digest(session, record, email_sender, now):
-                digest.email_status = "sent"
-                return digest
-            session.refresh(record)
-            digest.email_status = record.email_status
-            digest.error_summary = record.last_error_safe
-            return digest
+            return _deliver_after_payload_update(
+                session,
+                record.id,
+                digest,
+                email_sender,
+                now,
+                payload_updated=payload_updated,
+            )
         digest = repository.digest_from_record(pending)
         digest.email_status = pending.email_status
         return digest
@@ -523,7 +539,7 @@ def send_daily_digest_pipeline(
     text = render_plain_text(digest)
     subject = _subject_for(digest)
     digest.email_status = "pending"
-    repository.update_digest_payload(
+    payload_updated = repository.update_digest_payload(
         session,
         record,
         digest,
@@ -532,10 +548,11 @@ def send_daily_digest_pipeline(
         html=html,
     )
     now = datetime.now().astimezone()
-    if _deliver_pending_digest(session, record, email_sender, now):
-        digest.email_status = "sent"
-        return digest
-    session.refresh(record)
-    digest.email_status = record.email_status
-    digest.error_summary = record.last_error_safe
-    return digest
+    return _deliver_after_payload_update(
+        session,
+        record.id,
+        digest,
+        email_sender,
+        now,
+        payload_updated=payload_updated,
+    )

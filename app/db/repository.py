@@ -315,18 +315,36 @@ def update_digest_payload(
     subject: str,
     text: str,
     html: str,
-) -> None:
+) -> bool:
     if not subject.strip() or not text.strip() or not html.strip():
         raise ValueError("Digest payload must be non-empty before it can be sent")
-    record.subject = subject
-    record.text_payload = text
-    record.html_payload = html
-    record.json_payload = digest.model_dump_json()
-    record.generated_by = digest.generated_by
-    record.error_summary = digest.error_summary
-    record.email_status = "pending"
-    record.next_attempt_at = _utc_db_time(datetime.now(UTC))
+    now = _utc_db_time(datetime.now(UTC))
+    # A stale building ORM object must never reset a claimed sender back to pending.
+    result = session.execute(
+        update(DigestRecord)
+        .where(DigestRecord.id == record.id)
+        .where(DigestRecord.email_status == "building")
+        .values(
+            subject=subject,
+            text_payload=text,
+            html_payload=html,
+            json_payload=digest.model_dump_json(),
+            generated_by=digest.generated_by,
+            error_summary=digest.error_summary,
+            email_status="pending",
+            next_attempt_at=now,
+        )
+    )
     session.commit()
+    return bool(result.rowcount == 1)
+
+
+def get_digest_record(session: Session, record_id: int) -> DigestRecord | None:
+    return session.scalar(
+        select(DigestRecord)
+        .where(DigestRecord.id == record_id)
+        .execution_options(populate_existing=True)
+    )
 
 
 def _digest_is_sendable(record: DigestRecord) -> bool:

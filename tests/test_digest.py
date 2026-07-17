@@ -1040,7 +1040,7 @@ def test_two_pipeline_invocations_overlap_after_payload_persistence(settings, mo
 
     def wrapped_update(session, record, digest, *, subject, text, html):
         nonlocal triggered
-        original_update(session, record, digest, subject=subject, text=text, html=html)
+        updated = original_update(session, record, digest, subject=subject, text=text, html=html)
         if not triggered:
             triggered = True
             with factory() as second_session:
@@ -1051,9 +1051,126 @@ def test_two_pipeline_invocations_overlap_after_payload_persistence(settings, mo
                     date(2026, 7, 7),
                     "Europe/Moscow",
                 )
+        return updated
 
     monkeypatch.setattr(repository, "update_digest_payload", wrapped_update)
 
+    with factory() as first_session:
+        send_daily_digest_pipeline(
+            first_session,
+            FakeLLM(),
+            email,
+            date(2026, 7, 7),
+            "Europe/Moscow",
+        )
+
+    assert len(email.sent) == 1
+
+
+def test_stale_building_payload_update_cannot_reset_sending_digest(settings) -> None:
+    factory = init_db(settings)
+    with factory() as seed_session:
+        repository.save_message(seed_session, msg(message_id=814, text="stale building"))
+        record, _, created = repository.claim_digest_run_for_rows(
+            seed_session,
+            digest_date="2026-07-07",
+            rows=[repository.get_message(seed_session, "1", 814)],
+        )
+        assert created is True
+        record_id = record.id
+        delivery_id = record.delivery_id
+
+    email = MessageIdEmail()
+    digest = DailyDigest(date="2026-07-07")
+    with factory() as worker_a, factory() as worker_b:
+        stale_a = repository.get_digest_record(worker_a, record_id)
+        stale_b = repository.get_digest_record(worker_b, record_id)
+        assert stale_a and stale_b
+        assert stale_a.email_status == stale_b.email_status == "building"
+
+        assert repository.update_digest_payload(
+            worker_a,
+            stale_a,
+            digest,
+            subject="Telegram digest — 2026-07-07",
+            text="digest body",
+            html="<p>digest body</p>",
+        )
+        claimed = repository.claim_pending_digest(
+            worker_a,
+            record_id,
+            datetime.now(UTC),
+            "worker-a",
+        )
+        assert claimed is not None
+
+        assert not repository.update_digest_payload(
+            worker_b,
+            stale_b,
+            digest,
+            subject="Telegram digest — 2026-07-07",
+            text="second body",
+            html="<p>second body</p>",
+        )
+        current = repository.get_digest_record(worker_b, record_id)
+        assert current is not None
+        assert current.email_status == "sending"
+        assert current.delivery_id == delivery_id
+        assert repository.claim_pending_digest(
+            worker_b,
+            record_id,
+            datetime.now(UTC),
+            "worker-b",
+        ) is None
+
+        assert repository.send_claimed_digest(
+            worker_a,
+            record_id,
+            "worker-a",
+            email,
+            datetime.now(UTC),
+        )
+
+    with factory() as verify_session:
+        record = repository.get_digest_record(verify_session, record_id)
+        row = repository.get_message(verify_session, "1", 814)
+        assert record is not None
+        assert record.email_status == "sent"
+        assert record.delivery_id == delivery_id
+        assert row is not None and row.digested_at is not None
+    assert len(email.sent) == 1
+    assert email.message_ids == [delivery_id]
+
+
+def test_two_pipeline_invocations_observing_building_send_once(settings, monkeypatch) -> None:
+    factory = init_db(settings)
+    with factory() as seed_session:
+        repository.save_message(seed_session, msg(message_id=815, text="building overlap"))
+        repository.claim_digest_run_for_rows(
+            seed_session,
+            digest_date="2026-07-07",
+            rows=[repository.get_message(seed_session, "1", 815)],
+        )
+
+    email = MessageIdEmail()
+    original_update = repository.update_digest_payload
+    second_started = False
+
+    def wrapped_update(session, record, digest, *, subject, text, html):
+        nonlocal second_started
+        if not second_started:
+            second_started = True
+            with factory() as second_session:
+                send_daily_digest_pipeline(
+                    second_session,
+                    FakeLLM(),
+                    email,
+                    date(2026, 7, 7),
+                    "Europe/Moscow",
+                )
+        return original_update(session, record, digest, subject=subject, text=text, html=html)
+
+    monkeypatch.setattr(repository, "update_digest_payload", wrapped_update)
     with factory() as first_session:
         send_daily_digest_pipeline(
             first_session,
