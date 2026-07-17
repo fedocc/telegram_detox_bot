@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -27,6 +27,13 @@ MAX_MESSAGES_PER_DIGEST_WINDOW = 5_000
 MAX_MESSAGES_PER_CHAT = 100
 MAX_CHARS_PER_GROUP = 12_000
 BAD_SUMMARY_PHRASES = ("короткая переписка",)
+MEDIA_LABELS = {
+    "photo": "фото",
+    "voice": "голосовое",
+    "video": "видео",
+    "document": "документ",
+    "other": "медиафайл",
+}
 
 
 def safe_truncate(text: str | None, limit: int = REVIEW_TEXT_LIMIT) -> str:
@@ -142,23 +149,56 @@ def _chat_chunks(chats: list[dict]) -> list[list[dict]]:
     return chunks
 
 
+def _attach_collapsed_media_summaries(digest: DailyDigest, rows: list) -> None:
+    grouped: dict[tuple[str, str], list] = defaultdict(list)
+    for row in rows:
+        if not row.is_outgoing and row.media_type != "none":
+            grouped[(row.chat_id, row.chat_title)].append(row)
+    for (chat_id, chat_title), media_rows in grouped.items():
+        counts = Counter(str(row.media_type) for row in media_rows)
+        detail = ", ".join(
+            f"{count} {MEDIA_LABELS.get(media_type, 'медиафайл')}"
+            for media_type, count in sorted(counts.items())
+        )
+        media_summary = f"Медиа: {detail} — содержимое не анализировалось."
+        items = [
+            item
+            for item in [*digest.direct_messages, *digest.group_updates]
+            if any(ref.chat_id == chat_id for ref in item.source_refs)
+        ]
+        if items:
+            for item in items:
+                item.media_summary = media_summary
+            continue
+        chat_type = _chat_type_value(media_rows[0])
+        refs = [MessageRef(chat_id=chat_id, message_id=row.message_id) for row in media_rows]
+        if chat_type == ChatType.private.value:
+            item = DigestDirectMessage(
+                chat=chat_title,
+                summary="Получены сообщения с медиа.",
+                needs_reply=False,
+                source_refs=refs,
+            )
+            item.media_summary = media_summary
+            digest.direct_messages.append(item)
+        else:
+            item = DigestGroupUpdate(
+                chat=chat_title,
+                summary="Получены сообщения с медиа.",
+                source_refs=refs,
+            )
+            item.media_summary = media_summary
+            digest.group_updates.append(item)
+
+
 def fallback_digest(day: date, rows: list) -> DailyDigest:
     direct: list[DigestDirectMessage] = []
     group_updates: list[DigestGroupUpdate] = []
     review: list[DigestReviewItem] = []
     noise_counts: list[DigestNoiseCount] = []
-    grouped = defaultdict(list)
+    grouped: dict[tuple[str, str], list] = defaultdict(list)
     for row in rows:
-        grouped[row.chat_title].append(row)
-        if row.media_type != "none" and not (row.text or row.caption):
-            review.append(
-                DigestReviewItem(
-                    chat=row.chat_title,
-                    reason=f"Необработанное медиа: {row.media_type}",
-                    summary="Содержимое не анализировалось.",
-                    source_refs=[MessageRef(chat_id=row.chat_id, message_id=row.message_id)],
-                )
-            )
+        grouped[(row.chat_id, row.chat_title)].append(row)
         if getattr(row, "p0_review_candidate", False):
             review.append(
                 DigestReviewItem(
@@ -171,7 +211,7 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
                     raw_text=safe_truncate(row.text or row.caption),
                 )
             )
-    for chat, chat_rows in grouped.items():
+    for (_, chat), chat_rows in grouped.items():
         incoming = [r for r in chat_rows if not r.is_outgoing]
         if incoming and _chat_type_value(incoming[0]) == ChatType.private.value:
             first = min(r.timestamp for r in incoming)
@@ -179,9 +219,18 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
             direct.append(
                 DigestDirectMessage(
                     chat=chat,
-                    summary=f"{len(incoming)} входящих личных сообщений.",
+                    summary=_clean_summary(
+                        "; ".join(
+                            safe_truncate(row.text or row.caption, 120)
+                            for row in incoming[:2]
+                            if row.text or row.caption
+                        )
+                        or f"Получено {len(incoming)} личных сообщений."
+                    ),
                     needs_reply=False,
                     action=None,
+                    open_telegram=True,
+                    open_telegram_reason="Нужен контекст переписки.",
                     source_refs=[
                         MessageRef(chat_id=r.chat_id, message_id=r.message_id)
                         for r in incoming
@@ -222,7 +271,7 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
                 )
             else:
                 noise_counts.append(DigestNoiseCount(chat=chat, count=len(chat_rows)))
-    return DailyDigest(
+    digest = DailyDigest(
         date=day.isoformat(),
         direct_messages=direct,
         group_updates=group_updates,
@@ -230,6 +279,8 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
         noise_counts=noise_counts,
         generated_by="fallback",
     )
+    _attach_collapsed_media_summaries(digest, rows)
+    return digest
 
 
 def _classified_refs(digest: DailyDigest) -> set[tuple[str, int]]:
@@ -297,10 +348,12 @@ def _metrics_for_refs(item, rows_by_ref: dict[tuple[str, int], object]) -> None:
 def _merge_items_by_chat(items: list) -> list:
     merged = {}
     for item in items:
-        existing = merged.get(item.chat)
+        chat_ids = {ref.chat_id for ref in item.source_refs}
+        key = next(iter(chat_ids)) if len(chat_ids) == 1 else item.chat
+        existing = merged.get(key)
         item.summary = _clean_summary(item.summary)
         if not existing:
-            merged[item.chat] = item
+            merged[key] = item
             continue
         existing_refs = {(ref.chat_id, ref.message_id) for ref in existing.source_refs}
         for ref in item.source_refs:
@@ -313,7 +366,41 @@ def _merge_items_by_chat(items: list) -> list:
         )
         if not getattr(existing, "action", None) and getattr(item, "action", None):
             existing.action = item.action
+        for attribute in (
+            "what_happened",
+            "requests_to_me",
+            "important_context",
+            "action_items",
+            "open_reason",
+            "requests",
+            "context",
+            "open_telegram_reason",
+        ):
+            if not getattr(existing, attribute, None) and getattr(item, attribute, None):
+                setattr(existing, attribute, getattr(item, attribute))
+        if getattr(existing, "should_open_telegram", None) is None:
+            existing.should_open_telegram = getattr(item, "should_open_telegram", None)
+        existing.open_telegram = bool(
+            getattr(existing, "open_telegram", False) or getattr(item, "open_telegram", False)
+        )
+        if not getattr(existing, "media_summary", None) and getattr(item, "media_summary", None):
+            existing.media_summary = item.media_summary
     return list(merged.values())
+
+
+def _ensure_semantic_completeness(digest: DailyDigest) -> None:
+    for item in [*digest.direct_messages, *digest.group_updates]:
+        item.what_happened = item.what_happened or item.summary
+        item.requests_to_me = item.requests_to_me or item.requests or "Не определено."
+        item.important_context = item.important_context or item.context or "Не определено."
+        item.action_items = item.action_items or item.action or "Не определено; проверьте чат."
+        if item.should_open_telegram is None:
+            item.should_open_telegram = True
+        item.open_reason = (
+            item.open_reason
+            or item.open_telegram_reason
+            or "Нужна проверка контекста переписки."
+        )
 
 
 def _enrich_digest(digest: DailyDigest, rows: list, overflow_notes: list[dict]) -> DailyDigest:
@@ -330,6 +417,7 @@ def _enrich_digest(digest: DailyDigest, rows: list, overflow_notes: list[dict]) 
                 summary=note["summary"],
             )
         )
+    _ensure_semantic_completeness(digest)
     return digest
 
 
@@ -396,17 +484,8 @@ def generate_digest(
                 chunk_rows = [row for row in rows if row.chat_id in chat_ids]
                 chunk_digests.append(_call_daily_digest(llm, chunk_payload, day, chunk_rows))
         digest = _merge_digests(day, chunk_digests)
-    for row in rows:
-        if row.media_type != "none" and not (row.text or row.caption):
-            digest.review.append(
-                DigestReviewItem(
-                    chat=row.chat_title,
-                    reason=f"Необработанное медиа: {row.media_type}",
-                    summary="Содержимое не анализировалось.",
-                    source_refs=[MessageRef(chat_id=row.chat_id, message_id=row.message_id)],
-                )
-            )
     digest = _protect_private_messages(digest, rows)
+    _attach_collapsed_media_summaries(digest, rows)
     return _enrich_digest(digest, rows, overflow_notes)
 
 

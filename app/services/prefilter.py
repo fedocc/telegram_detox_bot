@@ -31,7 +31,6 @@ P0_RE = re.compile("|".join(P0_PATTERNS), re.IGNORECASE)
 URGENT_CALL_RE = re.compile(
     "|".join([
         r"\bcall(?:\s+me)?(?:\s+back)?\b",
-        r"\bphone\b",
         r"\bjoin(?:\s+the)?\s+call\b",
         r"\bconnect\b",
         r"\bпозвони\b",
@@ -46,8 +45,6 @@ SHORT_TIME_RE = re.compile(
     "|".join([
         r"\bчерез\s+(?:\d+\s+)?(?:минут(?:у|ы)?|час|часа|часов)\b",
         r"\bin\s+(?:\d+|one|two|three|thirty)\s+(?:minute|minutes|hour|hours)\b",
-        r"\btoday\b",
-        r"\bсегодня\b",
         r"\bдо\s+\d{1,2}[:.]\d{2}\b",
         r"\bat\s+\d{1,2}[:.]\d{2}\b",
     ]),

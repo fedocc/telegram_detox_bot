@@ -10,7 +10,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.db.tables import AlertJob, BackfillState, DigestRecord, MessageRecord
-from app.models.schemas import DailyDigest, StoredMessage
+from app.models.schemas import P0_MIN_CONFIDENCE, DailyDigest, StoredMessage
 
 
 def _backoff_minutes(attempts: int) -> int:
@@ -160,11 +160,25 @@ def mark_p0_classified(
     message_id: int,
     status: str,
     classified_at: datetime,
+    confidence: float | None = None,
 ) -> None:
     record = get_message(session, chat_id, message_id)
     if record:
         record.p0_classified_at = _utc_db_time(classified_at)
         record.p0_classification = status
+        record.p0_confidence = confidence
+        session.commit()
+
+
+def mark_p0_llm_called(
+    session: Session,
+    chat_id: str,
+    message_id: int,
+    called_at: datetime,
+) -> None:
+    record = get_message(session, chat_id, message_id)
+    if record:
+        record.p0_llm_called_at = _utc_db_time(called_at)
         session.commit()
 
 
@@ -173,7 +187,7 @@ def p0_llm_calls_since(session: Session, since: datetime) -> int:
         session.scalar(
             select(func.count())
             .select_from(MessageRecord)
-            .where(MessageRecord.p0_classified_at >= _utc_db_time(since))
+            .where(MessageRecord.p0_llm_called_at >= _utc_db_time(since))
         )
         or 0
     )
@@ -655,8 +669,21 @@ def _mark_alert_sent(session: Session, job: AlertJob, now: datetime) -> None:
     session.commit()
 
 
+def _is_retry_safe_p0_alert(session: Session, job: AlertJob) -> bool:
+    if job.alert_type != "p0":
+        return False
+    message = get_message(session, job.chat_id, job.message_id)
+    return bool(
+        message
+        and message.p0_llm_called_at is not None
+        and message.p0_classification == "P0"
+        and message.p0_confidence is not None
+        and message.p0_confidence >= P0_MIN_CONFIDENCE
+    )
+
+
 def send_alert_job(session: Session, job: AlertJob, email_sender, now: datetime) -> bool:
-    if job.status == "sent":
+    if job.status == "sent" or not _is_retry_safe_p0_alert(session, job):
         return False
     token = uuid4().hex
     claimed = claim_pending_alert(session, job.id, job.next_attempt_at or now, token)
@@ -680,6 +707,8 @@ def send_claimed_alert(
         )
     )
     if not job:
+        return False
+    if not _is_retry_safe_p0_alert(session, job):
         return False
     try:
         email_sender.send(
@@ -707,8 +736,17 @@ def retry_pending_alerts(session: Session, email_sender, now: datetime) -> int:
     job_ids = list(
         session.scalars(
             select(AlertJob.id)
+            .join(
+                MessageRecord,
+                (AlertJob.chat_id == MessageRecord.chat_id)
+                & (AlertJob.message_id == MessageRecord.message_id),
+            )
             .where(AlertJob.status == "pending")
             .where(AlertJob.next_attempt_at <= now)
+            .where(AlertJob.alert_type == "p0")
+            .where(MessageRecord.p0_llm_called_at.is_not(None))
+            .where(MessageRecord.p0_classification == "P0")
+            .where(MessageRecord.p0_confidence >= P0_MIN_CONFIDENCE)
             .order_by(AlertJob.created_at, AlertJob.id)
         )
     )
@@ -719,6 +757,27 @@ def retry_pending_alerts(session: Session, email_sender, now: datetime) -> int:
         if job:
             sent += int(send_claimed_alert(session, job.id, token, email_sender, now))
     return sent
+
+
+def cancel_legacy_alerts(session: Session) -> int:
+    """Cancel pending/sending alert jobs that cannot be proven to be current P0 alerts."""
+    jobs = list(
+        session.scalars(
+            select(AlertJob).where(AlertJob.status.in_(["pending", "sending"]))
+        )
+    )
+    cancelled = 0
+    for job in jobs:
+        if _is_retry_safe_p0_alert(session, job):
+            continue
+        job.status = "cancelled"
+        job.next_attempt_at = None
+        job.claimed_at = None
+        job.claim_token = None
+        job.last_error_safe = "legacy_alert_cancelled"
+        cancelled += 1
+    session.commit()
+    return cancelled
 
 
 def release_stale_alert_claims(session: Session, now: datetime, stale_minutes: int = 10) -> int:

@@ -45,6 +45,7 @@ sudo chmod 600 /opt/telegram-detox/secrets/google_oauth_client.json
 sudo chmod 700 /opt/telegram-detox/data /opt/telegram-detox/secrets
 sudo -u telegram-detox /opt/telegram-detox/.venv/bin/python -m app.cli.security_check
 sudo -u telegram-detox /opt/telegram-detox/.venv/bin/python -m app.cli.healthcheck
+sudo -u telegram-detox /opt/telegram-detox/.venv/bin/python -m app.cli.cancel_legacy_alerts
 ```
 
 The OAuth client JSON and token are secrets. After copying them to a VPS, keep mode
@@ -69,6 +70,7 @@ The unit logs to `journalctl`; it contains no secrets.
 
 ```bash
 sudo -u telegram-detox git -C /opt/telegram-detox pull
+sudo -u telegram-detox /opt/telegram-detox/.venv/bin/python -m app.cli.cleanup
 sudo -u telegram-detox /opt/telegram-detox/.venv/bin/python -m pytest
 sudo -u telegram-detox /opt/telegram-detox/.venv/bin/python -m ruff check .
 sudo systemctl restart telegram-detox

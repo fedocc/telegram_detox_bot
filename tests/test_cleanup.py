@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+from app.cli.cleanup import run as run_cleanup_cli
 from app.db import repository
+from app.db.session import init_db
 from app.db.tables import DigestRecord
 from app.email.sender import EmailSendError
 from app.llm.client import LLMError
@@ -106,3 +108,36 @@ def test_cleanup_keeps_digests_for_90_days(session, now) -> None:
 
     assert digests == 1
     assert len(session.query(DigestRecord).all()) == 1
+
+
+def test_cleanup_cli_cancels_unsafe_alerts_idempotently_without_private_text(settings, now) -> None:
+    factory = init_db(settings)
+    with factory() as session:
+        message = msg(chat_id="legacy-cleanup", message_id=1, text="private text must not print")
+        repository.save_message(session, message)
+        repository.mark_p0_classified(
+            session,
+            "legacy-cleanup",
+            1,
+            "P0",
+            now,
+            confidence=0.99,
+        )
+        repository.create_alert_job(
+            session,
+            chat_id="legacy-cleanup",
+            message_id=1,
+            alert_type="p0",
+            subject="legacy",
+            text_body="private text must not print",
+            html_body="<p>private text must not print</p>",
+            now=now,
+        )
+
+    output: list[str] = []
+    first = run_cleanup_cli(settings, output=output.append)
+    second = run_cleanup_cli(settings, output=output.append)
+
+    assert first[0] == 1
+    assert second[0] == 0
+    assert "private text must not print" not in "\n".join(output)

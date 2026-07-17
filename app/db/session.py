@@ -15,7 +15,12 @@ def make_engine(settings: Settings):
         if settings.database_url.startswith("sqlite")
         else {}
     )
-    return create_engine(settings.database_url, future=True, connect_args=connect_args)
+    return create_engine(
+        settings.database_url,
+        future=True,
+        connect_args=connect_args,
+        hide_parameters=True,
+    )
 
 
 def init_db(settings: Settings) -> sessionmaker[Session]:
@@ -45,6 +50,12 @@ def init_db(settings: Settings) -> sessionmaker[Session]:
                 connection.execute(
                     text("ALTER TABLE messages ADD COLUMN p0_classification VARCHAR(32)")
                 )
+            if "p0_llm_called_at" not in columns:
+                connection.execute(
+                    text("ALTER TABLE messages ADD COLUMN p0_llm_called_at DATETIME")
+                )
+            if "p0_confidence" not in columns:
+                connection.execute(text("ALTER TABLE messages ADD COLUMN p0_confidence FLOAT"))
             if "claimed_digest_id" not in columns:
                 connection.execute(
                     text("ALTER TABLE messages ADD COLUMN claimed_digest_id INTEGER")

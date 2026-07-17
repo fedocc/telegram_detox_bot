@@ -3,7 +3,12 @@ from __future__ import annotations
 import io
 import logging
 
+import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.config import Settings
+from app.db.session import make_engine
 from app.logging_config import configure_logging
 
 
@@ -66,3 +71,18 @@ def test_log_output_never_contains_configured_secret_values() -> None:
     assert "mail-secret" not in output
     assert "hash-secret" not in output
     assert "private.session" not in output
+
+
+def test_sqlalchemy_hides_private_statement_parameters(settings) -> None:
+    engine = make_engine(settings)
+    private_text = "private message text must not appear"
+
+    with engine.connect() as connection:
+        with pytest.raises(SQLAlchemyError) as exc_info:
+            connection.execute(
+                text("SELECT * FROM no_such_table WHERE body = :body"),
+                {"body": private_text},
+            )
+
+    assert engine.hide_parameters is True
+    assert private_text not in str(exc_info.value)

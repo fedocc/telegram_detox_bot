@@ -36,6 +36,9 @@ class P0Status(StrEnum):
     review = "REVIEW"
 
 
+P0_MIN_CONFIDENCE = 0.75
+
+
 class MessageRef(BaseModel):
     chat_id: str
     message_id: int
@@ -99,6 +102,17 @@ class DigestDirectMessage(BaseModel):
     summary: str
     needs_reply: bool
     action: str | None = None
+    what_happened: str | None = None
+    requests_to_me: str | None = None
+    important_context: str | None = None
+    action_items: str | None = None
+    should_open_telegram: bool | None = None
+    open_reason: str | None = None
+    media_summary: str | None = None
+    requests: str | None = None
+    context: str | None = None
+    open_telegram: bool = False
+    open_telegram_reason: str | None = None
     deadline_text: str | None = None
     deadline_at: datetime | None = None
     priority: Priority = Priority.p1
@@ -113,6 +127,17 @@ class DigestGroupUpdate(BaseModel):
     chat: str
     summary: str
     action: str | None = None
+    what_happened: str | None = None
+    requests_to_me: str | None = None
+    important_context: str | None = None
+    action_items: str | None = None
+    should_open_telegram: bool | None = None
+    open_reason: str | None = None
+    media_summary: str | None = None
+    requests: str | None = None
+    context: str | None = None
+    open_telegram: bool = False
+    open_telegram_reason: str | None = None
     priority: Priority = Priority.p2
     deadline_text: str | None = None
     deadline_at: datetime | None = None

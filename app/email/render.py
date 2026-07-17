@@ -53,12 +53,22 @@ def _metrics(item) -> str:
     return " " + " ".join(parts) if parts else ""
 
 
-def _action_text(item) -> str:
-    if getattr(item, "action", None):
-        return f" Действие: {item.action}."
-    if getattr(item, "needs_reply", False):
-        return " Нужно ответить."
-    return " Действий нет."
+def _semantic_details(item) -> str:
+    parts = [
+        f"Запросы: {getattr(item, 'requests_to_me', None) or 'Не определено.'}.",
+        f"Контекст: {getattr(item, 'important_context', None) or 'Не определено.'}.",
+        f"Действия: {getattr(item, 'action_items', None) or 'Не определено; проверьте чат.'}.",
+    ]
+    if getattr(item, "should_open_telegram", None) is True:
+        reason = getattr(item, "open_reason", None) or "нужна проверка контекста"
+        parts.append(f"Открыть Telegram: да — {reason}.")
+    elif getattr(item, "should_open_telegram", None) is False:
+        parts.append("Открыть Telegram: нет.")
+    else:
+        parts.append("Открыть Telegram: не определено.")
+    if getattr(item, "media_summary", None):
+        parts.append(item.media_summary)
+    return " " + " ".join(parts)
 
 
 def _review_reason(reason: str | None) -> str:
@@ -75,12 +85,14 @@ def render_plain_text(digest: DailyDigest) -> str:
     ] or ["- Нет"]
     parts += ["", "ЛИЧНЫЕ СООБЩЕНИЯ"]
     parts += [
-        f"- {x.chat}: {_summary(x.summary)}.{_metrics(x)}{_plain_deadline(x)}{_action_text(x)}"
+        f"- {x.chat}: {_summary(x.what_happened or x.summary)}.{_semantic_details(x)}"
+        f"{_metrics(x)}{_plain_deadline(x)}"
         for x in digest.direct_messages
     ] or ["- Нет"]
     parts += ["", "ГРУППЫ"]
     parts += [
-        f"- {x.chat}: {_summary(x.summary)}.{_metrics(x)}{_plain_deadline(x)}"
+        f"- {x.chat}: {_summary(x.what_happened or x.summary)}.{_semantic_details(x)}"
+        f"{_metrics(x)}{_plain_deadline(x)}"
         for x in digest.group_updates
     ] or ["- Нет"]
     parts += ["", "ПРОВЕРИТЬ ЛИЧНО"]
@@ -106,13 +118,13 @@ def render_html(digest: DailyDigest) -> str:
         for x in digest.p0_alerts
     ])
     direct = items([
-        f"<b>{_line(x.chat)}</b>: {_line(_summary(x.summary))}."
-        f"{_line(_metrics(x))}{_html_deadline(x)}{_line(_action_text(x))}"
+        f"<b>{_line(x.chat)}</b>: {_line(_summary(x.what_happened or x.summary))}."
+        f"{_line(_semantic_details(x))}{_line(_metrics(x))}{_html_deadline(x)}"
         for x in digest.direct_messages
     ])
     groups = items([
-        f"<b>{_line(x.chat)}</b>: {_line(_summary(x.summary))}."
-        f"{_line(_metrics(x))}{_html_deadline(x)}"
+        f"<b>{_line(x.chat)}</b>: {_line(_summary(x.what_happened or x.summary))}."
+        f"{_line(_semantic_details(x))}{_line(_metrics(x))}{_html_deadline(x)}"
         for x in digest.group_updates
     ])
     review = items([

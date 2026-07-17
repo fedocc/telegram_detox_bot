@@ -44,7 +44,7 @@ def _state_time(value: datetime) -> datetime:
 
 def _should_mark_old_review(message: StoredMessage) -> bool:
     if message.media_type != MediaType.none and not (message.text or message.caption):
-        return True
+        return False
     text = message.text or message.caption
     if message.chat_type == ChatType.private:
         return is_p0_candidate(text) or is_urgent_call_candidate(text)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -37,7 +37,12 @@ class MessageRecord(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+    p0_llm_called_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     p0_classification: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    p0_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     claimed_digest_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
 

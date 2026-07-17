@@ -15,7 +15,6 @@ from app.services.digest import (
     generate_digest,
     send_daily_digest_pipeline,
 )
-from app.services.maintenance import recover_missed_daily_digests
 from tests.fixtures.messages import msg
 
 
@@ -71,6 +70,28 @@ class MaskingLLM:
 class FailingLLM:
     def daily_digest(self, payload: dict) -> DailyDigest:
         raise LLMError("aitunnel down")
+
+
+class SemanticLLM:
+    def daily_digest(self, payload: dict) -> DailyDigest:
+        refs = payload["chats"][0]["messages"]
+        return DailyDigest(
+            date=payload["date"],
+            direct_messages=[
+                {
+                    "chat": "Маша",
+                    "summary": "Обсуждение поездки в Китай.",
+                    "what_happened": "Обсуждение поездки в Китай.",
+                    "requests_to_me": "Подтвердить даты.",
+                    "important_context": "Уезжает послезавтра.",
+                    "action_items": "Ответить сегодня.",
+                    "should_open_telegram": True,
+                    "open_reason": "Нужны детали маршрута.",
+                    "needs_reply": False,
+                    "source_refs": [item["source_ref"] for item in refs],
+                }
+            ],
+        )
 
 
 class FakeEmail:
@@ -282,7 +303,7 @@ def test_group_flood_is_compressed_to_noise_count(session, now) -> None:
     assert digest.noise_counts == [DigestNoiseCount(chat="Общий чат", count=5)]
 
 
-def test_unprocessed_media_without_caption_goes_to_review(session, now) -> None:
+def test_unprocessed_media_without_caption_is_inside_group_summary(session, now) -> None:
     repository.save_message(
         session,
         msg(
@@ -298,8 +319,53 @@ def test_unprocessed_media_without_caption_goes_to_review(session, now) -> None:
 
     digest = generate_digest(session, FakeLLM(), date(2026, 7, 7), "Europe/Moscow")
 
-    assert digest.review
-    assert "voice" in digest.review[0].reason
+    assert digest.review == []
+    assert "голосовое" in digest.group_updates[0].media_summary
+
+
+def test_media_noise_is_collapsed_per_chat(session, now) -> None:
+    for message_id, media_type in enumerate(
+        [MediaType.photo, MediaType.photo, MediaType.photo, MediaType.video, MediaType.voice],
+        start=20,
+    ):
+        repository.save_message(
+            session,
+            msg(message_id=message_id, text=None, media_type=media_type, timestamp=now),
+        )
+
+    digest = generate_digest(session, FakeLLM(), date(2026, 7, 7), "Europe/Moscow")
+
+    assert len(digest.direct_messages) == 1
+    assert "3 фото" in digest.direct_messages[0].media_summary
+    assert "1 видео" in digest.direct_messages[0].media_summary
+    assert "1 голосовое" in digest.direct_messages[0].media_summary
+
+
+def test_outgoing_media_is_not_added_to_media_summary(session, now) -> None:
+    repository.save_message(
+        session,
+        msg(message_id=26, text=None, media_type=MediaType.video, is_outgoing=True, timestamp=now),
+    )
+
+    digest = generate_digest(session, FakeLLM(), date(2026, 7, 7), "Europe/Moscow")
+
+    assert all(item.media_summary is None for item in digest.direct_messages)
+    assert digest.review == []
+
+
+def test_daily_digest_groups_private_messages_into_semantic_chat_summary(session) -> None:
+    repository.save_message(session, msg(message_id=30, text="Поездка в Китай"))
+    repository.save_message(session, msg(message_id=31, text="Я уезжаю послезавтра"))
+
+    digest = generate_digest(session, SemanticLLM(), date(2026, 7, 7), "Europe/Moscow")
+    output = render_plain_text(digest)
+
+    assert len(digest.direct_messages) == 1
+    assert len(digest.direct_messages[0].source_refs) == 2
+    assert "Обсуждение поездки в Китай" in output
+    assert "Запросы: Подтвердить даты" in output
+    assert "Контекст: Уезжает послезавтра" in output
+    assert "Открыть Telegram: да" in output
 
 
 def test_html_email_renders_without_errors() -> None:
@@ -311,6 +377,29 @@ def test_html_email_renders_without_errors() -> None:
 
     assert "<html" in html
     assert "Общий" in html
+
+
+def test_email_renders_should_open_telegram_false_as_no() -> None:
+    digest = DailyDigest(
+        date="2026-07-07",
+        direct_messages=[
+            {
+                "chat": "Маша",
+                "summary": "Обсуждение планов.",
+                "needs_reply": False,
+                "what_happened": "Обсуждение планов.",
+                "requests_to_me": "Нет.",
+                "important_context": "Нет.",
+                "action_items": "Нет.",
+                "should_open_telegram": False,
+                "open_reason": None,
+            }
+        ],
+    )
+
+    output = render_plain_text(digest) + render_html(digest)
+
+    assert "Открыть Telegram: нет." in output
 
 
 def test_digest_output_does_not_contain_llm_did_not_classify(session) -> None:
@@ -762,7 +851,7 @@ def test_fallback_digest_includes_private_messages(now) -> None:
     )
 
     assert digest.direct_messages[0].source_refs == [{"chat_id": "1", "message_id": 401}]
-    assert "1 входящих" in digest.direct_messages[0].summary
+    assert digest.direct_messages[0].summary == "secret personal"
 
 
 def test_fallback_digest_includes_all_private_messages(now) -> None:
@@ -833,8 +922,53 @@ def test_fallback_digest_includes_review_and_media(session, now) -> None:
 
     digest = fallback_digest(date(2026, 7, 7), rows)
 
-    assert any("media" in item.reason or "медиа" in item.reason.lower() for item in digest.review)
+    assert "фото" in digest.group_updates[0].media_summary
     assert any(item.reason == "Возможно важное сообщение" for item in digest.review)
+
+
+def test_shallow_digest_is_marked_conservatively_for_manual_context(session) -> None:
+    class ShallowLLM:
+        def daily_digest(self, payload: dict) -> DailyDigest:
+            return DailyDigest(
+                date=payload["date"],
+                direct_messages=[
+                    {
+                        "chat": "Маша",
+                        "summary": "Есть сообщение.",
+                        "needs_reply": False,
+                        "source_refs": [payload["chats"][0]["messages"][0]["source_ref"]],
+                    }
+                ],
+            )
+
+    repository.save_message(session, msg(message_id=650, text="неполный ответ"))
+    digest = generate_digest(session, ShallowLLM(), date(2026, 7, 7), "Europe/Moscow")
+    output = render_plain_text(digest)
+
+    assert digest.direct_messages[0].should_open_telegram is True
+    assert "Нужна проверка контекста" in output
+    assert "Действий нет" not in output
+
+
+def test_same_chat_title_different_chat_ids_are_not_merged(session) -> None:
+    repository.save_message(session, msg(chat_id="a", chat_title="Алексей", message_id=1))
+    repository.save_message(session, msg(chat_id="b", chat_title="Алексей", message_id=1))
+
+    digest = generate_digest(session, FakeLLM(), date(2026, 7, 7), "Europe/Moscow")
+
+    assert len(digest.direct_messages) == 2
+
+
+def test_fallback_keeps_same_title_chats_separate() -> None:
+    digest = fallback_digest(
+        date(2026, 7, 7),
+        [
+            msg(chat_id="a", chat_title="Алексей", message_id=1),
+            msg(chat_id="b", chat_title="Алексей", message_id=1),
+        ],
+    )
+
+    assert len(digest.direct_messages) == 2
 
 
 def test_running_digest_twice_does_not_resend_same_messages(session) -> None:
@@ -928,33 +1062,10 @@ def test_digest_query_uses_utc_internal_window_for_local_day(session) -> None:
     assert ("1", 801) in refs
 
 
-def test_missed_daily_digest_recovery_sends_previous_undigested_day(session) -> None:
-    email = FakeEmail()
-    repository.save_message(
-        session,
-        msg(
-            message_id=802,
-            text="missed yesterday",
-            timestamp=datetime.fromisoformat("2026-07-06T18:00:00+03:00"),
-        ),
-    )
+def test_startup_does_not_recover_old_daily_digests() -> None:
+    source = Path("app/telegram/client.py").read_text(encoding="utf-8")
 
-    recovered = recover_missed_daily_digests(
-        session,
-        FakeLLM(),
-        email,
-        "Europe/Moscow",
-        datetime.fromisoformat("2026-07-07T09:00:00+03:00"),
-    )
-
-    assert recovered == [date(2026, 7, 6)]
-    assert len(email.sent) == 1
-    rows = repository.messages_between(
-        session,
-        *day_bounds(date(2026, 7, 6), "Europe/Moscow"),
-        only_undigested=False,
-    )
-    assert rows[0].digested_at is not None
+    assert "recover_missed_daily_digests" not in source
 
 
 def test_pending_digest_prevents_manual_duplicate_send(session) -> None:

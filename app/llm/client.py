@@ -200,10 +200,29 @@ class HaikuClient:
             "Create a short practical Telegram daily digest as strict JSON. "
             "Never hide direct messages. If unsure whether something is safe "
             "background, put it in review. "
-            "Mention unprocessed media in review. Keep output concise and action-oriented. "
+            "Produce one semantic item per private chat and one per relevant group chat. "
+            "For every direct_messages and group_updates item, include all required keys: "
+            "summary, what_happened, requests_to_me, important_context, action_items, "
+            "should_open_telegram, and open_reason. Use null for an unknown text field, but "
+            "always include the key. Do not output counts as the summary and do "
+            "not restate each message. Media is already collapsed by the application. "
+            "Keep output concise and action-oriented. "
             f"Reference timestamp: {reference_timestamp}. Timezone: {self.settings.timezone}. "
             "Use deadline_text for relative or human deadline wording. "
             "Use deadline_at only for exact ISO 8601 datetimes, otherwise null. "
             "Return only valid JSON. No markdown. No code fences. No explanation."
         )
-        return self._validated_json(DailyDigest, system, json.dumps(payload, ensure_ascii=False))
+        digest = self._validated_json(DailyDigest, system, json.dumps(payload, ensure_ascii=False))
+        required = {
+            "summary",
+            "what_happened",
+            "requests_to_me",
+            "important_context",
+            "action_items",
+            "should_open_telegram",
+            "open_reason",
+        }
+        for item in [*digest.direct_messages, *digest.group_updates]:
+            if not required.issubset(item.model_fields_set):
+                raise LLMError("LLM daily digest omitted required semantic fields")
+        return digest

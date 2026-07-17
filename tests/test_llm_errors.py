@@ -274,9 +274,13 @@ def test_daily_digest_relative_deadline_does_not_fail(settings: Settings) -> Non
     client.client = FakeClient(
         MalformedCompletions(
             response_with(
-                '{"date":"2026-07-07","direct_messages":[{"chat":"Маша",'
-                '"summary":"Просит ответить через час.","needs_reply":true,'
-                '"deadline_at":"через час","deadline_text":null,'
+                    '{"date":"2026-07-07","direct_messages":[{"chat":"Маша",'
+                    '"summary":"Просит ответить через час.","needs_reply":true,'
+                    '"what_happened":"Просит ответить через час.",'
+                    '"requests_to_me":"Ответить.","important_context":null,'
+                    '"action_items":"Ответить через час.",'
+                    '"should_open_telegram":true,"open_reason":"Нужен ответ.",'
+                    '"deadline_at":"через час","deadline_text":null,'
                 '"source_refs":[{"chat_id":"1","message_id":1}]}]}'
             )
         )
@@ -286,6 +290,22 @@ def test_daily_digest_relative_deadline_does_not_fail(settings: Settings) -> Non
 
     assert digest.direct_messages[0].deadline_text == "через час"
     assert digest.direct_messages[0].deadline_at is None
+
+
+def test_daily_digest_missing_semantic_fields_becomes_llm_error(settings: Settings) -> None:
+    client = HaikuClient(settings)
+    client.client = FakeClient(
+        MalformedCompletions(
+            response_with(
+                '{"date":"2026-07-07","direct_messages":[{"chat":"Маша",'
+                '"summary":"Есть сообщение.","needs_reply":false,'
+                '"source_refs":[{"chat_id":"1","message_id":1}]}]}'
+            )
+        )
+    )
+
+    with pytest.raises(LLMError, match="semantic fields"):
+        client.daily_digest({"date": "2026-07-07", "chats": []})
 
 
 def test_digest_models_use_deadline_text_and_deadline_at() -> None:

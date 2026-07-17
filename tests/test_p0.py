@@ -4,7 +4,7 @@ from app.db import repository
 from app.email.sender import EmailSendError
 from app.llm.client import LLMError
 from app.models.schemas import ChatType, MediaType, P0Decision, P0Status
-from app.services.p0 import SAFE_TEXT_LIMIT, handle_p0_candidate
+from app.services.p0 import handle_p0_candidate
 from tests.fixtures.messages import msg
 
 
@@ -30,10 +30,12 @@ class FakeLLM:
         fail: bool = False,
         status: P0Status = P0Status.p0,
         deadline_text: str | None = None,
+        confidence: float = 0.9,
     ) -> None:
         self.fail = fail
         self.status = status
         self.deadline_text = deadline_text
+        self.confidence = confidence
         self.calls = 0
         self.payloads: list[dict] = []
 
@@ -47,20 +49,20 @@ class FakeLLM:
             summary="Просит позвонить через час.",
             action="Позвонить.",
             deadline_text=self.deadline_text,
-            confidence=0.9,
+            confidence=self.confidence,
         )
 
 
-def test_llm_failure_on_p0_candidate_sends_fallback_email(session) -> None:
+def test_llm_failure_on_private_p0_candidate_stays_in_digest(session) -> None:
     message = msg(text="Позвони через час")
     repository.save_message(session, message)
     email = FakeEmail()
 
     sent = handle_p0_candidate(session, message, FakeLLM(fail=True), email)
 
-    assert sent is True
-    assert len(email.sent) == 1
-    assert email.sent[0][0].startswith("[ВОЗМОЖНО СРОЧНО]")
+    assert sent is False
+    assert email.sent == []
+    assert repository.get_message(session, "1", 1).p0_review_candidate is True
 
 
 def test_duplicate_p0_does_not_send_second_email(session) -> None:
@@ -83,43 +85,63 @@ def test_non_candidate_does_not_call_email(session) -> None:
     assert email.sent == []
 
 
-def test_private_message_llm_error_sends_immediate_fallback_email(session) -> None:
+def test_random_private_text_does_not_send_email(session) -> None:
+    message = msg(text="смотри какой смешной ролик")
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(session, message, FakeLLM(status=P0Status.not_p0), email) is False
+    assert email.sent == []
+
+
+def test_low_confidence_p0_stays_in_digest(session) -> None:
+    message = msg(text="можешь потом посмотреть?")
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(
+        session,
+        message,
+        FakeLLM(status=P0Status.p0, confidence=0.4),
+        email,
+    ) is False
+    assert email.sent == []
+
+
+def test_private_message_llm_error_does_not_send_immediate_fallback_email(session) -> None:
     message = msg(text="можешь посмотреть?")
     repository.save_message(session, message)
     email = FakeEmail()
 
-    assert handle_p0_candidate(session, message, FakeLLM(fail=True), email) is True
+    assert handle_p0_candidate(session, message, FakeLLM(fail=True), email) is False
+    assert email.sent == []
 
-    assert email.sent[0][0] == "[ПРОВЕРЬ] новое личное сообщение"
 
-
-def test_p0_openai_error_sends_fallback_email(session) -> None:
+def test_p0_openai_error_does_not_send_fallback_email(session) -> None:
     message = msg(text="можешь посмотреть?")
     repository.save_message(session, message)
     email = FakeEmail()
 
-    assert handle_p0_candidate(session, message, FakeLLM(fail=True), email) is True
-    assert email.sent
+    assert handle_p0_candidate(session, message, FakeLLM(fail=True), email) is False
+    assert email.sent == []
 
 
-def test_private_message_review_sends_immediate_review_email(session) -> None:
+def test_private_message_review_stays_in_digest(session) -> None:
     message = msg(text="есть вопрос")
     repository.save_message(session, message)
     email = FakeEmail()
 
-    assert handle_p0_candidate(session, message, FakeLLM(status=P0Status.review), email) is True
+    assert handle_p0_candidate(session, message, FakeLLM(status=P0Status.review), email) is False
+    assert email.sent == []
 
-    assert email.sent[0][0] == "[ПРОВЕРЬ] возможно важное личное сообщение"
 
-
-def test_group_obvious_p0_llm_error_sends_fallback_email(session) -> None:
+def test_group_obvious_p0_llm_error_stays_in_digest(session) -> None:
     message = msg(chat_type="group", chat_title="Лаба", text="ASAP дедлайн через 30 минут")
     repository.save_message(session, message)
     email = FakeEmail()
 
-    assert handle_p0_candidate(session, message, FakeLLM(fail=True), email) is True
-
-    assert email.sent[0][0].startswith("[ВОЗМОЖНО СРОЧНО]")
+    assert handle_p0_candidate(session, message, FakeLLM(fail=True), email) is False
+    assert email.sent == []
 
 
 def test_p0_prefilter_handles_asap_deadline_variants() -> None:
@@ -131,22 +153,20 @@ def test_p0_prefilter_handles_asap_deadline_variants() -> None:
     assert is_p0_candidate("deadline in 2 hours")
 
 
-def test_p0_fallback_text_is_truncated(session) -> None:
+def test_llm_failure_does_not_forward_private_text(session) -> None:
     message = msg(text="Позвони " + ("x" * 2000))
     repository.save_message(session, message)
     email = FakeEmail()
 
-    assert handle_p0_candidate(session, message, FakeLLM(fail=True), email) is True
-
-    assert len(email.sent[0][1]) < SAFE_TEXT_LIMIT + 250
-    assert "..." in email.sent[0][1]
+    assert handle_p0_candidate(session, message, FakeLLM(fail=True), email) is False
+    assert email.sent == []
 
 
 def test_p0_smtp_failure_creates_pending_alert_job(session) -> None:
     message = msg(text="Позвони через час")
     repository.save_message(session, message)
 
-    assert handle_p0_candidate(session, message, FakeLLM(fail=True), FakeEmail(fail=True)) is True
+    assert handle_p0_candidate(session, message, FakeLLM(), FakeEmail(fail=True)) is True
 
     jobs = repository.pending_alert_jobs(session)
     assert len(jobs) == 1
@@ -157,7 +177,7 @@ def test_pending_p0_retry_works_when_gmail_api_send_fails(session) -> None:
     message = msg(text="Позвони через час")
     repository.save_message(session, message)
 
-    assert handle_p0_candidate(session, message, FakeLLM(fail=True), FailingGmailApiEmail())
+    assert handle_p0_candidate(session, message, FakeLLM(), FailingGmailApiEmail())
 
     jobs = repository.pending_alert_jobs(session)
     assert len(jobs) == 1
@@ -167,7 +187,7 @@ def test_pending_p0_retry_works_when_gmail_api_send_fails(session) -> None:
 def test_pending_p0_alert_is_retried_and_marked_sent(session, now) -> None:
     message = msg(text="Позвони через час", timestamp=now)
     repository.save_message(session, message)
-    handle_p0_candidate(session, message, FakeLLM(fail=True), FakeEmail(fail=True))
+    handle_p0_candidate(session, message, FakeLLM(), FakeEmail(fail=True))
 
     job = repository.pending_alert_jobs(session)[0]
     sent = repository.retry_pending_alerts(session, FakeEmail(), now=job.next_attempt_at)
@@ -179,7 +199,7 @@ def test_pending_p0_alert_is_retried_and_marked_sent(session, now) -> None:
 def test_pending_p0_alert_survives_restart(session) -> None:
     message = msg(text="Позвони через час")
     repository.save_message(session, message)
-    handle_p0_candidate(session, message, FakeLLM(fail=True), FakeEmail(fail=True))
+    handle_p0_candidate(session, message, FakeLLM(), FakeEmail(fail=True))
 
     assert repository.pending_alert_jobs(session)[0].chat_id == "1"
 
@@ -189,8 +209,8 @@ def test_p0_alert_deduplicated_by_chat_and_message_id(session) -> None:
     repository.save_message(session, message)
     email = FakeEmail(fail=True)
 
-    handle_p0_candidate(session, message, FakeLLM(fail=True), email)
-    handle_p0_candidate(session, message, FakeLLM(fail=True), email)
+    handle_p0_candidate(session, message, FakeLLM(), email)
+    handle_p0_candidate(session, message, FakeLLM(), email)
 
     assert len(repository.pending_alert_jobs(session)) == 1
 
@@ -198,7 +218,7 @@ def test_p0_alert_deduplicated_by_chat_and_message_id(session) -> None:
 def test_p0_retry_does_not_email_storm(session, now) -> None:
     message = msg(text="Позвони через час", timestamp=now)
     repository.save_message(session, message)
-    handle_p0_candidate(session, message, FakeLLM(fail=True), FakeEmail(fail=True))
+    handle_p0_candidate(session, message, FakeLLM(), FakeEmail(fail=True))
     email = FakeEmail(fail=True)
 
     assert repository.retry_pending_alerts(session, email, now=now) == 0
@@ -209,7 +229,7 @@ def test_first_failed_alert_waits_one_minute_before_retry(session, now) -> None:
     message = msg(text="Позвони через час", timestamp=now)
     repository.save_message(session, message)
 
-    handle_p0_candidate(session, message, FakeLLM(fail=True), FakeEmail(fail=True))
+    handle_p0_candidate(session, message, FakeLLM(), FakeEmail(fail=True))
     job = repository.pending_alert_jobs(session)[0]
 
     assert job.attempts == 1
@@ -220,7 +240,7 @@ def test_first_failed_alert_waits_one_minute_before_retry(session, now) -> None:
 def test_retry_respects_next_attempt_at(session, now) -> None:
     message = msg(text="Позвони через час", timestamp=now)
     repository.save_message(session, message)
-    handle_p0_candidate(session, message, FakeLLM(fail=True), FakeEmail(fail=True))
+    handle_p0_candidate(session, message, FakeLLM(), FakeEmail(fail=True))
     email = FakeEmail()
 
     assert repository.retry_pending_alerts(session, email, now=now) == 0
@@ -232,7 +252,7 @@ def test_backoff_caps_at_sixty_minutes(session, now) -> None:
 
     message = msg(text="Позвони через час", timestamp=now)
     repository.save_message(session, message)
-    handle_p0_candidate(session, message, FakeLLM(fail=True), FakeEmail(fail=True))
+    handle_p0_candidate(session, message, FakeLLM(), FakeEmail(fail=True))
     job = repository.pending_alert_jobs(session)[0]
     for _ in range(5):
         repository.retry_pending_alerts(session, FakeEmail(fail=True), now=job.next_attempt_at)
@@ -246,7 +266,7 @@ def test_backoff_caps_at_sixty_minutes(session, now) -> None:
 def test_two_workers_cannot_claim_same_alert_job(session, now) -> None:
     message = msg(text="Позвони через час", timestamp=now)
     repository.save_message(session, message)
-    handle_p0_candidate(session, message, FakeLLM(fail=True), FakeEmail(fail=True))
+    handle_p0_candidate(session, message, FakeLLM(), FakeEmail(fail=True))
     job = repository.pending_alert_jobs(session)[0]
 
     first = repository.claim_pending_alert(session, job.id, job.next_attempt_at, "token-1")
@@ -259,7 +279,7 @@ def test_two_workers_cannot_claim_same_alert_job(session, now) -> None:
 def test_stale_sending_alert_becomes_retryable(session, now) -> None:
     message = msg(text="Позвони через час", timestamp=now)
     repository.save_message(session, message)
-    handle_p0_candidate(session, message, FakeLLM(fail=True), FakeEmail(fail=True))
+    handle_p0_candidate(session, message, FakeLLM(), FakeEmail(fail=True))
     job = repository.pending_alert_jobs(session)[0]
     repository.claim_pending_alert(session, job.id, job.next_attempt_at, "token-1")
 
@@ -271,7 +291,7 @@ def test_stale_sending_alert_becomes_retryable(session, now) -> None:
 def test_claimed_job_is_not_sent_by_second_worker(session, now) -> None:
     message = msg(text="Позвони через час", timestamp=now)
     repository.save_message(session, message)
-    handle_p0_candidate(session, message, FakeLLM(fail=True), FakeEmail(fail=True))
+    handle_p0_candidate(session, message, FakeLLM(), FakeEmail(fail=True))
     job = repository.pending_alert_jobs(session)[0]
     repository.claim_pending_alert(session, job.id, job.next_attempt_at, "token-1")
     email = FakeEmail()
@@ -283,7 +303,7 @@ def test_claimed_job_is_not_sent_by_second_worker(session, now) -> None:
     assert email.sent == []
 
 
-def test_p0_malformed_provider_response_sends_fallback_email(session, settings) -> None:
+def test_p0_malformed_provider_response_stays_in_digest(session, settings) -> None:
     from app.llm.client import HaikuClient
     from tests.test_llm_errors import FakeClient, MalformedCompletions
 
@@ -293,11 +313,11 @@ def test_p0_malformed_provider_response_sends_fallback_email(session, settings) 
     client.client = FakeClient(MalformedCompletions(type("Response", (), {"choices": []})()))
     email = FakeEmail()
 
-    assert handle_p0_candidate(session, message, client, email) is True
-    assert email.sent[0][0] == "[ПРОВЕРЬ] новое личное сообщение"
+    assert handle_p0_candidate(session, message, client, email) is False
+    assert email.sent == []
 
 
-def test_p0_real_openai_error_uses_fallback_email(session, settings) -> None:
+def test_p0_real_openai_error_stays_in_digest(session, settings) -> None:
     from app.llm.client import HaikuClient
     from tests.test_llm_errors import BrokenClient
 
@@ -307,20 +327,17 @@ def test_p0_real_openai_error_uses_fallback_email(session, settings) -> None:
     client.client = BrokenClient()
     email = FakeEmail()
 
-    assert handle_p0_candidate(session, message, client, email) is True
-    assert email.sent
+    assert handle_p0_candidate(session, message, client, email) is False
+    assert email.sent == []
 
 
-def test_p0_fallback_text_is_capped_and_escaped(session) -> None:
+def test_p0_llm_error_does_not_create_email_body(session) -> None:
     message = msg(text="<script>" + ("x" * 2000))
     repository.save_message(session, message)
     email = FakeEmail()
 
-    handle_p0_candidate(session, message, FakeLLM(fail=True), email)
-
-    assert "<script>" in email.sent[0][1]
-    assert "&lt;script&gt;" in email.sent[0][2]
-    assert len(email.sent[0][1]) < SAFE_TEXT_LIMIT + 250
+    assert handle_p0_candidate(session, message, FakeLLM(fail=True), email) is False
+    assert email.sent == []
 
 
 def test_p0_message_is_deduplicated(session) -> None:
@@ -328,10 +345,10 @@ def test_p0_message_is_deduplicated(session) -> None:
     repository.save_message(session, message)
     email = FakeEmail()
 
-    assert handle_p0_candidate(session, message, FakeLLM(status=P0Status.review), email) is True
+    assert handle_p0_candidate(session, message, FakeLLM(status=P0Status.review), email) is False
     assert handle_p0_candidate(session, message, FakeLLM(status=P0Status.review), email) is False
 
-    assert len(email.sent) == 1
+    assert email.sent == []
 
 
 def test_call_back_in_one_hour_is_p0() -> None:
@@ -352,6 +369,12 @@ def test_join_call_in_thirty_minutes_is_p0() -> None:
     assert is_urgent_call_candidate("Please join the call in 30 minutes")
 
 
+def test_phone_arrives_today_is_not_an_urgent_call_candidate() -> None:
+    from app.services.prefilter import is_urgent_call_candidate
+
+    assert not is_urgent_call_candidate("My new phone arrives today")
+
+
 def test_call_tomorrow_without_urgency_is_not_forced_p0(session) -> None:
     message = msg(text="Can we call tomorrow?")
     repository.save_message(session, message)
@@ -362,44 +385,167 @@ def test_call_tomorrow_without_urgency_is_not_forced_p0(session) -> None:
     assert repository.pending_alert_jobs(session) == []
 
 
-def test_llm_not_p0_is_overridden_for_urgent_call_candidate(session) -> None:
+def test_explicit_llm_not_p0_is_not_overridden_for_urgent_call(session) -> None:
     message = msg(text="Please call me back in one hour")
     repository.save_message(session, message)
     email = FakeEmail()
 
-    assert handle_p0_candidate(session, message, FakeLLM(status=P0Status.not_p0), email) is True
-
-    assert email.sent[0][0].startswith("[СРОЧНО]")
-    assert "deterministic_urgent_call_override" in email.sent[0][1]
+    assert handle_p0_candidate(session, message, FakeLLM(status=P0Status.not_p0), email) is False
+    assert email.sent == []
 
 
-def test_override_keeps_deadline_text(session) -> None:
-    message = msg(text="Please call me back in one hour")
+def test_phone_arrives_today_not_p0_does_not_send_email(session) -> None:
+    message = msg(text="My new phone arrives today")
     repository.save_message(session, message)
     email = FakeEmail()
 
-    handle_p0_candidate(
+    assert handle_p0_candidate(
         session,
         message,
-        FakeLLM(status=P0Status.not_p0, deadline_text="in 1 hour"),
+        FakeLLM(status=P0Status.not_p0, confidence=0.99),
         email,
-    )
+    ) is False
+    assert email.sent == []
 
-    assert "in 1 hour" in email.sent[0][1]
 
-
-def test_override_creates_immediate_alert_job(session) -> None:
-    message = msg(text="Перезвони мне через 30 минут")
+def test_call_today_if_you_can_not_p0_does_not_send_email(session) -> None:
+    message = msg(text="Call me today if you can")
     repository.save_message(session, message)
     email = FakeEmail()
 
-    handle_p0_candidate(session, message, FakeLLM(status=P0Status.not_p0), email)
+    assert handle_p0_candidate(session, message, FakeLLM(status=P0Status.not_p0), email) is False
+    assert email.sent == []
 
-    jobs = repository.pending_alert_jobs(session)
+
+def test_explicit_urgent_request_with_clear_p0_sends_email(session) -> None:
+    message = msg(text="срочно ответь, нужен ответ сегодня")
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(
+        session, message, FakeLLM(status=P0Status.p0, confidence=0.95), email
+    )
     assert len(email.sent) == 1
-    assert jobs == []
-    stored = repository.get_message(session, message.chat_id, message.message_id)
-    assert stored.alert_sent is True
+
+
+def test_legacy_review_alert_is_not_retried_and_can_be_cancelled(session, now) -> None:
+    job = repository.create_alert_job(
+        session,
+        chat_id="legacy",
+        message_id=1,
+        alert_type="review_private",
+        subject="legacy",
+        text_body="private text",
+        html_body="<p>private text</p>",
+        now=now,
+    )
+    email = FakeEmail()
+
+    assert repository.retry_pending_alerts(session, email, now=now) == 0
+    assert email.sent == []
+    assert repository.cancel_legacy_alerts(session) == 1
+    assert job.status == "cancelled"
+
+
+def test_legacy_p0_alert_without_confirmed_p0_is_not_retried(session, now) -> None:
+    message = msg(chat_id="legacy", message_id=2, text="old failed classifier")
+    repository.save_message(session, message)
+    job = repository.create_alert_job(
+        session,
+        chat_id="legacy",
+        message_id=2,
+        alert_type="p0",
+        subject="legacy",
+        text_body="private text",
+        html_body="<p>private text</p>",
+        now=now,
+    )
+
+    assert repository.retry_pending_alerts(session, FakeEmail(), now=now) == 0
+    assert repository.cancel_legacy_alerts(session) == 1
+    assert job.status == "cancelled"
+
+
+def test_legacy_p0_with_false_positive_status_but_no_llm_marker_is_cancelled(session, now) -> None:
+    message = msg(chat_id="legacy-marker", message_id=3, text="old override")
+    repository.save_message(session, message)
+    repository.mark_p0_classified(
+        session,
+        "legacy-marker",
+        3,
+        "P0",
+        now,
+        confidence=0.99,
+    )
+    job = repository.create_alert_job(
+        session,
+        chat_id="legacy-marker",
+        message_id=3,
+        alert_type="p0",
+        subject="legacy",
+        text_body="private text",
+        html_body="<p>private text</p>",
+        now=now,
+    )
+    email = FakeEmail()
+
+    assert repository.retry_pending_alerts(session, email, now=now) == 0
+    assert email.sent == []
+    assert repository.cancel_legacy_alerts(session) == 1
+    assert job.status == "cancelled"
+
+
+def test_new_policy_p0_with_marker_and_confidence_can_retry(session, now) -> None:
+    message = msg(chat_id="new-policy", message_id=4, text="urgent request")
+    repository.save_message(session, message)
+    repository.mark_p0_llm_called(session, "new-policy", 4, now)
+    repository.mark_p0_classified(session, "new-policy", 4, "P0", now, confidence=0.95)
+    repository.create_alert_job(
+        session,
+        chat_id="new-policy",
+        message_id=4,
+        alert_type="p0",
+        subject="urgent",
+        text_body="safe body",
+        html_body="<p>safe body</p>",
+        now=now,
+    )
+    email = FakeEmail()
+
+    assert repository.retry_pending_alerts(session, email, now=now) == 1
+    assert len(email.sent) == 1
+
+
+def test_legacy_non_p0_alert_types_are_cancelled(session, now) -> None:
+    for index, alert_type in enumerate(["review_private", "review_group", "fallback_group_p0"]):
+        repository.create_alert_job(
+            session,
+            chat_id=f"legacy-type-{index}",
+            message_id=index + 1,
+            alert_type=alert_type,
+            subject="legacy",
+            text_body="private text",
+            html_body="<p>private text</p>",
+            now=now,
+        )
+
+    assert repository.cancel_legacy_alerts(session) == 3
+    assert repository.pending_alert_jobs(session) == []
+
+
+def test_media_burst_does_not_exhaust_llm_cap(session, settings) -> None:
+    settings.p0_max_llm_calls_per_hour = 1
+    for message_id in range(1, 5):
+        media = msg(message_id=message_id, text=None, media_type=MediaType.photo)
+        repository.save_message(session, media)
+        handle_p0_candidate(session, media, FakeLLM(), FakeEmail(), settings=settings)
+    text_message = msg(message_id=5, text="обычный текст")
+    repository.save_message(session, text_message)
+    llm = FakeLLM(status=P0Status.not_p0)
+
+    handle_p0_candidate(session, text_message, llm, FakeEmail(), settings=settings)
+
+    assert llm.calls == 1
 
 
 def test_incoming_private_text_triggers_immediate_llm_p0_classification(session, settings) -> None:
@@ -422,7 +568,7 @@ def test_outgoing_message_does_not_trigger_llm(session, settings) -> None:
     assert llm.calls == 0
 
 
-def test_non_text_media_does_not_trigger_llm_and_goes_to_manual_review(session, settings) -> None:
+def test_non_text_media_does_not_trigger_llm_or_immediate_email(session, settings) -> None:
     message = msg(text=None, media_type=MediaType.voice)
     repository.save_message(session, message)
     llm = FakeLLM()
@@ -432,9 +578,38 @@ def test_non_text_media_does_not_trigger_llm_and_goes_to_manual_review(session, 
 
     stored = repository.get_message(session, message.chat_id, message.message_id)
     assert llm.calls == 0
-    assert stored.p0_review_candidate is True
+    assert stored.p0_review_candidate is False
+    assert email.sent == []
+
+
+def test_private_media_with_urgent_caption_can_send_p0_email(session, settings) -> None:
+    message = msg(
+        text="Срочно подключайся к созвону через 10 минут",
+        media_type=MediaType.video,
+    )
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(
+        session, message, FakeLLM(status=P0Status.p0), email, settings=settings
+    )
     assert len(email.sent) == 1
-    assert email.sent[0][0] == "[ПРОВЕРЬ] возможно важное личное сообщение"
+    assert email.sent[0][0].startswith("[СРОЧНО]")
+
+
+def test_private_media_with_nonurgent_caption_does_not_send_email(session, settings) -> None:
+    message = msg(text="видео с прогулки", media_type=MediaType.video)
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(
+        session,
+        message,
+        FakeLLM(status=P0Status.not_p0),
+        email,
+        settings=settings,
+    ) is False
+    assert email.sent == []
 
 
 def test_group_message_without_routing_does_not_trigger_immediate_llm(session, settings) -> None:
@@ -486,8 +661,8 @@ def test_group_watchlist_triggers_immediate_llm(session, settings) -> None:
     assert llm.calls == 1
 
 
-def test_p0_and_review_both_send_immediate_email(session, settings) -> None:
-    p0_message = msg(message_id=11, text="проверь")
+def test_only_p0_sends_immediate_email(session, settings) -> None:
+    p0_message = msg(message_id=11, text="Нужно сегодня до 18:00")
     review_message = msg(message_id=12, text="проверь")
     repository.save_message(session, p0_message)
     repository.save_message(session, review_message)
@@ -502,7 +677,7 @@ def test_p0_and_review_both_send_immediate_email(session, settings) -> None:
         settings=settings,
     )
 
-    assert len(email.sent) == 2
+    assert len(email.sent) == 1
 
 
 def test_not_p0_does_not_send_immediate_email(session, settings) -> None:
@@ -526,7 +701,7 @@ def test_same_message_is_not_classified_twice(session, settings) -> None:
     assert llm.calls == 1
 
 
-def test_hourly_llm_cap_hit_private_fails_open_review_email(session, settings) -> None:
+def test_hourly_llm_cap_hit_private_stays_in_digest(session, settings) -> None:
     settings.p0_max_llm_calls_per_hour = 0
     message = msg(text="привет")
     repository.save_message(session, message)
@@ -536,8 +711,8 @@ def test_hourly_llm_cap_hit_private_fails_open_review_email(session, settings) -
     handle_p0_candidate(session, message, llm, email, settings=settings)
 
     assert llm.calls == 0
-    assert len(email.sent) == 1
-    assert "budget cap hit" in email.sent[0][1]
+    assert email.sent == []
+    assert repository.get_message(session, "1", 1).p0_review_candidate is True
 
 
 def test_p0_classifier_message_text_is_capped(session, settings) -> None:

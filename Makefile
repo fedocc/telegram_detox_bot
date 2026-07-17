@@ -1,6 +1,6 @@
 PYTHON := .venv/bin/python
 
-.PHONY: setup check-venv test lint test-llm test-email telegram-login run digest-now cleanup security-check healthcheck
+.PHONY: setup check-venv test lint test-llm test-email telegram-login run digest-now cleanup security-check healthcheck cancel-legacy-alerts
 
 setup:
 	python3.12 -m venv .venv
@@ -39,3 +39,6 @@ security-check: check-venv
 
 healthcheck: check-venv
 	$(PYTHON) -m app.cli.healthcheck
+
+cancel-legacy-alerts: check-venv
+	$(PYTHON) -m app.cli.cancel_legacy_alerts
