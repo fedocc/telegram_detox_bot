@@ -465,8 +465,6 @@ def send_daily_digest_pipeline(
     email_sender: EmailSender,
     day: date,
     timezone: str,
-    *,
-    max_email_attempts: int = 3,
 ) -> DailyDigest:
     pending = repository.pending_digest_for_date(session, day.isoformat())
     if pending:

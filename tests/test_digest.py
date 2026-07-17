@@ -484,7 +484,6 @@ def test_email_failure_creates_retryable_pending_digest(session) -> None:
         FakeEmail(fail=True),
         date(2026, 7, 7),
         "Europe/Moscow",
-        max_email_attempts=1,
     )
 
     assert digest.email_status == "pending"
@@ -502,7 +501,6 @@ def test_digest_email_failure_creates_pending_digest(session) -> None:
         FakeEmail(fail=True),
         date(2026, 7, 7),
         "Europe/Moscow",
-        max_email_attempts=1,
     )
 
     assert repository.pending_digests(session)[0].email_status == "pending"
@@ -517,7 +515,6 @@ def test_pending_digest_retry_works_when_gmail_api_send_fails(session) -> None:
         FailingGmailApiEmail(),
         date(2026, 7, 7),
         "Europe/Moscow",
-        max_email_attempts=1,
     )
 
     record = repository.pending_digests(session)[0]
@@ -583,7 +580,6 @@ def test_failed_initial_digest_send_sets_backoff_timestamp(session) -> None:
         FakeEmail(fail=True),
         date(2026, 7, 7),
         "Europe/Moscow",
-        max_email_attempts=1,
     )
     record = repository.pending_digests(session)[0]
 
@@ -600,7 +596,6 @@ def test_pending_digest_retried_and_marked_sent(session) -> None:
         FakeEmail(fail=True),
         date(2026, 7, 7),
         "Europe/Moscow",
-        max_email_attempts=1,
     )
     email = FakeEmail()
     record = repository.pending_digests(session)[0]
@@ -624,7 +619,6 @@ def test_first_failed_digest_waits_one_minute_before_retry(session, now) -> None
         FakeEmail(fail=True),
         date(2026, 7, 7),
         "Europe/Moscow",
-        max_email_attempts=1,
     )
     record = repository.pending_digests(session)[0]
 
@@ -640,7 +634,6 @@ def test_pending_digest_retry_reuses_original_html(session) -> None:
         FakeEmail(fail=True),
         date(2026, 7, 7),
         "Europe/Moscow",
-        max_email_attempts=1,
     )
     record = repository.pending_digests(session)[0]
     record.html_payload = "<p>ORIGINAL HTML</p>"
@@ -660,7 +653,6 @@ def test_pending_digest_retry_reuses_original_text(session) -> None:
         FakeEmail(fail=True),
         date(2026, 7, 7),
         "Europe/Moscow",
-        max_email_attempts=1,
     )
     record = repository.pending_digests(session)[0]
     record.text_payload = "ORIGINAL TEXT"
@@ -681,7 +673,6 @@ def test_pending_digest_retry_does_not_call_llm_again(session) -> None:
         FakeEmail(fail=True),
         date(2026, 7, 7),
         "Europe/Moscow",
-        max_email_attempts=1,
     )
     record = repository.pending_digests(session)[0]
 
@@ -698,7 +689,6 @@ def test_two_workers_cannot_claim_same_digest_job(session) -> None:
         FakeEmail(fail=True),
         date(2026, 7, 7),
         "Europe/Moscow",
-        max_email_attempts=1,
     )
     record = repository.pending_digests(session)[0]
 
@@ -717,7 +707,6 @@ def test_stale_sending_digest_becomes_retryable(session, now) -> None:
         FakeEmail(fail=True),
         date(2026, 7, 7),
         "Europe/Moscow",
-        max_email_attempts=1,
     )
     record = repository.pending_digests(session)[0]
     repository.claim_pending_digest(session, record.id, record.next_attempt_at, "token-1")
@@ -977,7 +966,6 @@ def test_pending_digest_prevents_manual_duplicate_send(session) -> None:
         email,
         date(2026, 7, 7),
         "Europe/Moscow",
-        max_email_attempts=1,
     )
     second_email = FakeEmail()
     second = send_daily_digest_pipeline(
@@ -1381,7 +1369,6 @@ def test_failed_digest_send_keeps_claimed_messages_retryable_without_rebuild(ses
         email,
         date(2026, 7, 7),
         "Europe/Moscow",
-        max_email_attempts=1,
     )
     record = repository.pending_digests(session)[0]
     first_delivery_id = record.delivery_id

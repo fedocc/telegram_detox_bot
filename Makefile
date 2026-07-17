@@ -1,6 +1,6 @@
 PYTHON := .venv/bin/python
 
-.PHONY: setup check-venv test lint test-llm test-email telegram-login run digest-now cleanup
+.PHONY: setup check-venv test lint test-llm test-email telegram-login run digest-now cleanup security-check healthcheck
 
 setup:
 	python3.12 -m venv .venv
@@ -33,3 +33,9 @@ digest-now: check-venv
 
 cleanup: check-venv
 	$(PYTHON) -m app.cli.cleanup
+
+security-check: check-venv
+	$(PYTHON) -m app.cli.security_check
+
+healthcheck: check-venv
+	$(PYTHON) -m app.cli.healthcheck

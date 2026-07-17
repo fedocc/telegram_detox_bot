@@ -1,0 +1,22 @@
+[Unit]
+Description=Telegram Detox digest service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=telegram-detox
+Group=telegram-detox
+WorkingDirectory=/opt/telegram-detox
+EnvironmentFile=/opt/telegram-detox/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/telegram-detox/.venv/bin/python -m app.cli.run
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
