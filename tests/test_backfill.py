@@ -342,6 +342,66 @@ async def test_backfill_oldest_first_after_latest_does_not_skip_older_missed_mes
         assert repository.get_message(session, "1", 13) is None
 
 
+async def test_backfill_per_chat_cap_is_per_run_not_lifetime_completion(
+    settings,
+    session_factory,
+    now,
+) -> None:
+    settings.backfill_max_messages_per_chat = 2
+    sender = _user(42, "Sender")
+    client = _client_with_private_messages(
+        [
+            FakeTelegramMessage(message_id=1, text="one", timestamp=now, sender=sender),
+            FakeTelegramMessage(message_id=2, text="two", timestamp=now, sender=sender),
+            FakeTelegramMessage(message_id=3, text="three", timestamp=now, sender=sender),
+        ]
+    )
+
+    first = await run_startup_backfill(
+        client=client,
+        settings=settings,
+        session_factory=session_factory,
+        llm=FakeP0LLM(),
+        email_sender=FakeEmail(),
+        now=now,
+    )
+    with session_factory() as session:
+        states = repository.pending_backfill_states(session)
+        rows_after_first = repository.messages_between(
+            session,
+            now - timedelta(days=1),
+            now + timedelta(days=1),
+            only_undigested=False,
+        )
+    second = await run_startup_backfill(
+        client=client,
+        settings=settings,
+        session_factory=session_factory,
+        llm=FakeP0LLM(),
+        email_sender=FakeEmail(),
+        now=now + timedelta(minutes=1),
+    )
+    with session_factory() as session:
+        rows_after_second = repository.messages_between(
+            session,
+            now - timedelta(days=1),
+            now + timedelta(days=1),
+            only_undigested=False,
+        )
+        pending = repository.pending_backfill_states(session)
+
+    assert first.messages_inserted == 2
+    assert len(rows_after_first) == 2
+    assert states and states[0].completed is False
+    assert second.messages_inserted == 1
+    assert {(row.chat_id, row.message_id) for row in rows_after_second} == {
+        ("1", 1),
+        ("1", 2),
+        ("1", 3),
+    }
+    assert pending == []
+
+
 async def test_old_backfilled_messages_do_not_trigger_immediate_p0_spam(
     settings,
     session_factory,

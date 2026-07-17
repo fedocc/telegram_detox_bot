@@ -1030,6 +1030,95 @@ def test_two_sessions_do_not_send_duplicate_digest_batch(settings) -> None:
     assert records == []
 
 
+def test_two_pipeline_invocations_overlap_after_payload_persistence(settings, monkeypatch) -> None:
+    factory = init_db(settings)
+    with factory() as first_session:
+        repository.save_message(first_session, msg(message_id=810, text="overlap payload"))
+    email = MessageIdEmail()
+    original_update = repository.update_digest_payload
+    triggered = False
+
+    def wrapped_update(session, record, digest, *, subject, text, html):
+        nonlocal triggered
+        original_update(session, record, digest, subject=subject, text=text, html=html)
+        if not triggered:
+            triggered = True
+            with factory() as second_session:
+                send_daily_digest_pipeline(
+                    second_session,
+                    FakeLLM(),
+                    email,
+                    date(2026, 7, 7),
+                    "Europe/Moscow",
+                )
+
+    monkeypatch.setattr(repository, "update_digest_payload", wrapped_update)
+
+    with factory() as first_session:
+        send_daily_digest_pipeline(
+            first_session,
+            FakeLLM(),
+            email,
+            date(2026, 7, 7),
+            "Europe/Moscow",
+        )
+
+    assert len(email.sent) == 1
+
+
+def test_pipeline_overlapping_with_retry_sends_once(settings, monkeypatch) -> None:
+    factory = init_db(settings)
+    with factory() as first_session:
+        repository.save_message(first_session, msg(message_id=811, text="retry overlap"))
+    email = MessageIdEmail()
+    original_send_claimed = repository.send_claimed_digest
+    triggered = False
+
+    def wrapped_send_claimed(session, record_id, claim_token, email_sender, now):
+        nonlocal triggered
+        if not triggered:
+            triggered = True
+            with factory() as retry_session:
+                repository.retry_pending_digests(retry_session, email_sender, now)
+        return original_send_claimed(session, record_id, claim_token, email_sender, now)
+
+    monkeypatch.setattr(repository, "send_claimed_digest", wrapped_send_claimed)
+
+    with factory() as first_session:
+        send_daily_digest_pipeline(
+            first_session,
+            FakeLLM(),
+            email,
+            date(2026, 7, 7),
+            "Europe/Moscow",
+        )
+
+    assert len(email.sent) == 1
+
+
+def test_pipeline_uses_claimed_digest_send_path(session, monkeypatch) -> None:
+    repository.save_message(session, msg(message_id=812, text="send path"))
+    original_send_claimed = repository.send_claimed_digest
+    calls = 0
+
+    def wrapped_send_claimed(session, record_id, claim_token, email_sender, now):
+        nonlocal calls
+        calls += 1
+        return original_send_claimed(session, record_id, claim_token, email_sender, now)
+
+    monkeypatch.setattr(repository, "send_claimed_digest", wrapped_send_claimed)
+
+    send_daily_digest_pipeline(
+        session,
+        FakeLLM(),
+        MessageIdEmail(),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+    )
+
+    assert calls == 1
+
+
 def test_crash_after_email_send_does_not_create_new_independent_digest(session) -> None:
     repository.save_message(session, msg(message_id=805, text="crash window"))
     crashing_email = CrashAfterSendEmail()
@@ -1063,6 +1152,105 @@ def test_crash_after_email_send_does_not_create_new_independent_digest(session) 
     assert digest.email_status == "pending"
     assert rows[0].claimed_digest_id is not None
     assert rows[0].digested_at is None
+
+
+def test_building_digest_is_not_sendable(session) -> None:
+    message = msg(message_id=807, text="building")
+    repository.save_message(session, message)
+    record, claimed_rows, created = repository.claim_digest_run_for_rows(
+        session,
+        digest_date="2026-07-07",
+        rows=[repository.get_message(session, "1", 807)],
+    )
+    email = MessageIdEmail()
+
+    sent = repository.retry_pending_digests(session, email, now=record.created_at)
+
+    assert created is True
+    assert claimed_rows
+    assert record.email_status == "building"
+    assert sent == 0
+    assert email.sent == []
+    assert repository.get_message(session, "1", 807).digested_at is None
+
+
+def test_crash_after_digest_claim_before_payload_is_recovered_without_empty_send(session) -> None:
+    message = msg(message_id=808, text="recover building")
+    repository.save_message(session, message)
+    record, _, _ = repository.claim_digest_run_for_rows(
+        session,
+        digest_date="2026-07-07",
+        rows=[repository.get_message(session, "1", 808)],
+    )
+    assert record.email_status == "building"
+    assert record.subject == ""
+    email = MessageIdEmail()
+
+    digest = send_daily_digest_pipeline(
+        session,
+        FakeLLM(),
+        email,
+        date(2026, 7, 7),
+        "Europe/Moscow",
+    )
+    row = repository.get_message(session, "1", 808)
+
+    assert len(email.sent) == 1
+    assert email.sent[0][0]
+    assert email.sent[0][1]
+    assert email.sent[0][2]
+    assert email.message_ids == [record.delivery_id]
+    assert digest.email_status == "sent"
+    assert row.digested_at is not None
+
+
+def test_building_recovery_uses_claimed_digest_send_path(session, monkeypatch) -> None:
+    message = msg(message_id=813, text="building send path")
+    repository.save_message(session, message)
+    repository.claim_digest_run_for_rows(
+        session,
+        digest_date="2026-07-07",
+        rows=[repository.get_message(session, "1", 813)],
+    )
+    original_send_claimed = repository.send_claimed_digest
+    calls = 0
+
+    def wrapped_send_claimed(session, record_id, claim_token, email_sender, now):
+        nonlocal calls
+        calls += 1
+        return original_send_claimed(session, record_id, claim_token, email_sender, now)
+
+    monkeypatch.setattr(repository, "send_claimed_digest", wrapped_send_claimed)
+
+    send_daily_digest_pipeline(
+        session,
+        FakeLLM(),
+        MessageIdEmail(),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+    )
+
+    assert calls == 1
+
+
+def test_pending_digest_with_empty_payload_is_refused(session) -> None:
+    message = msg(message_id=809, text="bad pending")
+    repository.save_message(session, message)
+    record, _, _ = repository.claim_digest_run_for_rows(
+        session,
+        digest_date="2026-07-07",
+        rows=[repository.get_message(session, "1", 809)],
+    )
+    record.email_status = "pending"
+    record.next_attempt_at = record.created_at
+    session.commit()
+    email = MessageIdEmail()
+
+    sent = repository.retry_pending_digests(session, email, now=record.created_at)
+
+    assert sent == 0
+    assert email.sent == []
+    assert repository.get_message(session, "1", 809).digested_at is None
 
 
 def test_failed_digest_send_keeps_claimed_messages_retryable_without_rebuild(session) -> None:

@@ -79,6 +79,7 @@ async def run_startup_backfill(
     fallback_since = now - timedelta(hours=settings.backfill_hours)
     remaining = settings.backfill_max_total_messages
     entities_by_chat_id = {}
+    processed_this_run: dict[str, int] = {}
 
     async for dialog in client.iter_dialogs():
         stats.chats_scanned += 1
@@ -104,16 +105,7 @@ async def run_startup_backfill(
         for state in states:
             if remaining <= 0:
                 break
-            if state.messages_processed >= settings.backfill_max_messages_per_chat:
-                with session_factory() as session:
-                    fresh = session.merge(state)
-                    repository.advance_backfill_state(
-                        session,
-                        fresh,
-                        last_processed_message_id=fresh.last_processed_message_id,
-                        completed=True,
-                        increment_processed=False,
-                    )
+            if processed_this_run.get(state.chat_id, 0) >= settings.backfill_max_messages_per_chat:
                 continue
             entity = entities_by_chat_id.get(state.chat_id)
             if entity is None:
@@ -166,6 +158,7 @@ async def run_startup_backfill(
             )
             stats.messages_fetched += 1
             remaining -= 1
+            processed_this_run[state.chat_id] = processed_this_run.get(state.chat_id, 0) + 1
             progressed = True
             with session_factory() as session:
                 inserted = repository.insert_message_if_missing(session, stored)

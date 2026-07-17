@@ -275,9 +275,9 @@ def claim_digest_run_for_rows(
         json_payload=DailyDigest(date=digest_date).model_dump_json(),
         html_payload="",
         generated_by="llm",
-        email_status="pending",
+        email_status="building",
         attempts=0,
-        next_attempt_at=now,
+        next_attempt_at=None,
     )
     session.add(record)
     try:
@@ -316,13 +316,27 @@ def update_digest_payload(
     text: str,
     html: str,
 ) -> None:
+    if not subject.strip() or not text.strip() or not html.strip():
+        raise ValueError("Digest payload must be non-empty before it can be sent")
     record.subject = subject
     record.text_payload = text
     record.html_payload = html
     record.json_payload = digest.model_dump_json()
     record.generated_by = digest.generated_by
     record.error_summary = digest.error_summary
+    record.email_status = "pending"
+    record.next_attempt_at = _utc_db_time(datetime.now(UTC))
     session.commit()
+
+
+def _digest_is_sendable(record: DigestRecord) -> bool:
+    return bool(
+        record.email_status in {"pending", "sending"}
+        and record.subject
+        and record.text_payload
+        and record.html_payload
+        and record.json_payload
+    )
 
 
 def save_digest(
@@ -408,7 +422,7 @@ def pending_digest_for_date(session: Session, digest_date: str) -> DigestRecord 
     return session.scalar(
         select(DigestRecord)
         .where(DigestRecord.digest_date == digest_date)
-        .where(DigestRecord.email_status.in_(["pending", "sending"]))
+        .where(DigestRecord.email_status.in_(["building", "pending", "sending"]))
         .order_by(DigestRecord.created_at.desc())
         .limit(1)
     )
@@ -458,6 +472,10 @@ def claim_pending_digest(
         .where(DigestRecord.id == record_id)
         .where(DigestRecord.email_status == "pending")
         .where(DigestRecord.next_attempt_at <= now)
+        .where(DigestRecord.subject != "")
+        .where(DigestRecord.text_payload != "")
+        .where(DigestRecord.html_payload != "")
+        .where(DigestRecord.json_payload != "")
         .values(email_status="sending", claimed_at=now, claim_token=claim_token)
     )
     session.commit()
@@ -487,6 +505,8 @@ def send_claimed_digest(
         )
     )
     if not record:
+        return False
+    if not _digest_is_sendable(record):
         return False
     try:
         try:

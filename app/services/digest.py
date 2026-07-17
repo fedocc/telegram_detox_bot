@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time as time_module
 from collections import defaultdict
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -432,6 +431,19 @@ def _subject_for(digest: DailyDigest) -> str:
     return digest_subject(digest)
 
 
+def _deliver_pending_digest(
+    session: Session,
+    record,
+    email_sender: EmailSender,
+    now: datetime,
+) -> bool:
+    token = f"digest-pipeline-{record.id}-{int(now.timestamp())}"
+    claimed = repository.claim_pending_digest(session, record.id, now, token)
+    if not claimed:
+        return False
+    return repository.send_claimed_digest(session, claimed.id, token, email_sender, now)
+
+
 def send_daily_digest_pipeline(
     session: Session,
     llm: HaikuClient,
@@ -443,6 +455,33 @@ def send_daily_digest_pipeline(
 ) -> DailyDigest:
     pending = repository.pending_digest_for_date(session, day.isoformat())
     if pending:
+        if pending.email_status == "building":
+            rows_for_digest = repository.messages_claimed_by_digest(session, pending.id)
+            if not rows_for_digest:
+                return DailyDigest(date=day.isoformat(), email_status="pending")
+            record = pending
+            rows = rows_for_digest
+            digest = generate_digest(session, llm, day, timezone, rows=rows_for_digest)
+            html = render_html(digest)
+            text = render_plain_text(digest)
+            subject = _subject_for(digest)
+            digest.email_status = "pending"
+            repository.update_digest_payload(
+                session,
+                record,
+                digest,
+                subject=subject,
+                text=text,
+                html=html,
+            )
+            now = datetime.now().astimezone()
+            if _deliver_pending_digest(session, record, email_sender, now):
+                digest.email_status = "sent"
+                return digest
+            session.refresh(record)
+            digest.email_status = record.email_status
+            digest.error_summary = record.last_error_safe
+            return digest
         digest = repository.digest_from_record(pending)
         digest.email_status = pending.email_status
         return digest
@@ -493,19 +532,10 @@ def send_daily_digest_pipeline(
         html=html,
     )
     now = datetime.now().astimezone()
-    for attempt in range(max_email_attempts):
-        try:
-            try:
-                email_sender.send(subject, text, html, message_id=record.delivery_id)
-            except TypeError:
-                email_sender.send(subject, text, html)
-            digest.email_status = "sent"
-            repository.finalize_digest_sent(session, record, datetime.now().astimezone())
-            return digest
-        except EmailSendError as exc:
-            repository.mark_digest_pending(session, record, exc, now)
-            if attempt < max_email_attempts - 1:
-                time_module.sleep(min(2**attempt, 8))
-    digest.email_status = "pending"
+    if _deliver_pending_digest(session, record, email_sender, now):
+        digest.email_status = "sent"
+        return digest
+    session.refresh(record)
+    digest.email_status = record.email_status
     digest.error_summary = record.last_error_safe
     return digest
