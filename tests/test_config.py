@@ -65,3 +65,7 @@ def test_birthday_defaults_ignore_real_cwd_env_file(tmp_path, monkeypatch) -> No
 def test_birthday_reminder_time_is_validated() -> None:
     with pytest.raises(ValueError, match="BIRTHDAY_REMINDER_TIME"):
         Settings(_env_file=None, birthday_reminder_time="25:00")
+
+
+def test_p0_mention_username_default() -> None:
+    assert Settings(_env_file=None).p0_mention_usernames == "fedocc"

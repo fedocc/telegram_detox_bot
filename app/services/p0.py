@@ -26,6 +26,7 @@ DEFAULT_MAX_MESSAGE_CHARS = 1000
 DEFAULT_MAX_LLM_CALLS_PER_HOUR = 100
 EMAIL_CONTEXT_LIMIT = 10
 EMAIL_CONTEXT_WINDOW = timedelta(minutes=60)
+PolicyContext = dict[str, bool | str | None]
 
 REQUEST_OR_ACTION_RE = re.compile(
     r"(?<!\w)(?:"
@@ -106,7 +107,7 @@ def _message_payload(
     max_message_chars: int,
     *,
     trusted_sender: bool,
-    policy_context: dict[str, bool],
+    policy_context: PolicyContext,
 ) -> dict:
     capped_text = safe_truncate(message.text or message.caption, max_message_chars)
     return {
@@ -221,14 +222,17 @@ def _context_line(row, message: StoredMessage) -> str:
 
 def _russian_reason(
     message: StoredMessage,
-    policy_context: dict[str, bool],
+    policy_context: PolicyContext,
 ) -> str:
     if _is_private(message):
         if policy_context["request_or_urgency"] or policy_context["response_expected"]:
             return "похоже, от тебя ждут ответа или действия."
         return "в личном сообщении есть важная информация, на которую стоит отреагировать."
     if policy_context["direct_mention"]:
-        return "тебя напрямую упомянули в групповом чате."
+        mention_username = policy_context.get("direct_mention_username")
+        if isinstance(mention_username, str):
+            return f"Сообщение содержит прямое упоминание @{mention_username}."
+        return "Сообщение содержит прямое упоминание."
     if policy_context["reply_to_me"]:
         return "это ответ на твоё сообщение."
     if policy_context["urgent_or_important"]:
@@ -240,16 +244,21 @@ def _russian_reason(
     return "похоже, от тебя или участников ждут реакции."
 
 
-def _russian_action(message: StoredMessage) -> str:
+def _russian_action(
+    message: StoredMessage,
+    policy_context: PolicyContext | None = None,
+) -> str:
     if _is_private(message):
         return "ответить в Telegram."
+    if policy_context and policy_context["direct_mention"]:
+        return "Открыть Telegram и ответить."
     return "проверить сообщение и при необходимости ответить в Telegram."
 
 
 def _decision_body(
     session: Session,
     message: StoredMessage,
-    policy_context: dict[str, bool],
+    policy_context: PolicyContext,
 ) -> str:
     raw_text = message.text or message.caption or ""
     context = _email_context(session, message)
@@ -263,7 +272,7 @@ def _decision_body(
         f"Отправитель: {message.sender_name or 'Неизвестный отправитель'}",
         f"Время: {message.timestamp.isoformat()}",
         f"Почему срочно: {_russian_reason(message, policy_context)}",
-        f"Что сделать: {_russian_action(message)}",
+        f"Что сделать: {_russian_action(message, policy_context)}",
         f"Срок: {_deadline_label(message)}",
         f"Исходный текст:\n{raw_text}",
         f"Контекст переписки:\n{rendered_context}",
@@ -288,7 +297,7 @@ def _is_non_text_media(message: StoredMessage) -> bool:
 
 
 def _mention_usernames(settings: Settings | None) -> set[str]:
-    configured = settings.p0_mention_usernames if settings is not None else "me,fedornikonov"
+    configured = settings.p0_mention_usernames if settings is not None else "fedocc"
     return {
         item.strip().removeprefix("@").casefold()
         for item in configured.split(",")
@@ -296,13 +305,17 @@ def _mention_usernames(settings: Settings | None) -> set[str]:
     }
 
 
-def _mentions_me(message: StoredMessage, settings: Settings | None) -> bool:
+def _matched_mention_username(
+    message: StoredMessage,
+    settings: Settings | None,
+) -> str | None:
     text = message.text or message.caption or ""
-    mentioned_usernames = {
-        match.casefold()
-        for match in re.findall(r"(?<!\w)@([A-Za-z0-9_]+)(?![A-Za-z0-9_])", text)
-    }
-    return bool(mentioned_usernames & _mention_usernames(settings))
+    configured = _mention_usernames(settings)
+    for match in re.finditer(r"(?<!\w)@([A-Za-z0-9_]+)(?![A-Za-z0-9_])", text):
+        username = match.group(1).casefold()
+        if username in configured:
+            return username
+    return None
 
 
 def _replies_to_me(session: Session, message: StoredMessage) -> bool:
@@ -397,9 +410,10 @@ def _group_policy_context(
     session: Session,
     message: StoredMessage,
     settings: Settings | None,
-) -> dict[str, bool]:
+) -> PolicyContext:
     raw_text = message.text or message.caption or ""
-    direct_mention = _mentions_me(message, settings)
+    direct_mention_username = _matched_mention_username(message, settings)
+    direct_mention = direct_mention_username is not None
     reply_to_me = _replies_to_me(session, message)
     request_or_action = _has_request_or_action(raw_text)
     urgent_or_important = _has_urgency(raw_text) or _has_important_context(raw_text)
@@ -429,6 +443,7 @@ def _group_policy_context(
     return {
         "small_talk": False,
         "direct_mention": direct_mention,
+        "direct_mention_username": direct_mention_username,
         "reply_to_me": reply_to_me,
         "request_or_urgency": request_or_urgency,
         "response_expected": response_expected,
@@ -443,7 +458,7 @@ def _policy_context(
     session: Session,
     message: StoredMessage,
     settings: Settings | None,
-) -> dict[str, bool]:
+) -> PolicyContext:
     raw_text = message.text or message.caption or ""
     if _is_private(message):
         request_or_action = _has_request_or_action(raw_text)
@@ -460,6 +475,7 @@ def _policy_context(
             "small_talk": small_talk,
             "private_signal": private_signal,
             "direct_mention": False,
+            "direct_mention_username": None,
             "reply_to_me": False,
             "request_or_urgency": request_or_urgency,
             "response_expected": response_expected,
@@ -475,7 +491,7 @@ def _should_classify_immediately(
     session: Session,
     message: StoredMessage,
     settings: Settings | None,
-    policy_context: dict[str, bool],
+    policy_context: PolicyContext,
 ) -> bool:
     if message.is_outgoing or not _has_text(message):
         return False
@@ -583,14 +599,14 @@ def _mark_not_p0(
 
 def _local_strict_reason(
     message: StoredMessage,
-    policy_context: dict[str, bool],
+    policy_context: PolicyContext,
 ) -> str:
     return _russian_reason(message, policy_context)
 
 
 def _promote_to_strict(
     message: StoredMessage,
-    policy_context: dict[str, bool],
+    policy_context: PolicyContext,
     decision: P0Decision | None = None,
 ) -> P0Decision:
     reason = _local_strict_reason(message, policy_context)
@@ -598,7 +614,7 @@ def _promote_to_strict(
         status=P0Status.p0_strict,
         summary=reason,
         reason=reason,
-        action=_russian_action(message),
+        action=_russian_action(message, policy_context),
         deadline_text=decision.deadline_text if decision else None,
         deadline_at=decision.deadline_at if decision else None,
         confidence=max(decision.confidence if decision else 1.0, P0_MIN_CONFIDENCE),
@@ -607,7 +623,7 @@ def _promote_to_strict(
 
 def _decision_qualifies_for_strict(
     message: StoredMessage,
-    policy_context: dict[str, bool],
+    policy_context: PolicyContext,
     decision: P0Decision,
 ) -> bool:
     return bool(
@@ -626,7 +642,7 @@ def _send_strict_decision(
     message: StoredMessage,
     decision: P0Decision,
     email_sender: EmailSender,
-    policy_context: dict[str, bool],
+    policy_context: PolicyContext,
 ) -> bool:
     repository.mark_p0_classified(
         session,

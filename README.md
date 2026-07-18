@@ -26,6 +26,10 @@ Codex не является частью runtime-пайплайна. В runtime 
 - Runtime never performs Telegram login. `python -m app.cli.telegram_login` is the only interactive authentication command. The 24/7 listener only connects with an existing session and exits closed if the session is missing or unauthorized.
 - The service is read-only by design. Static tests fail if runtime code uses Telegram write/action methods such as send, delete, reaction, pin, mute, join, leave, or mark-read calls.
 
+## How to make sure I see your message
+
+Если важно — тегните @fedocc.
+
 ## Игнорируемые чаты
 
 Чаты из blacklist отбрасываются по точному `chat_id` до чтения текста, записи в БД, backfill, P0 и LLM/digest. Название чата не используется как идентификатор.

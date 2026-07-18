@@ -1171,9 +1171,9 @@ def test_group_message_without_routing_does_not_trigger_immediate_llm(session, s
     assert llm.calls == 0
 
 
-def test_group_mention_sends_immediate_email(session, settings) -> None:
-    settings.p0_mention_usernames = "me"
-    message = msg(chat_id="g1", chat_type=ChatType.group, text="@me срочно посмотри")
+@pytest.mark.parametrize("mention", ["@fedocc", "@Fedocc"])
+def test_group_exact_mention_sends_immediate_email(session, settings, mention) -> None:
+    message = msg(chat_id="g1", chat_type=ChatType.group, text=mention)
     repository.save_message(session, message)
     llm = FakeLLM(status=P0Status.not_p0)
     email = FakeEmail()
@@ -1183,16 +1183,29 @@ def test_group_mention_sends_immediate_email(session, settings) -> None:
     assert llm.calls == 1
     assert len(email.sent) == 1
     assert llm.payloads[0]["message"]["policy"]["direct_mention"] is True
+    assert (
+        llm.payloads[0]["message"]["policy"]["direct_mention_username"]
+        == "fedocc"
+    )
     assert llm.payloads[0]["message"]["policy"]["deterministic_strict"] is True
     assert repository.get_message(session, "g1", 1).p0_classification == "P0_STRICT"
 
+    body = email.sent[0][1]
+    assert "Почему срочно: Сообщение содержит прямое упоминание @fedocc." in body
+    assert "Что сделать: Открыть Telegram и ответить." in body
+    assert "Срок: не указан" in body
 
-def test_group_username_prefix_is_not_a_direct_mention(session, settings) -> None:
-    settings.p0_mention_usernames = "me"
+
+@pytest.mark.parametrize("mention", ["@fedocc_bot", "@fedoccc"])
+def test_group_username_suffix_is_not_a_direct_mention(
+    session,
+    settings,
+    mention,
+) -> None:
     message = msg(
         chat_id="g1",
         chat_type=ChatType.group,
-        text="@media обсуждаем логотип",
+        text=f"{mention} привет",
     )
     repository.save_message(session, message)
     llm = FakeLLM(status=P0Status.p0_strict, confidence=0.99)
@@ -1202,6 +1215,62 @@ def test_group_username_prefix_is_not_a_direct_mention(session, settings) -> Non
     assert llm.calls == 0
     assert email.sent == []
     assert repository.pending_alert_jobs(session) == []
+
+
+def test_group_media_caption_exact_mention_sends_email(session, settings) -> None:
+    message = msg(
+        chat_id="g1",
+        chat_type=ChatType.channel,
+        text="@fedocc это важно",
+        media_type=MediaType.photo,
+    )
+    repository.save_message(session, message)
+    llm = FakeLLM(status=P0Status.not_p0)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(session, message, llm, email, settings=settings) is True
+    assert llm.payloads[0]["message"]["policy"]["direct_mention"] is True
+    assert len(email.sent) == 1
+    assert "Исходный текст:\n@fedocc это важно" in email.sent[0][1]
+
+
+def test_ignored_group_exact_mention_is_not_processed(
+    session,
+    settings,
+    caplog,
+) -> None:
+    private_marker = "@fedocc PRIVATE_IGNORED_MENTION_MARKER"
+    message = msg(chat_id="ignored", chat_type=ChatType.group, text=private_marker)
+    repository.save_message(session, message)
+    llm = FakeLLM(status=P0Status.p0_strict)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(
+        session,
+        message,
+        llm,
+        email,
+        settings=settings,
+        ignored_chat_ids={"ignored"},
+    ) is False
+    assert llm.calls == 0
+    assert email.sent == []
+    assert repository.pending_alert_jobs(session) == []
+    assert private_marker not in caplog.text
+
+
+def test_bang_urgent_is_not_treated_as_mention_protocol(session, settings) -> None:
+    message = msg(chat_id="g1", chat_type=ChatType.group, text="!срочно")
+    repository.save_message(session, message)
+    llm = FakeLLM(status=P0Status.not_p0)
+    email = FakeEmail()
+
+    # Existing high-recall urgency behavior remains, but this is not a mention signal.
+    assert handle_p0_candidate(session, message, llm, email, settings=settings) is True
+    policy = llm.payloads[0]["message"]["policy"]
+    assert policy["direct_mention"] is False
+    assert policy["direct_mention_username"] is None
+    assert "прямое упоминание" not in email.sent[0][1]
 
 
 def test_group_reply_with_request_sends_immediate_email(session, settings) -> None:
