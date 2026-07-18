@@ -10,7 +10,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.db.tables import AlertJob, BackfillState, DigestRecord, MessageRecord
-from app.models.schemas import P0_MIN_CONFIDENCE, DailyDigest, StoredMessage
+from app.models.schemas import P0_MIN_CONFIDENCE, DailyDigest, P0Status, StoredMessage
 
 
 def _backoff_minutes(attempts: int) -> int:
@@ -675,8 +675,7 @@ def _is_retry_safe_p0_alert(session: Session, job: AlertJob) -> bool:
     message = get_message(session, job.chat_id, job.message_id)
     return bool(
         message
-        and message.p0_llm_called_at is not None
-        and message.p0_classification == "P0"
+        and message.p0_classification == P0Status.p0_strict.value
         and message.p0_confidence is not None
         and message.p0_confidence >= P0_MIN_CONFIDENCE
     )
@@ -744,8 +743,7 @@ def retry_pending_alerts(session: Session, email_sender, now: datetime) -> int:
             .where(AlertJob.status == "pending")
             .where(AlertJob.next_attempt_at <= now)
             .where(AlertJob.alert_type == "p0")
-            .where(MessageRecord.p0_llm_called_at.is_not(None))
-            .where(MessageRecord.p0_classification == "P0")
+            .where(MessageRecord.p0_classification == P0Status.p0_strict.value)
             .where(MessageRecord.p0_confidence >= P0_MIN_CONFIDENCE)
             .order_by(AlertJob.created_at, AlertJob.id)
         )

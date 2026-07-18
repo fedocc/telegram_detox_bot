@@ -31,12 +31,17 @@ class Priority(StrEnum):
 
 
 class P0Status(StrEnum):
-    p0 = "P0"
+    p0_strict = "P0_STRICT"
+    p0_candidate = "P0_CANDIDATE"
     not_p0 = "NOT_P0"
-    review = "REVIEW"
+
+    # Source-level aliases keep callers compatible while persisted/provider values use
+    # the explicit three-state policy above.
+    p0 = "P0_STRICT"
+    review = "P0_CANDIDATE"
 
 
-P0_MIN_CONFIDENCE = 0.75
+P0_MIN_CONFIDENCE = 0.85
 
 
 class MessageRef(BaseModel):
@@ -71,8 +76,9 @@ class StoredMessage(BaseModel):
 
 
 class P0Decision(BaseModel):
-    status: P0Status = P0Status.review
+    status: P0Status = P0Status.p0_candidate
     summary: str
+    reason: str | None = None
     action: str | None = None
     deadline_text: str | None = None
     deadline_at: datetime | None = None
@@ -80,7 +86,7 @@ class P0Decision(BaseModel):
 
     @property
     def is_p0(self) -> bool:
-        return self.status == P0Status.p0
+        return self.status == P0Status.p0_strict
 
 
 class DigestP0Alert(BaseModel):

@@ -17,8 +17,10 @@ Codex не является частью runtime-пайплайна. В runtime 
 
 - Private messages are never silently dropped. After every LLM digest, the app checks all incoming private message IDs for the day. Any private message omitted by the LLM is added to `REVIEW`.
 - Private messages are never counted as P3/background noise. If classification is uncertain, the message is surfaced for review.
-- P0 is fail-open for personal messages. If the lightweight P0 classifier fails for an incoming private message, the app sends an immediate `[ПРОВЕРЬ] новое личное сообщение` email.
-- Group `REVIEW` may wait until the evening digest unless the local urgency prefilter matched obvious urgency. Obvious group urgency plus LLM failure sends an immediate fallback email.
+- Immediate email is reserved for `P0_STRICT`. In private chats, explicit response/action/call/check requests and urgent wording qualify; time words alone and ordinary conversation do not. In groups, exact configured username mentions, replies with a request, explicit deadline pressure, and configured watchlist matches are the strict routes. Set exact usernames with `P0_MENTION_USERNAMES`.
+- Trusted private senders can lower uncertainty for an actionable or urgent message, but ordinary messages such as `привет` remain digest-only. Unrouted group urgency also remains digest-only.
+- `P0_CANDIDATE` and `NOT_P0` stay in the digest.
+- Every `P0_STRICT` email includes chat title, sender, timestamp, complete original message text, classification reason, concrete action, and deadline when present.
 - AITunnel/LLM outage triggers a deterministic fallback digest. The fallback includes incoming private messages, group counts, P0 review candidates, and unprocessed media notices.
 - Runtime never performs Telegram login. `python -m app.cli.telegram_login` is the only interactive authentication command. The 24/7 listener only connects with an existing session and exits closed if the session is missing or unauthorized.
 - The service is read-only by design. Static tests fail if runtime code uses Telegram write/action methods such as send, delete, reaction, pin, mute, join, leave, or mark-read calls.
@@ -115,7 +117,7 @@ AITUNNEL_API_KEY=
 python -m app.cli.test_llm
 ```
 
-LLM-ответы валидируются Pydantic-моделями. При невалидном JSON выполняется один repair retry. Бесконечных повторов нет. Если P0 candidate не удалось классифицировать из-за LLM/API ошибки, отправляется fallback email `[ВОЗМОЖНО СРОЧНО]`.
+LLM-ответы валидируются Pydantic-моделями. При невалидном JSON выполняется один repair retry. Бесконечных повторов нет. Если P0 candidate не удалось классифицировать из-за LLM/API ошибки, сообщение остаётся `P0_CANDIDATE` до digest; немедленный fallback email не отправляется.
 
 ## Команды
 

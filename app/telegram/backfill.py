@@ -8,7 +8,7 @@ from app.config import Settings
 from app.db import repository
 from app.email.sender import EmailSender
 from app.llm.client import HaikuClient
-from app.models.schemas import ChatType, MediaType, StoredMessage
+from app.models.schemas import ChatType, MediaType, P0Status, StoredMessage
 from app.services.p0 import handle_p0_candidate
 from app.services.prefilter import is_p0_candidate, is_urgent_call_candidate
 from app.telegram.mapper import chat_type, display_name, telegram_message_to_stored_message
@@ -43,6 +43,8 @@ def _state_time(value: datetime) -> datetime:
 
 
 def _should_mark_old_review(message: StoredMessage) -> bool:
+    if message.is_outgoing:
+        return False
     if message.media_type != MediaType.none and not (message.text or message.caption):
         return False
     text = message.text or message.caption
@@ -186,6 +188,13 @@ async def run_startup_backfill(
                             session,
                             stored.chat_id,
                             stored.message_id,
+                        )
+                        repository.mark_p0_classified(
+                            session,
+                            stored.chat_id,
+                            stored.message_id,
+                            P0Status.p0_candidate.value,
+                            now,
                         )
                 fresh = repository.ensure_backfill_state(
                     session,

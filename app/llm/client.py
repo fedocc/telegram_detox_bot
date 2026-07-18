@@ -71,6 +71,10 @@ def _normalize_deadlines(value: object) -> object:
         return value
 
     normalized = {key: _normalize_deadlines(item) for key, item in value.items()}
+    if normalized.get("status") == "P0":
+        normalized["status"] = "P0_STRICT"
+    elif normalized.get("status") == "REVIEW":
+        normalized["status"] = "P0_CANDIDATE"
     legacy_deadline = normalized.pop("deadline", None)
     if legacy_deadline is not None:
         if _is_valid_datetime(legacy_deadline):
@@ -182,11 +186,17 @@ class HaikuClient:
         reference_timestamp = message.get("timestamp") or "unknown"
         system = (
             "Lightweight Telegram P0 classifier. Return JSON only with keys: "
-            "status, summary, action, deadline_text, deadline_at, confidence. status must be P0, "
-            "NOT_P0, or REVIEW. Be conservative: if uncertain, use REVIEW. "
-            "P0 means same-day urgent action or personal/family risk. "
-            "A direct request to call, call back, join, or connect within hours or today is P0. "
-            "Do not classify it as NOT_P0. "
+            "status, summary, reason, action, deadline_text, deadline_at, confidence. status must "
+            "be P0_STRICT, P0_CANDIDATE, or NOT_P0. Apply detox routing by chat type. For an "
+            "incoming private chat, P0_STRICT is appropriate for a clear response, action, call, "
+            "or check request, or urgent/time-sensitive wording; ordinary conversation is not "
+            "P0. Time words such as today or now do not create a request by themselves. For "
+            "groups, use P0_STRICT for a direct mention, a reply to the user with a "
+            "request/urgency, an explicit deadline plus request/urgency, or a watchlist match plus "
+            "request/urgency. Unrouted group urgency is not P0_STRICT. Read authoritative routing "
+            "facts from message.policy and trusted status from message.trusted_sender. A trusted "
+            "sender can lower uncertainty for a private request but never makes ordinary chat P0. "
+            "If uncertain, use P0_CANDIDATE. "
             f"Reference timestamp: {reference_timestamp}. Timezone: {self.settings.timezone}. "
             "deadline_at must be exact ISO 8601 datetime or null. "
             "Put relative or human deadline wording only into deadline_text. "

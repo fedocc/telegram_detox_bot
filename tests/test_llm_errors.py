@@ -23,8 +23,10 @@ class BrokenClient:
 class MalformedCompletions:
     def __init__(self, response) -> None:
         self.response = response
+        self.calls: list[dict] = []
 
     def create(self, **kwargs):
+        self.calls.append(kwargs)
         return self.response
 
 
@@ -128,13 +130,34 @@ def test_plain_json_response_parses(settings: Settings) -> None:
     assert result.status == "NOT_P0"
 
 
+def test_p0_prompt_and_user_payload_include_trusted_sender_context(settings: Settings) -> None:
+    completions = MalformedCompletions(response_with(p0_json("NOT_P0")))
+    client = HaikuClient(settings)
+    client.client = FakeClient(completions)
+
+    client.classify_p0(
+        {
+            "message": {
+                "text": "пришли договор сейчас",
+                "trusted_sender": True,
+            },
+            "context": [],
+        }
+    )
+
+    messages = completions.calls[0]["messages"]
+    assert "message.trusted_sender" in messages[0]["content"]
+    assert "never makes ordinary chat P0" in messages[0]["content"]
+    assert '"trusted_sender": true' in messages[1]["content"]
+
+
 def test_json_fence_response_parses(settings: Settings) -> None:
     client = HaikuClient(settings)
     client.client = FakeClient(MalformedCompletions(response_with(f"```json\n{p0_json()}\n```")))
 
     result = client.classify_p0({"message": {"text": "ping"}, "context": []})
 
-    assert result.status == "P0"
+    assert result.status == "P0_STRICT"
 
 
 def test_plain_fence_response_parses(settings: Settings) -> None:
@@ -143,7 +166,7 @@ def test_plain_fence_response_parses(settings: Settings) -> None:
 
     result = client.classify_p0({"message": {"text": "ping"}, "context": []})
 
-    assert result.status == "P0"
+    assert result.status == "P0_STRICT"
 
 
 def test_whitespace_around_json_parses(settings: Settings) -> None:
@@ -152,7 +175,7 @@ def test_whitespace_around_json_parses(settings: Settings) -> None:
 
     result = client.classify_p0({"message": {"text": "ping"}, "context": []})
 
-    assert result.status == "P0"
+    assert result.status == "P0_STRICT"
 
 
 def test_repair_json_fence_response_parses(settings: Settings) -> None:
@@ -166,7 +189,7 @@ def test_repair_json_fence_response_parses(settings: Settings) -> None:
 
     result = client.classify_p0({"message": {"text": "ping"}, "context": []})
 
-    assert result.status == "REVIEW"
+    assert result.status == "P0_CANDIDATE"
 
 
 def test_text_before_json_is_rejected(settings: Settings) -> None:

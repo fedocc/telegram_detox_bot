@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     p0_classify_replies: bool = True
     p0_classify_watchlist_chats: bool = True
     p0_watchlist_chat_ids: str = ""
+    p0_watchlist_keywords: str = ""
+    p0_mention_usernames: str = "me,fedornikonov"
+    p0_trusted_sender_ids: str = ""
     p0_max_context_messages: int = Field(default=5, ge=0, le=20)
     p0_max_message_chars: int = Field(default=1000, ge=100, le=5000)
     p0_max_llm_calls_per_hour: int = Field(default=100, ge=0)

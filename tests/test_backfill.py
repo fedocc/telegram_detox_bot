@@ -435,6 +435,45 @@ async def test_old_backfilled_messages_do_not_trigger_immediate_p0_spam(
     assert email.sent == []
     assert llm.calls == 0
     assert stored.p0_review_candidate is True
+    assert stored.p0_classification == "P0_CANDIDATE"
+
+
+async def test_old_outgoing_backfill_is_not_p0_candidate(
+    settings,
+    session_factory,
+    now,
+) -> None:
+    sender = _user(42, "Sender")
+    email = FakeEmail()
+    llm = FakeP0LLM(status=P0Status.p0_strict)
+    client = _client_with_private_messages(
+        [
+            FakeTelegramMessage(
+                message_id=1,
+                text="Позвони через час",
+                timestamp=now - timedelta(hours=2),
+                sender=sender,
+                out=True,
+            )
+        ]
+    )
+
+    await run_startup_backfill(
+        client=client,
+        settings=settings,
+        session_factory=session_factory,
+        llm=llm,
+        email_sender=email,
+        now=now,
+    )
+
+    with session_factory() as session:
+        stored = repository.get_message(session, "1", 1)
+    assert email.sent == []
+    assert llm.calls == 0
+    assert stored.is_outgoing is True
+    assert stored.p0_review_candidate is False
+    assert stored.p0_classification is None
 
 
 async def test_recent_backfilled_private_messages_can_trigger_p0_classification(
