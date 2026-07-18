@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ChatType(StrEnum):
@@ -170,6 +171,60 @@ class DigestNoiseCount(BaseModel):
     count: int = Field(ge=0)
 
 
+class DigestLLMItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    chat_id: str
+    chat_title: str
+    chat_type: Literal["private", "group", "channel"]
+    summary: str
+    requests: list[str]
+    context: list[str]
+    actions: list[str]
+    deadlines: list[str]
+    open_telegram: bool
+    reason_to_open: str
+    message_count: int = Field(ge=1)
+
+    @field_validator("chat_id", "chat_title", "summary", "reason_to_open")
+    @classmethod
+    def require_non_empty_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("field must not be blank")
+        return value.strip()
+
+    @field_validator("requests", "context", "actions", "deadlines")
+    @classmethod
+    def normalize_text_lists(cls, value: list[str]) -> list[str]:
+        normalized = [item.strip() for item in value]
+        if any(not item for item in normalized):
+            raise ValueError("list items must not be blank")
+        return normalized
+
+
+class DigestLLMResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[DigestLLMItem]
+
+    @model_validator(mode="after")
+    def require_one_item_per_chat(self) -> DigestLLMResponse:
+        chat_ids = [item.chat_id for item in self.items]
+        if len(chat_ids) != len(set(chat_ids)):
+            raise ValueError("duplicate chat_id")
+        return self
+
+
+class DigestDiagnostics(BaseModel):
+    llm_attempted: bool = False
+    llm_used: bool = False
+    fallback_used: bool = False
+    fallback_reason: str | None = None
+    chats_count: int = 0
+    messages_count: int = 0
+    validation_error_type: str | None = None
+
+
 class DailyDigest(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
@@ -182,3 +237,4 @@ class DailyDigest(BaseModel):
     generated_by: str = "llm"
     email_status: str = "pending"
     error_summary: str | None = None
+    diagnostics: DigestDiagnostics = Field(default_factory=DigestDiagnostics)

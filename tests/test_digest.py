@@ -442,14 +442,15 @@ def test_fallback_digest_keeps_direct_messages(now) -> None:
 
     assert digest.direct_messages[0].needs_manual_review is False
     assert digest.direct_messages[0].what_happened
-    assert "Возможно требуется действие" in digest.direct_messages[0].action_items
+    assert digest.direct_messages[0].action_items == "Открыть Telegram и ответить."
+    assert "Действие не определено" not in digest.direct_messages[0].action_items
 
 
 def test_fallback_question_does_not_claim_there_is_no_request(now) -> None:
     digest = fallback_digest(date(2026, 7, 7), [msg(text="сможешь помочь?", timestamp=now)])
     item = digest.direct_messages[0]
 
-    assert "Возможен вопрос или запрос" in item.requests_to_me
+    assert item.requests_to_me == "ответить на вопрос"
     assert "Явного запроса не обнаружено" not in item.requests_to_me
     assert item.needs_reply is True
 
@@ -458,7 +459,8 @@ def test_fallback_deadline_mentions_possible_deadline(now) -> None:
     digest = fallback_digest(date(2026, 7, 7), [msg(text="нужно до 18:00", timestamp=now)])
     item = digest.direct_messages[0]
 
-    assert "Возможен срок или дедлайн" in item.important_context
+    assert item.important_context == "указан срок: до 18:00"
+    assert item.deadline_text == "до 18:00"
     assert "Действий не требуется" not in item.action_items
 
 
@@ -471,9 +473,31 @@ def test_fallback_action_is_conservative_and_does_not_log_private_text(
         digest = fallback_digest(date(2026, 7, 7), [msg(text=private_text, timestamp=now)])
     item = digest.direct_messages[0]
 
-    assert "Возможно требуется действие" in item.action_items
+    assert item.action_items == "Открыть Telegram и ответить."
     assert "Действий не требуется" not in item.action_items
     assert private_text not in caplog.text
+
+
+def test_fallback_extracts_request_readiness_flight_deadline_and_urgency(now) -> None:
+    digest = fallback_digest(
+        date(2026, 7, 7),
+        [
+            msg(message_id=1, text="ало ответь", timestamp=now),
+            msg(message_id=2, text="завтра в 10 вылет ты готов?", timestamp=now),
+            msg(message_id=3, text="срочно", timestamp=now),
+        ],
+    )
+    item = digest.direct_messages[0]
+
+    assert item.summary == (
+        "Были сообщения с просьбой ответить и вопросом о готовности "
+        "к вылету завтра в 10."
+    )
+    assert item.requests_to_me == "ответить; подтвердить готовность"
+    assert "завтра в 10 вылет" in item.important_context
+    assert "срочное" in item.important_context
+    assert item.action_items == "Открыть Telegram и ответить."
+    assert item.deadline_text == "завтра в 10"
 
 
 def test_digest_cannot_drop_private_message_when_llm_omits_it(session) -> None:
@@ -897,11 +921,151 @@ def test_digest_real_openai_error_uses_fallback_digest(session, settings) -> Non
     assert digest.generated_by == "fallback"
 
 
+def test_valid_llm_digest_is_used_and_reports_safe_diagnostics(session, settings) -> None:
+    from app.llm.client import HaikuClient
+    from tests.test_llm_errors import (
+        FakeClient,
+        MalformedCompletions,
+        digest_json,
+        response_with,
+    )
+
+    repository.save_message(session, msg(message_id=314, text="ответь через час"))
+    client = HaikuClient(settings)
+    client.client = FakeClient(MalformedCompletions(response_with(digest_json())))
+
+    digest = generate_digest(session, client, date(2026, 7, 7), "Europe/Moscow")
+
+    assert digest.generated_by == "llm"
+    assert digest.diagnostics.llm_attempted is True
+    assert digest.diagnostics.llm_used is True
+    assert digest.diagnostics.fallback_used is False
+    assert digest.diagnostics.fallback_reason is None
+    assert digest.diagnostics.chats_count == 1
+    assert digest.diagnostics.messages_count == 1
+
+
+def test_still_invalid_llm_digest_falls_back_with_safe_reason(
+    session,
+    settings,
+    caplog,
+) -> None:
+    from app.llm.client import HaikuClient
+    from tests.test_llm_errors import FakeClient, MalformedCompletions, response_with
+
+    private_marker = "уникальный приватный текст для проверки логов"
+    repository.save_message(session, msg(message_id=315, text=private_marker))
+    client = HaikuClient(settings)
+    client.client = FakeClient(
+        MalformedCompletions(response_with('{"items":[{"chat_id":"1"}]}'))
+    )
+
+    with caplog.at_level(logging.INFO):
+        digest = generate_digest(session, client, date(2026, 7, 7), "Europe/Moscow")
+
+    assert digest.generated_by == "fallback"
+    assert digest.diagnostics.llm_attempted is True
+    assert digest.diagnostics.llm_used is False
+    assert digest.diagnostics.fallback_used is True
+    assert digest.diagnostics.fallback_reason == "validation_failed"
+    assert digest.diagnostics.validation_error_type == "ValidationError"
+    assert private_marker not in caplog.text
+
+
 def test_digest_now_uses_persistent_delivery_pipeline() -> None:
     source = Path("app/cli/digest_now.py").read_text(encoding="utf-8")
 
     assert "send_daily_digest_pipeline" in source
     assert "send_and_store_digest" not in source
+
+
+def test_digest_now_dry_run_does_not_send_email(settings, monkeypatch) -> None:
+    from app.cli import digest_now
+
+    session_factory = init_db(settings)
+    with session_factory() as session:
+        repository.save_message(session, msg(message_id=316, text="обычный тест"))
+    monkeypatch.setattr(
+        digest_now,
+        "load_ignored_chats_from_settings",
+        lambda _settings: type("Ignored", (), {"chat_ids": set()})(),
+    )
+    email = FakeEmail()
+    output: list[str] = []
+
+    digest = digest_now.run(
+        dry_run=True,
+        settings=settings,
+        session_factory=session_factory,
+        llm=FakeLLM(),
+        email_sender=email,
+        now=datetime.fromisoformat("2026-07-07T18:00:00+03:00"),
+        output=output.append,
+    )
+
+    assert email.sent == []
+    assert "Dry-run: digest would be generated" in output
+    assert "Dry-run: digest not sent" in output
+    assert "chats_count=1" in output
+    assert "messages_count=1" in output
+    assert "llm_used=true" in output
+    assert digest.email_status == "pending"
+    with session_factory() as session:
+        assert repository.pending_digests(session) == []
+
+
+def test_digest_now_dry_run_reports_fallback_reason(settings, monkeypatch) -> None:
+    from app.cli import digest_now
+
+    session_factory = init_db(settings)
+    with session_factory() as session:
+        repository.save_message(session, msg(message_id=317, text="обычный тест"))
+    monkeypatch.setattr(
+        digest_now,
+        "load_ignored_chats_from_settings",
+        lambda _settings: type("Ignored", (), {"chat_ids": set()})(),
+    )
+    output: list[str] = []
+
+    digest_now.run(
+        dry_run=True,
+        settings=settings,
+        session_factory=session_factory,
+        llm=FailingLLM(),
+        now=datetime.fromisoformat("2026-07-07T18:00:00+03:00"),
+        output=output.append,
+    )
+
+    assert "llm_used=false" in output
+    assert "fallback_reason=llm_error" in output
+
+
+def test_digest_now_normal_run_sends_email(settings, monkeypatch) -> None:
+    from app.cli import digest_now
+
+    session_factory = init_db(settings)
+    with session_factory() as session:
+        repository.save_message(session, msg(message_id=318, text="обычный тест"))
+    monkeypatch.setattr(
+        digest_now,
+        "load_ignored_chats_from_settings",
+        lambda _settings: type("Ignored", (), {"chat_ids": set()})(),
+    )
+    email = FakeEmail()
+    output: list[str] = []
+
+    digest = digest_now.run(
+        settings=settings,
+        session_factory=session_factory,
+        llm=FakeLLM(),
+        email_sender=email,
+        now=datetime.fromisoformat("2026-07-07T18:00:00+03:00"),
+        output=output.append,
+    )
+
+    assert len(email.sent) == 1
+    assert digest.email_status == "sent"
+    assert output == ["Digest sent."]
 
 
 def test_digest_schema_uses_only_message_refs_for_sources() -> None:

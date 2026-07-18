@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from collections.abc import Callable
 from datetime import datetime
 from typing import TypeVar
 
@@ -9,18 +11,53 @@ from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from app.config import Settings
-from app.models.schemas import DailyDigest, P0Decision
+from app.models.schemas import (
+    DailyDigest,
+    DigestDirectMessage,
+    DigestGroupUpdate,
+    DigestLLMResponse,
+    P0Decision,
+)
 
 T = TypeVar("T", bound=BaseModel)
 logger = logging.getLogger(__name__)
+COUNT_ONLY_DIGEST_SUMMARY_RE = re.compile(
+    r"^(?:(?:всего\s+)?\d+\s+(?:новых\s+)?(?:сообщени(?:е|я|й)|messages?)|"
+    r"(?:сообщени(?:е|я|й)|messages?)\s*:\s*\d+)[.!]?$",
+    re.IGNORECASE,
+)
 
 
 class LLMError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str = "llm_error",
+        validation_error_type: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+        self.validation_error_type = validation_error_type
+
+
+class DigestChatCoverageError(ValueError):
+    pass
+
+
+class DigestCountOnlySummaryError(ValueError):
     pass
 
 
 def _safe_llm_error(exc: Exception) -> LLMError:
-    return LLMError(f"llm_error:{exc.__class__.__name__}")
+    return LLMError(
+        f"llm_error:{exc.__class__.__name__}",
+        reason_code="provider_error",
+    )
+
+
+def _validation_error_type(exc: Exception) -> str:
+    return exc.__class__.__name__
 
 
 def _extract_content(response) -> str:
@@ -35,9 +72,11 @@ def _extract_content(response) -> str:
     return content
 
 
-def _extract_json_document(content: str) -> str:
+def _extract_json_document(content: str, *, allow_code_fences: bool = True) -> str:
     text = content.strip()
     if text.startswith("```"):
+        if not allow_code_fences:
+            raise LLMError("llm_error:InvalidJsonEnvelope")
         lines = text.splitlines()
         if len(lines) < 3:
             raise LLMError("llm_error:InvalidJsonEnvelope")
@@ -156,30 +195,66 @@ class HaikuClient:
             raise _safe_llm_error(exc) from exc
         return _extract_content(response)
 
-    def _validated_json(self, schema: type[T], system: str, user: str) -> T:
-        raw = self._json_completion(system, user, schema)
-        json_text = _extract_json_document(raw)
-        try:
-            return schema.model_validate_json(_normalize_json_document(json_text))
-        except (ValidationError, ValueError, json.JSONDecodeError) as first_error:
-            logger.warning(
-                "LLM JSON invalid; trying one repair retry: %s",
-                first_error.__class__.__name__,
+    def _validated_json(
+        self,
+        schema: type[T],
+        system: str,
+        user: str,
+        *,
+        validate: Callable[[T], T] | None = None,
+        prefer_schema: bool = False,
+        allow_code_fences: bool = True,
+    ) -> T:
+        raw = self._json_completion(system, user, schema, prefer_schema=prefer_schema)
+
+        def parse(content: str) -> T:
+            json_text = _extract_json_document(
+                content,
+                allow_code_fences=allow_code_fences,
             )
+            result = schema.model_validate_json(_normalize_json_document(json_text))
+            return validate(result) if validate else result
+
+        try:
+            return parse(raw)
+        except (LLMError, ValidationError, ValueError, json.JSONDecodeError) as first_error:
+            first_error_type = _validation_error_type(first_error)
+            logger.warning(
+                "LLM JSON invalid; repair retry scheduled validation_error_type=%s",
+                first_error_type,
+            )
+            schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
             repair_user = (
-                "Repair the following response into valid JSON matching the requested schema. "
-                "Return only valid JSON. No markdown. No code fences. No explanation.\n\n"
-                f"{raw}"
+                "Convert PREVIOUS_OUTPUT into valid JSON matching REQUIRED_SCHEMA exactly. "
+                "Preserve the meaning, add every required field, and remove unknown fields. "
+                "Return one JSON object only. No markdown, code fences, explanations, or prose.\n"
+                f"REQUIRED_SCHEMA:\n{schema_json}\n"
+                f"ORIGINAL_INPUT:\n{user}\n"
+                f"PREVIOUS_OUTPUT:\n{raw}"
             )
             try:
-                repaired = self._json_completion(system, repair_user, schema, prefer_schema=False)
+                repaired = self._json_completion(
+                    system,
+                    repair_user,
+                    schema,
+                    prefer_schema=prefer_schema,
+                )
             except Exception as repair_error:
                 raise _safe_llm_error(repair_error) from repair_error
-            repaired_json = _extract_json_document(repaired)
             try:
-                return schema.model_validate_json(_normalize_json_document(repaired_json))
-            except (ValidationError, ValueError, json.JSONDecodeError) as second_error:
-                raise LLMError("LLM returned invalid JSON after repair retry") from second_error
+                return parse(repaired)
+            except (
+                LLMError,
+                ValidationError,
+                ValueError,
+                json.JSONDecodeError,
+            ) as second_error:
+                second_error_type = _validation_error_type(second_error)
+                raise LLMError(
+                    "LLM returned invalid JSON after repair retry",
+                    reason_code="validation_failed",
+                    validation_error_type=second_error_type,
+                ) from second_error
 
     def classify_p0(self, payload: dict) -> P0Decision:
         message = payload.get("message", {}) if isinstance(payload, dict) else {}
@@ -208,37 +283,87 @@ class HaikuClient:
 
     def daily_digest(self, payload: dict) -> DailyDigest:
         reference_timestamp = payload.get("reference_timestamp") or payload.get("date") or "unknown"
-        system = (
-            "Create a short practical Telegram daily digest as strict JSON. "
-            "Never hide direct messages. If unsure whether something is safe "
-            "background, put it in review. "
-            "Produce one semantic item per private chat and one per group or channel chat, even "
-            "for low-importance conversations. Almost never use noise_counts: summarize quiet "
-            "chats briefly instead of reducing them to counts. Never combine source_refs from "
-            "different chat_id values into one item. A numeric message count alone is not a "
-            "useful summary. "
-            "For every direct_messages and group_updates item, include all required keys: "
-            "summary, what_happened, requests_to_me, important_context, action_items, "
-            "should_open_telegram, and open_reason. Use null for an unknown text field, but "
-            "always include the key. Do not output counts as the summary and do "
-            "not restate each message. Media is already collapsed by the application. "
-            "Keep output concise and action-oriented. "
-            f"Reference timestamp: {reference_timestamp}. Timezone: {self.settings.timezone}. "
-            "Use deadline_text for relative or human deadline wording. "
-            "Use deadline_at only for exact ISO 8601 datetimes, otherwise null. "
-            "Return only valid JSON. No markdown. No code fences. No explanation."
-        )
-        digest = self._validated_json(DailyDigest, system, json.dumps(payload, ensure_ascii=False))
-        required = {
-            "summary",
-            "what_happened",
-            "requests_to_me",
-            "important_context",
-            "action_items",
-            "should_open_telegram",
-            "open_reason",
+        chats = payload.get("chats") if isinstance(payload.get("chats"), list) else []
+        chats_by_id = {
+            str(chat.get("chat_id")): chat
+            for chat in chats
+            if isinstance(chat, dict) and chat.get("chat_id") is not None
         }
-        for item in [*digest.direct_messages, *digest.group_updates]:
-            if not required.issubset(item.model_fields_set):
-                raise LLMError("LLM daily digest omitted required semantic fields")
+        expected_chat_ids = set(chats_by_id)
+
+        def normalized_chat_type(chat: dict) -> str:
+            chat_type = str(chat.get("chat_type") or "channel")
+            return "group" if chat_type == "supergroup" else chat_type
+
+        def validate_response(response: DigestLLMResponse) -> DigestLLMResponse:
+            actual_chat_ids = {item.chat_id for item in response.items}
+            if actual_chat_ids != expected_chat_ids:
+                raise DigestChatCoverageError("digest chat coverage mismatch")
+            for item in response.items:
+                if COUNT_ONLY_DIGEST_SUMMARY_RE.fullmatch(item.summary.strip()):
+                    raise DigestCountOnlySummaryError("count-only digest summary")
+                if item.chat_type != normalized_chat_type(chats_by_id[item.chat_id]):
+                    raise DigestChatCoverageError("digest chat type mismatch")
+            return response
+
+        system = (
+            "Create a concise practical Telegram digest. Return strict JSON only with this exact "
+            "shape: {\"items\":[{\"chat_id\":\"string\",\"chat_title\":\"string\","
+            "\"chat_type\":\"private|group|channel\",\"summary\":\"string\","
+            "\"requests\":[\"string\"],\"context\":[\"string\"],"
+            "\"actions\":[\"string\"],\"deadlines\":[\"string\"],"
+            "\"open_telegram\":true,\"reason_to_open\":\"string\","
+            "\"message_count\":1}]}. "
+            "Include exactly one item for every input chat_id and never combine chats. Preserve "
+            "chat_id and chat_type exactly. Every key is required; use empty arrays when there "
+            "are no requests, context, actions, or deadlines. Summaries must explain what "
+            "happened and must not be only a message count. Media is already collapsed. "
+            "Keep Russian summaries concise and action-oriented. "
+            f"Reference timestamp: {reference_timestamp}. Timezone: {self.settings.timezone}. "
+            "No markdown. No code fences. No prose before or after the JSON object."
+        )
+        response = self._validated_json(
+            DigestLLMResponse,
+            system,
+            json.dumps(payload, ensure_ascii=False),
+            validate=validate_response,
+            prefer_schema=True,
+            allow_code_fences=False,
+        )
+        digest = DailyDigest(date=str(payload.get("date") or ""))
+        for item in response.items:
+            chat = chats_by_id[item.chat_id]
+            messages = chat.get("messages") if isinstance(chat.get("messages"), list) else []
+            source_refs = [
+                message["source_ref"]
+                for message in messages
+                if isinstance(message, dict) and isinstance(message.get("source_ref"), dict)
+            ]
+            requests = "; ".join(item.requests) or "Явных запросов нет."
+            context = "; ".join(item.context) or "Дополнительный контекст не выделен."
+            actions = "; ".join(item.actions) or "Действий по переписке не указано."
+            deadlines = "; ".join(item.deadlines) or None
+            common = {
+                "chat": str(chat.get("chat_title") or item.chat_title),
+                "summary": item.summary,
+                "what_happened": item.summary,
+                "requests_to_me": requests,
+                "important_context": context,
+                "action_items": actions,
+                "should_open_telegram": item.open_telegram,
+                "open_reason": item.reason_to_open,
+                "open_telegram": item.open_telegram,
+                "deadline_text": deadlines,
+                "source_refs": source_refs,
+                "message_count": len(messages),
+            }
+            if item.chat_type == "private":
+                digest.direct_messages.append(
+                    DigestDirectMessage(
+                        needs_reply=bool(item.requests or item.actions),
+                        **common,
+                    )
+                )
+            else:
+                digest.group_updates.append(DigestGroupUpdate(**common))
         return digest

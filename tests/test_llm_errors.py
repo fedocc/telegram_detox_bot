@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 
 import pytest
@@ -33,8 +34,10 @@ class MalformedCompletions:
 class SequenceCompletions:
     def __init__(self, responses) -> None:
         self.responses = list(responses)
+        self.calls: list[dict] = []
 
     def create(self, **kwargs):
+        self.calls.append(kwargs)
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
@@ -54,6 +57,52 @@ def response_with(content):
 
 def p0_json(status: str = "P0") -> str:
     return f'{{"status":"{status}","summary":"ok","confidence":1}}'
+
+
+def digest_payload(text: str = "ответь через час") -> dict:
+    return {
+        "date": "2026-07-07",
+        "chats": [
+            {
+                "chat_id": "1",
+                "chat_title": "Маша",
+                "chat_type": "private",
+                "messages": [
+                    {
+                        "text": text,
+                        "source_ref": {"chat_id": "1", "message_id": 1},
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def digest_json(
+    *,
+    summary: str = "Просит ответить через час.",
+    deadlines: list[str] | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "items": [
+                {
+                    "chat_id": "1",
+                    "chat_title": "Маша",
+                    "chat_type": "private",
+                    "summary": summary,
+                    "requests": ["ответить"],
+                    "context": ["сообщение требует ответа"],
+                    "actions": ["ответить в Telegram"],
+                    "deadlines": deadlines or [],
+                    "open_telegram": True,
+                    "reason_to_open": "Нужен ответ.",
+                    "message_count": 1,
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
 
 
 def test_second_openai_retry_error_becomes_llm_error(settings: Settings) -> None:
@@ -296,40 +345,119 @@ def test_p0_relative_deadline_does_not_trigger_llm_error(settings: Settings) -> 
 def test_daily_digest_relative_deadline_does_not_fail(settings: Settings) -> None:
     client = HaikuClient(settings)
     client.client = FakeClient(
-        MalformedCompletions(
-            response_with(
-                    '{"date":"2026-07-07","direct_messages":[{"chat":"Маша",'
-                    '"summary":"Просит ответить через час.","needs_reply":true,'
-                    '"what_happened":"Просит ответить через час.",'
-                    '"requests_to_me":"Ответить.","important_context":null,'
-                    '"action_items":"Ответить через час.",'
-                    '"should_open_telegram":true,"open_reason":"Нужен ответ.",'
-                    '"deadline_at":"через час","deadline_text":null,'
-                '"source_refs":[{"chat_id":"1","message_id":1}]}]}'
-            )
-        )
+        MalformedCompletions(response_with(digest_json(deadlines=["через час"])))
     )
 
-    digest = client.daily_digest({"date": "2026-07-07", "chats": []})
+    digest = client.daily_digest(digest_payload())
 
     assert digest.direct_messages[0].deadline_text == "через час"
     assert digest.direct_messages[0].deadline_at is None
 
 
-def test_daily_digest_missing_semantic_fields_becomes_llm_error(settings: Settings) -> None:
+def test_valid_llm_digest_uses_simple_schema(settings: Settings) -> None:
+    completions = MalformedCompletions(response_with(digest_json()))
+    client = HaikuClient(settings)
+    client.client = FakeClient(completions)
+
+    digest = client.daily_digest(digest_payload())
+
+    assert digest.generated_by == "llm"
+    assert digest.direct_messages[0].summary == "Просит ответить через час."
+    assert digest.direct_messages[0].source_refs == [{"chat_id": "1", "message_id": 1}]
+    assert completions.calls[0]["response_format"]["type"] == "json_schema"
+
+
+def test_invalid_llm_digest_triggers_explicit_repair(settings: Settings) -> None:
+    incomplete = '{"items":[{"chat_id":"1","summary":"Нужен ответ."}]}'
+    completions = SequenceCompletions(
+        [response_with(incomplete), response_with(digest_json())]
+    )
+    client = HaikuClient(settings)
+    client.client = FakeClient(completions)
+
+    digest = client.daily_digest(digest_payload())
+
+    assert digest.direct_messages[0].summary == "Просит ответить через час."
+    assert len(completions.calls) == 2
+    repair_prompt = completions.calls[1]["messages"][1]["content"]
+    assert "REQUIRED_SCHEMA" in repair_prompt
+    assert "ORIGINAL_INPUT" in repair_prompt
+    assert "PREVIOUS_OUTPUT" in repair_prompt
+    assert "No markdown" in repair_prompt
+
+
+def test_count_only_llm_summary_triggers_repair(settings: Settings) -> None:
+    completions = SequenceCompletions(
+        [
+            response_with(digest_json(summary="5 сообщений")),
+            response_with(digest_json(summary="Просит подтвердить время встречи.")),
+        ]
+    )
+    client = HaikuClient(settings)
+    client.client = FakeClient(completions)
+
+    digest = client.daily_digest(digest_payload())
+
+    assert digest.direct_messages[0].summary == "Просит подтвердить время встречи."
+    assert len(completions.calls) == 2
+
+
+def test_digest_markdown_fence_is_repaired_to_strict_json(settings: Settings) -> None:
+    completions = SequenceCompletions(
+        [
+            response_with(f"```json\n{digest_json()}\n```"),
+            response_with(digest_json()),
+        ]
+    )
+    client = HaikuClient(settings)
+    client.client = FakeClient(completions)
+
+    digest = client.daily_digest(digest_payload())
+
+    assert digest.direct_messages[0].summary == "Просит ответить через час."
+    assert len(completions.calls) == 2
+
+
+def test_missing_chat_summary_after_repair_is_rejected(settings: Settings) -> None:
+    payload = digest_payload()
+    payload["chats"].append(
+        {
+            "chat_id": "2",
+            "chat_title": "Рабочая группа",
+            "chat_type": "group",
+            "messages": [
+                {
+                    "text": "обновление",
+                    "source_ref": {"chat_id": "2", "message_id": 1},
+                }
+            ],
+        }
+    )
+    client = HaikuClient(settings)
+    client.client = FakeClient(MalformedCompletions(response_with(digest_json())))
+
+    with pytest.raises(LLMError) as error:
+        client.daily_digest(payload)
+
+    assert error.value.reason_code == "validation_failed"
+    assert error.value.validation_error_type == "DigestChatCoverageError"
+
+
+def test_daily_digest_missing_fields_after_repair_becomes_llm_error(
+    settings: Settings,
+) -> None:
     client = HaikuClient(settings)
     client.client = FakeClient(
         MalformedCompletions(
-            response_with(
-                '{"date":"2026-07-07","direct_messages":[{"chat":"Маша",'
-                '"summary":"Есть сообщение.","needs_reply":false,'
-                '"source_refs":[{"chat_id":"1","message_id":1}]}]}'
-            )
+            response_with('{"items":[{"chat_id":"1","summary":"Есть сообщение."}]}')
         )
     )
 
-    with pytest.raises(LLMError, match="semantic fields"):
-        client.daily_digest({"date": "2026-07-07", "chats": []})
+    with pytest.raises(LLMError, match="invalid JSON") as error:
+        client.daily_digest(digest_payload())
+
+    assert error.value.reason_code == "validation_failed"
+    assert error.value.validation_error_type == "ValidationError"
 
 
 def test_digest_models_use_deadline_text_and_deadline_at() -> None:
