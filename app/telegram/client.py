@@ -10,6 +10,7 @@ from telethon.errors import SessionPasswordNeededError
 from app.config import Settings
 from app.db import repository
 from app.email.sender import EmailSender
+from app.ignored_chats import load_ignored_chats_from_settings
 from app.llm.client import HaikuClient
 from app.services.p0 import handle_p0_candidate
 from app.telegram.backfill import run_startup_backfill
@@ -40,7 +41,40 @@ async def interactive_login(settings: Settings) -> None:
     print("Telegram session created.")
 
 
-async def run_listener(settings: Settings, session_factory, on_connected=None) -> None:
+async def ingest_event(
+    event,
+    *,
+    settings: Settings,
+    session_factory,
+    llm: HaikuClient,
+    email: EmailSender,
+    ignored_chat_ids: frozenset[str] | set[str],
+) -> bool:
+    if str(event.chat_id) in ignored_chat_ids:
+        return False
+    stored = await event_to_stored_message(event)
+    with session_factory() as session:
+        repository.save_message(session, stored)
+        handle_p0_candidate(
+            session,
+            stored,
+            llm,
+            email,
+            settings=settings,
+            ignored_chat_ids=ignored_chat_ids,
+        )
+    return True
+
+
+async def run_listener(
+    settings: Settings,
+    session_factory,
+    on_connected=None,
+    *,
+    ignored_chat_ids: frozenset[str] | set[str] | None = None,
+) -> None:
+    if ignored_chat_ids is None:
+        ignored_chat_ids = load_ignored_chats_from_settings(settings).chat_ids
     client = make_client(settings)
     await client.connect()
     if not await client.is_user_authorized():
@@ -54,10 +88,14 @@ async def run_listener(settings: Settings, session_factory, on_connected=None) -
 
     @client.on(events.NewMessage(incoming=None, outgoing=None))
     async def handler(event) -> None:
-        stored = await event_to_stored_message(event)
-        with session_factory() as session:
-            repository.save_message(session, stored)
-            handle_p0_candidate(session, stored, llm, email, settings=settings)
+        await ingest_event(
+            event,
+            settings=settings,
+            session_factory=session_factory,
+            llm=llm,
+            email=email,
+            ignored_chat_ids=ignored_chat_ids,
+        )
 
     await run_startup_backfill(
         client=client,
@@ -65,5 +103,6 @@ async def run_listener(settings: Settings, session_factory, on_connected=None) -
         session_factory=session_factory,
         llm=llm,
         email_sender=email,
+        ignored_chat_ids=ignored_chat_ids,
     )
     await client.run_until_disconnected()

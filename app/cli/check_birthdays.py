@@ -18,7 +18,7 @@ from app.email.sender import EmailSender
 from app.telegram.client import make_client
 
 SAFE_SAMPLE = """Пример письма без реальных данных:
-[ДР] Сегодня: Пример Контакта
+[Telegram Detox][ДР] Сегодня: Пример Контакта
 
 Сегодня:
 - Пример Контакта — сегодня

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from telethon.tl.types import User
@@ -30,17 +31,22 @@ class FakeTelegramMessage:
         timestamp: datetime,
         sender=None,
         out: bool = False,
+        reply_parent=None,
     ) -> None:
         self.id = message_id
         self.raw_text = text
         self.date = timestamp
         self.out = out
         self.media = None
-        self.reply_to_msg_id = None
+        self.reply_to_msg_id = getattr(reply_parent, "id", None)
         self._sender = sender
+        self._reply_parent = reply_parent
 
     async def get_sender(self):
         return self._sender
+
+    async def get_reply_message(self):
+        return self._reply_parent
 
 
 class FakeTelegramClient:
@@ -170,6 +176,72 @@ async def test_backfill_inserts_missed_messages(settings, session_factory, now) 
     assert stats.messages_inserted == 2
     assert {(row.chat_id, row.message_id) for row in rows} == {("1", 1), ("1", 2)}
     assert all(row.is_backfilled for row in rows)
+
+
+async def test_backfill_skips_ignored_chat_before_state_or_message_processing(
+    settings,
+    session_factory,
+    now,
+) -> None:
+    settings.ignore_chat_ids = "1"
+    sender = _user(42, "Sender")
+    client = _client_with_private_messages(
+        [FakeTelegramMessage(message_id=1, text="ответь сейчас", timestamp=now, sender=sender)]
+    )
+    llm = FakeP0LLM(status=P0Status.p0_strict)
+    email = FakeEmail()
+
+    stats = await run_startup_backfill(
+        client=client,
+        settings=settings,
+        session_factory=session_factory,
+        llm=llm,
+        email_sender=email,
+        now=now,
+    )
+
+    with session_factory() as session:
+        assert repository.get_message(session, "1", 1) is None
+        assert repository.pending_backfill_states(session) == []
+        assert repository.pending_alert_jobs(session) == []
+    assert stats.messages_fetched == 0
+    assert stats.messages_inserted == 0
+    assert llm.calls == 0
+    assert email.sent == []
+
+
+async def test_backfill_stores_resolved_reply_to_outgoing_metadata(
+    settings,
+    session_factory,
+    now,
+) -> None:
+    sender = _user(42, "Sender")
+    outgoing_parent = SimpleNamespace(id=900, out=True)
+    client = _client_with_private_messages(
+        [
+            FakeTelegramMessage(
+                message_id=1,
+                text="reply",
+                timestamp=now,
+                sender=sender,
+                reply_parent=outgoing_parent,
+            )
+        ]
+    )
+
+    await run_startup_backfill(
+        client=client,
+        settings=settings,
+        session_factory=session_factory,
+        llm=FakeP0LLM(),
+        email_sender=FakeEmail(),
+        now=now,
+    )
+
+    with session_factory() as session:
+        stored = repository.get_message(session, "1", 1)
+    assert stored.reply_to_message_id == 900
+    assert stored.reply_to_is_mine is True
 
 
 async def test_backfill_running_twice_is_idempotent(settings, session_factory, now) -> None:

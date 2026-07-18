@@ -67,6 +67,7 @@ class StoredMessage(BaseModel):
     timestamp: datetime
     is_outgoing: bool = False
     reply_to_message_id: int | None = None
+    reply_to_is_mine: bool | None = None
     text: str | None = None
     media_type: MediaType = MediaType.none
     caption: str | None = None

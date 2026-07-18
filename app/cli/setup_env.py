@@ -47,6 +47,7 @@ def main() -> None:
         "BIRTHDAY_REMINDER_TIME": "09:00",
         "BIRTHDAY_LOOKAHEAD_DAYS": "1",
         "BIRTHDAY_MANUAL_PATH": "data/birthdays.json",
+        "IGNORE_CHAT_IDS": "",
     }
     if email_transport == "gmail_api":
         values["GMAIL_OAUTH_CLIENT_SECRET_PATH"] = "secrets/google_oauth_client.json"  # noqa: S105

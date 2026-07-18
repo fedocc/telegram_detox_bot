@@ -7,11 +7,17 @@ from datetime import UTC, datetime, timedelta
 from app.config import Settings
 from app.db import repository
 from app.email.sender import EmailSender
+from app.ignored_chats import load_ignored_chats_from_settings
 from app.llm.client import HaikuClient
 from app.models.schemas import ChatType, MediaType, P0Status, StoredMessage
 from app.services.p0 import handle_p0_candidate
 from app.services.prefilter import is_p0_candidate, is_urgent_call_candidate
-from app.telegram.mapper import chat_type, display_name, telegram_message_to_stored_message
+from app.telegram.mapper import (
+    chat_type,
+    display_name,
+    resolve_reply_to_is_mine,
+    telegram_message_to_stored_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +77,13 @@ async def run_startup_backfill(
     llm: HaikuClient,
     email_sender: EmailSender,
     now: datetime | None = None,
+    ignored_chat_ids: frozenset[str] | set[str] | None = None,
 ) -> BackfillStats:
     stats = BackfillStats()
     if not settings.backfill_enabled:
         return stats
+    if ignored_chat_ids is None:
+        ignored_chat_ids = load_ignored_chats_from_settings(settings).chat_ids
 
     now = now or datetime.now(UTC)
     now = now.astimezone(UTC) if now.tzinfo else now.replace(tzinfo=UTC)
@@ -85,8 +94,10 @@ async def run_startup_backfill(
 
     async for dialog in client.iter_dialogs():
         stats.chats_scanned += 1
-        entity = dialog.entity
         chat_id = str(dialog.id)
+        if chat_id in ignored_chat_ids:
+            continue
+        entity = dialog.entity
         entities_by_chat_id[chat_id] = entity
         with session_factory() as session:
             latest = repository.latest_message_for_chat(session, chat_id)
@@ -150,6 +161,7 @@ async def run_startup_backfill(
                     )
                 continue
             sender = await _message_sender(tg_message)
+            reply_to_is_mine = await resolve_reply_to_is_mine(tg_message)
             stored = telegram_message_to_stored_message(
                 tg_message,
                 chat=entity,
@@ -157,6 +169,7 @@ async def run_startup_backfill(
                 chat_id=state.chat_id,
                 is_backfilled=True,
                 ingested_at=now,
+                reply_to_is_mine=reply_to_is_mine,
             )
             stats.messages_fetched += 1
             remaining -= 1
@@ -179,7 +192,14 @@ async def run_startup_backfill(
                             stored.message_id,
                         )
                         was_classified = bool(before and before.p0_classified_at)
-                        handle_p0_candidate(session, stored, llm, email_sender, settings=settings)
+                        handle_p0_candidate(
+                            session,
+                            stored,
+                            llm,
+                            email_sender,
+                            settings=settings,
+                            ignored_chat_ids=ignored_chat_ids,
+                        )
                         after = repository.get_message(session, stored.chat_id, stored.message_id)
                         if after and after.p0_classified_at and not was_classified:
                             stats.p0_classifications_triggered += 1

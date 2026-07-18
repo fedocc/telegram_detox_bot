@@ -42,9 +42,18 @@ def run_daily_job(
     raw_retention_days: int,
     digest_retention_days: int,
     now: datetime,
+    *,
+    ignored_chat_ids: frozenset[str] | set[str] | None = None,
 ) -> None:
     try:
-        send_daily_digest_pipeline(session, llm, email_sender, day, timezone)
+        send_daily_digest_pipeline(
+            session,
+            llm,
+            email_sender,
+            day,
+            timezone,
+            ignored_chat_ids=ignored_chat_ids,
+        )
     except Exception:
         logger.exception("Daily digest pipeline failed")
     finally:

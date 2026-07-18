@@ -179,6 +179,17 @@ def test_private_writing_just_because_stays_in_digest(session) -> None:
         "сегодня свободен?",
         "надо обсудить",
         "отпиши",
+        "привет идем сегодня гулять?",
+        "привет, идём сегодня?",
+        "го завтра гулять?",
+        "пойдем сегодня?",
+        "пойдём завтра в кафе?",
+        "сегодня увидимся?",
+        "завтра встретимся?",
+        "давай сегодня созвонимся",
+        "можешь завтра встретиться?",
+        "ты сегодня свободен?",
+        "посмотри плиз номера в отеле",
     ],
 )
 def test_high_recall_private_reaction_signals_send_email(session, raw_text) -> None:
@@ -1130,7 +1141,7 @@ def test_private_media_with_urgent_caption_can_send_p0_email(session, settings) 
         session, message, FakeLLM(status=P0Status.p0), email, settings=settings
     )
     assert len(email.sent) == 1
-    assert email.sent[0][0].startswith("[СРОЧНО]")
+    assert email.sent[0][0].startswith("[Telegram Detox][P0] [СРОЧНО]")
 
 
 def test_private_media_with_nonurgent_caption_does_not_send_email(session, settings) -> None:
@@ -1237,6 +1248,47 @@ def test_group_reply_to_me_ok_question_sends_email(session, settings) -> None:
     assert len(email.sent) == 1
 
 
+def test_group_reply_to_missing_parent_uses_resolved_outgoing_metadata(
+    session,
+    settings,
+) -> None:
+    message = msg(
+        chat_id="g1",
+        chat_type=ChatType.group,
+        text="ок?",
+        reply_to_message_id=999,
+        reply_to_is_mine=True,
+    )
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(
+        session,
+        message,
+        FakeLLM(status=P0Status.not_p0),
+        email,
+        settings=settings,
+    ) is True
+    assert len(email.sent) == 1
+
+
+@pytest.mark.parametrize("raw_text", ["?", "??"])
+def test_bare_group_question_marks_stay_in_digest(
+    session,
+    settings,
+    raw_text,
+) -> None:
+    message = msg(chat_id="g1", chat_type=ChatType.group, text=raw_text)
+    repository.save_message(session, message)
+    llm = FakeLLM(status=P0Status.p0_strict, confidence=0.99)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(session, message, llm, email, settings=settings) is False
+    assert llm.calls == 0
+    assert email.sent == []
+    assert repository.pending_alert_jobs(session) == []
+
+
 @pytest.mark.parametrize(
     "raw_text",
     [
@@ -1269,14 +1321,16 @@ def test_high_recall_group_reaction_signals_send_email(
     assert repository.get_message(session, "g1", 1).p0_classification == "P0_STRICT"
 
 
+@pytest.mark.parametrize("raw_text", ["ок", "ок?"])
 def test_group_missing_reply_parent_without_other_signal_stays_fail_closed(
     session,
     settings,
+    raw_text,
 ) -> None:
     message = msg(
         chat_id="g1",
         chat_type=ChatType.group,
-        text="ок",
+        text=raw_text,
         reply_to_message_id=999,
     )
     repository.save_message(session, message)

@@ -14,6 +14,7 @@ def test_env_and_session_files_are_ignored_by_git() -> None:
         "secrets/google_oauth_client.json",
         "data/gmail_oauth_token.json",
         "data/birthdays.json",
+        "data/ignored_chats.json",
     ]
     result = subprocess.run(  # noqa: S603
         ["/usr/bin/git", "check-ignore", *targets],
@@ -41,6 +42,25 @@ def test_birthday_example_is_committed_and_override_is_ignored() -> None:
     ).returncode != 0
     assert subprocess.run(  # noqa: S603
         ["/usr/bin/git", "check-ignore", "data/birthdays.json"],
+        cwd=root,
+        capture_output=True,
+        check=False,
+    ).returncode == 0
+
+
+def test_ignored_chats_example_is_committable_and_private_file_is_ignored() -> None:
+    root = Path(__file__).resolve().parents[1]
+    example = root / "data" / "ignored_chats.example.json"
+
+    assert example.exists()
+    assert subprocess.run(  # noqa: S603
+        ["/usr/bin/git", "check-ignore", "data/ignored_chats.example.json"],
+        cwd=root,
+        capture_output=True,
+        check=False,
+    ).returncode != 0
+    assert subprocess.run(  # noqa: S603
+        ["/usr/bin/git", "check-ignore", "data/ignored_chats.json"],
         cwd=root,
         capture_output=True,
         check=False,

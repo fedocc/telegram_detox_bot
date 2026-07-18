@@ -5,7 +5,9 @@
 *.session-journal
 data/*
 !data/birthdays.example.json
+!data/ignored_chats.example.json
 data/birthdays.json
+data/ignored_chats.json
 logs/
 secrets/
 backups/

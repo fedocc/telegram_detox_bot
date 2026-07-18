@@ -13,6 +13,7 @@ from app.config import get_settings
 from app.db import repository
 from app.db.session import init_db
 from app.email.sender import EmailSender
+from app.ignored_chats import load_ignored_chats_from_settings
 from app.llm.client import HaikuClient
 from app.logging_config import configure_logging
 from app.services.maintenance import run_cleanup, run_daily_job
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 async def main() -> None:
     settings = get_settings()
     configure_logging(settings)
+    ignored_chat_ids = load_ignored_chats_from_settings(settings).chat_ids
     session_factory = init_db(settings)
     scheduler = AsyncIOScheduler(timezone=settings.timezone)
     hour, minute = [int(part) for part in settings.digest_time.split(":", 1)]
@@ -40,6 +42,7 @@ async def main() -> None:
                 settings.raw_retention_days,
                 settings.digest_retention_days,
                 now,
+                ignored_chat_ids=ignored_chat_ids,
             )
 
     def cleanup_job() -> None:
@@ -54,13 +57,25 @@ async def main() -> None:
 
     def retry_alerts_job() -> None:
         now = datetime.now(ZoneInfo(settings.timezone))
+        current_ignored_chat_ids = load_ignored_chats_from_settings(settings).chat_ids
         with session_factory() as session:
-            repository.retry_pending_alerts(session, EmailSender(settings), now)
+            repository.retry_pending_alerts(
+                session,
+                EmailSender(settings),
+                now,
+                excluded_chat_ids=current_ignored_chat_ids,
+            )
 
     def retry_digests_job() -> None:
         now = datetime.now(ZoneInfo(settings.timezone))
+        current_ignored_chat_ids = load_ignored_chats_from_settings(settings).chat_ids
         with session_factory() as session:
-            repository.retry_pending_digests(session, EmailSender(settings), now)
+            repository.retry_pending_digests(
+                session,
+                EmailSender(settings),
+                now,
+                ignored_chat_ids=current_ignored_chat_ids,
+            )
 
     def birthday_daily_job() -> None:
         now = datetime.now(ZoneInfo(settings.timezone))
@@ -121,6 +136,7 @@ async def main() -> None:
         settings,
         session_factory,
         on_connected=register_birthday_poll if settings.birthday_reminders_enabled else None,
+        ignored_chat_ids=ignored_chat_ids,
     )
 
 

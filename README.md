@@ -15,7 +15,7 @@ Codex не является частью runtime-пайплайна. В runtime 
 
 ## Safety guarantees and limits
 
-- Private messages are never silently dropped. After every LLM digest, the app checks all incoming private message IDs for the day. Any private message omitted by the LLM is added to `REVIEW`.
+- Private messages are never silently dropped unless their exact chat ID is configured in the explicit ignored-chat blacklist. After every LLM digest, the app checks all other incoming private message IDs for the day. Any private message omitted by the LLM is added to `REVIEW`.
 - Private messages are never counted as P3/background noise. If classification is uncertain, the message is surfaced for review.
 - Immediate email is reserved for `P0_STRICT`, with recall prioritized over precision. In private chats, requests, planning or availability questions, important context, urgency, and borderline messages where a response may be expected qualify; obvious small talk remains digest-only. In groups, exact configured username mentions, replies, urgency, importance, deadlines, actionable requests, questions, and watchlist matches qualify. Set exact usernames with `P0_MENTION_USERNAMES`.
 - Trusted private senders can lower uncertainty, but ordinary messages such as `привет` remain digest-only.
@@ -25,6 +25,26 @@ Codex не является частью runtime-пайплайна. В runtime 
 - AITunnel/LLM outage triggers a deterministic fallback digest. The fallback includes incoming private messages, group counts, P0 review candidates, and unprocessed media notices.
 - Runtime never performs Telegram login. `python -m app.cli.telegram_login` is the only interactive authentication command. The 24/7 listener only connects with an existing session and exits closed if the session is missing or unauthorized.
 - The service is read-only by design. Static tests fail if runtime code uses Telegram write/action methods such as send, delete, reaction, pin, mute, join, leave, or mark-read calls.
+
+## Игнорируемые чаты
+
+Чаты из blacklist отбрасываются по точному `chat_id` до чтения текста, записи в БД, backfill, P0 и LLM/digest. Название чата не используется как идентификатор.
+
+ID можно задать через env:
+
+```env
+IGNORE_CHAT_IDS=-1001234567890
+```
+
+Локальный файл `data/ignored_chats.json` имеет тот же формат, что `data/ignored_chats.example.json`. Локальный файл игнорируется Git; env и JSON объединяются без дублей.
+
+Проверить конфигурацию и найти точные ID можно read-only командами:
+
+```bash
+python -m app.cli.check_ignored_chats
+python -m app.cli.list_chats --limit 100
+python -m app.cli.list_chats --search "name"
+```
 
 ## Напоминания о днях рождения
 
@@ -170,35 +190,38 @@ python -m app.cli.check_birthdays --dry-run
 python -m app.cli.check_birthdays
 ```
 
-## Docker
+## Deploy на VPS через systemd
+
+Этот VPS запускает приложение как `telegram-detox.service` из `/opt/telegram-detox` от пользователя `telegram-detox`. Docker для этого deployment не используется. Перед перезапуском cleanup-команды отменяют небезопасные legacy alert/digest jobs; `cancel_unsafe_digests` безопасно запускать повторно и выводит только счётчики.
+
+Запускайте deployment от `root`:
 
 ```bash
-docker compose build
-docker compose run --rm telegram-digest python -m app.cli.telegram_login
-docker compose up -d
+cd /opt/telegram-detox
+systemctl stop telegram-detox || true
+runuser -u telegram-detox -- git pull
+runuser -u telegram-detox -- .venv/bin/python -m pip install -e .
+runuser -u telegram-detox -- .venv/bin/python -m pytest
+runuser -u telegram-detox -- .venv/bin/python -m ruff check .
+runuser -u telegram-detox -- .venv/bin/python -m app.cli.healthcheck
+runuser -u telegram-detox -- .venv/bin/python -m app.cli.security_check
+runuser -u telegram-detox -- .venv/bin/python -m app.cli.cancel_legacy_alerts
+runuser -u telegram-detox -- .venv/bin/python -m app.cli.cancel_unsafe_digests
+runuser -u telegram-detox -- .venv/bin/python -m app.cli.check_ignored_chats
+runuser -u telegram-detox -- .venv/bin/python -m app.cli.check_birthdays --dry-run
+systemctl start telegram-detox
+systemctl enable telegram-detox
+systemctl status telegram-detox --no-pager -l
 ```
 
-`./data` и `./logs` монтируются как volume. `.env`, runtime-файлы в `data/`, `logs/`, `*.session` и базы исключены из Git; исключение — безопасный `data/birthdays.example.json`.
-
-## Будущий перенос на VPS
-
-1. Установите Docker и Docker Compose.
-2. Скопируйте код без `.env`, `data/`, `logs/`.
-3. Создайте `.env` на VPS через `python -m app.cli.setup_env` или безопасно перенесите локальный `.env`.
-4. Перенесите `data/telegram_digest.session` только по SSH/SCP на доверенный сервер.
-5. Для Gmail API перенесите `secrets/google_oauth_client.json` и `data/gmail_oauth_token.json` только по защищённому каналу. Это секреты, их нельзя класть в Git.
-6. Выполните `chmod 600 data/telegram_digest.session .env secrets/google_oauth_client.json data/gmail_oauth_token.json`.
-7. На VPS сервис использует refresh token и не открывает browser.
-8. Запустите `docker compose up -d`.
+`.env`, Telegram session, Gmail OAuth token, локальная БД и приватные JSON-файлы остаются локальными runtime-файлами и не должны попадать в Git. На VPS Gmail использует refresh token и не открывает browser.
 
 ## Как остановить сервис
 
-Локально: `Ctrl+C`.
-
-Docker:
+Локально: `Ctrl+C`. На VPS:
 
 ```bash
-docker compose down
+systemctl stop telegram-detox
 ```
 
 ## Как полностью удалить session и локальную БД
@@ -219,7 +242,7 @@ rm -rf logs/*
 - Raw messages удаляются через 14 дней.
 - Digests хранятся 90 дней.
 - Тексты сообщений, API keys, SMTP credentials, OAuth tokens, OAuth client secrets и session details не пишутся намеренно в логи; logging filter редактирует секретоподобные значения.
-- `.env`, session-файлы, `data/birthdays.json`, остальные runtime-файлы в `data/`, logs, secrets и database files не должны попадать в Git/GitHub.
+- `.env`, session-файлы, `data/birthdays.json`, `data/ignored_chats.json`, остальные runtime-файлы в `data/`, logs, secrets и database files не должны попадать в Git/GitHub.
 
 ## Тесты без Telegram и сети
 

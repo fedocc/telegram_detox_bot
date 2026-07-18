@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -441,7 +442,38 @@ def test_fallback_digest_keeps_direct_messages(now) -> None:
 
     assert digest.direct_messages[0].needs_manual_review is False
     assert digest.direct_messages[0].what_happened
-    assert digest.direct_messages[0].action_items == "Действий не требуется."
+    assert "Возможно требуется действие" in digest.direct_messages[0].action_items
+
+
+def test_fallback_question_does_not_claim_there_is_no_request(now) -> None:
+    digest = fallback_digest(date(2026, 7, 7), [msg(text="сможешь помочь?", timestamp=now)])
+    item = digest.direct_messages[0]
+
+    assert "Возможен вопрос или запрос" in item.requests_to_me
+    assert "Явного запроса не обнаружено" not in item.requests_to_me
+    assert item.needs_reply is True
+
+
+def test_fallback_deadline_mentions_possible_deadline(now) -> None:
+    digest = fallback_digest(date(2026, 7, 7), [msg(text="нужно до 18:00", timestamp=now)])
+    item = digest.direct_messages[0]
+
+    assert "Возможен срок или дедлайн" in item.important_context
+    assert "Действий не требуется" not in item.action_items
+
+
+def test_fallback_action_is_conservative_and_does_not_log_private_text(
+    now,
+    caplog,
+) -> None:
+    private_text = "пришли файл уникальный приватный маркер"
+    with caplog.at_level(logging.DEBUG):
+        digest = fallback_digest(date(2026, 7, 7), [msg(text=private_text, timestamp=now)])
+    item = digest.direct_messages[0]
+
+    assert "Возможно требуется действие" in item.action_items
+    assert "Действий не требуется" not in item.action_items
+    assert private_text not in caplog.text
 
 
 def test_digest_cannot_drop_private_message_when_llm_omits_it(session) -> None:
@@ -551,7 +583,9 @@ def test_digest_llm_failure_sends_fallback_digest(session) -> None:
 
     assert digest.generated_by == "fallback"
     assert digest.email_status == "sent"
-    assert email.sent[0][0].startswith("[FALLBACK] Telegram digest — 2026-07-07")
+    assert email.sent[0][0].startswith(
+        "[Telegram Detox][Digest] [FALLBACK] Telegram digest — 2026-07-07"
+    )
 
 
 def test_daily_digest_openai_error_sends_fallback_digest(session) -> None:
@@ -634,7 +668,17 @@ def test_new_pending_digest_is_immediately_retryable(session) -> None:
 
 
 def test_crash_after_save_digest_before_smtp_is_recovered_by_retry_scheduler(session) -> None:
-    digest = DailyDigest(date="2026-07-07")
+    digest = DailyDigest(
+        date="2026-07-07",
+        direct_messages=[
+            {
+                "chat": "Allowed",
+                "summary": "Allowed summary",
+                "needs_reply": False,
+                "source_refs": [{"chat_id": "123456789", "message_id": 1}],
+            }
+        ],
+    )
     record = repository.save_digest(
         session,
         digest,
@@ -644,7 +688,12 @@ def test_crash_after_save_digest_before_smtp_is_recovered_by_retry_scheduler(ses
     )
     email = FakeEmail()
 
-    sent = repository.retry_pending_digests(session, email, now=record.next_attempt_at)
+    sent = repository.retry_pending_digests(
+        session,
+        email,
+        now=record.next_attempt_at,
+        ignored_chat_ids=set(),
+    )
 
     assert sent == 1
     assert email.sent == [("saved subject", "saved plain", "<p>saved html</p>")]
@@ -653,17 +702,19 @@ def test_crash_after_save_digest_before_smtp_is_recovered_by_retry_scheduler(ses
 
 def test_successful_initial_digest_send_marks_digest_sent(session) -> None:
     repository.save_message(session, msg(message_id=313, text="ping"))
+    email = FakeEmail()
 
     digest = send_daily_digest_pipeline(
         session,
         FakeLLM(),
-        FakeEmail(),
+        email,
         date(2026, 7, 7),
         "Europe/Moscow",
     )
 
     assert digest.email_status == "sent"
     assert repository.pending_digests(session) == []
+    assert email.sent[0][0].startswith("[Telegram Detox][Digest]")
 
 
 def test_failed_initial_digest_send_sets_backoff_timestamp(session) -> None:
@@ -699,6 +750,7 @@ def test_pending_digest_retried_and_marked_sent(session) -> None:
         session,
         email,
         now=record.next_attempt_at,
+        ignored_chat_ids=set(),
     )
 
     assert sent == 1
@@ -735,7 +787,12 @@ def test_pending_digest_retry_reuses_original_html(session) -> None:
     session.commit()
     email = FakeEmail()
 
-    repository.retry_pending_digests(session, email, now=record.next_attempt_at)
+    repository.retry_pending_digests(
+        session,
+        email,
+        now=record.next_attempt_at,
+        ignored_chat_ids=set(),
+    )
 
     assert email.sent[0][2] == "<p>ORIGINAL HTML</p>"
 
@@ -754,7 +811,12 @@ def test_pending_digest_retry_reuses_original_text(session) -> None:
     session.commit()
     email = FakeEmail()
 
-    repository.retry_pending_digests(session, email, now=record.next_attempt_at)
+    repository.retry_pending_digests(
+        session,
+        email,
+        now=record.next_attempt_at,
+        ignored_chat_ids=set(),
+    )
 
     assert email.sent[0][1] == "ORIGINAL TEXT"
 
@@ -771,7 +833,12 @@ def test_pending_digest_retry_does_not_call_llm_again(session) -> None:
     )
     record = repository.pending_digests(session)[0]
 
-    repository.retry_pending_digests(session, FakeEmail(), now=record.next_attempt_at)
+    repository.retry_pending_digests(
+        session,
+        FakeEmail(),
+        now=record.next_attempt_at,
+        ignored_chat_ids=set(),
+    )
 
     assert llm.calls == 1
 
@@ -1374,7 +1441,12 @@ def test_pipeline_overlapping_with_retry_sends_once(settings, monkeypatch) -> No
         if not triggered:
             triggered = True
             with factory() as retry_session:
-                repository.retry_pending_digests(retry_session, email_sender, now)
+                repository.retry_pending_digests(
+                    retry_session,
+                    email_sender,
+                    now,
+                    ignored_chat_ids=set(),
+                )
         return original_send_claimed(session, record_id, claim_token, email_sender, now)
 
     monkeypatch.setattr(repository, "send_claimed_digest", wrapped_send_claimed)
@@ -1459,7 +1531,12 @@ def test_building_digest_is_not_sendable(session) -> None:
     )
     email = MessageIdEmail()
 
-    sent = repository.retry_pending_digests(session, email, now=record.created_at)
+    sent = repository.retry_pending_digests(
+        session,
+        email,
+        now=record.created_at,
+        ignored_chat_ids=set(),
+    )
 
     assert created is True
     assert claimed_rows
@@ -1541,7 +1618,12 @@ def test_pending_digest_with_empty_payload_is_refused(session) -> None:
     session.commit()
     email = MessageIdEmail()
 
-    sent = repository.retry_pending_digests(session, email, now=record.created_at)
+    sent = repository.retry_pending_digests(
+        session,
+        email,
+        now=record.created_at,
+        ignored_chat_ids=set(),
+    )
 
     assert sent == 0
     assert email.sent == []
@@ -1572,7 +1654,12 @@ def test_failed_digest_send_keeps_claimed_messages_retryable_without_rebuild(ses
     assert rows[0].claimed_digest_id == record.id
     assert llm.calls == 1
     retry_email = MessageIdEmail()
-    sent = repository.retry_pending_digests(session, retry_email, now=record.next_attempt_at)
+    sent = repository.retry_pending_digests(
+        session,
+        retry_email,
+        now=record.next_attempt_at,
+        ignored_chat_ids=set(),
+    )
 
     assert sent == 1
     assert retry_email.message_ids == [first_delivery_id]

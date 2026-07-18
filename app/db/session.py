@@ -64,6 +64,10 @@ def init_db(settings: Settings) -> sessionmaker[Session]:
                     text("CREATE INDEX IF NOT EXISTS ix_messages_claimed_digest_id "
                          "ON messages (claimed_digest_id)")
                 )
+            if "reply_to_is_mine" not in columns:
+                connection.execute(
+                    text("ALTER TABLE messages ADD COLUMN reply_to_is_mine BOOLEAN")
+                )
             digest_columns = {
                 row[1]
                 for row in connection.execute(text("PRAGMA table_info(digests)")).fetchall()
@@ -75,6 +79,18 @@ def init_db(settings: Settings) -> sessionmaker[Session]:
                 )
             if "delivery_id" not in digest_columns:
                 connection.execute(text("ALTER TABLE digests ADD COLUMN delivery_id VARCHAR(256)"))
+            if "source_chat_ids" not in digest_columns:
+                connection.execute(text("ALTER TABLE digests ADD COLUMN source_chat_ids TEXT"))
+            birthday_notification_columns = {
+                row[1]
+                for row in connection.execute(
+                    text("PRAGMA table_info(birthday_notifications)")
+                ).fetchall()
+            }
+            if "attempted_at" not in birthday_notification_columns:
+                connection.execute(
+                    text("ALTER TABLE birthday_notifications ADD COLUMN attempted_at DATETIME")
+                )
     return sessionmaker(engine, expire_on_commit=False, future=True)
 
 

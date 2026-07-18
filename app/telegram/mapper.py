@@ -56,6 +56,7 @@ def telegram_message_to_stored_message(
     chat_id: str,
     is_backfilled: bool = False,
     ingested_at: datetime | None = None,
+    reply_to_is_mine: bool | None = None,
 ) -> StoredMessage:
     text = msg.raw_text or None
     mtype = media_type(msg)
@@ -69,6 +70,7 @@ def telegram_message_to_stored_message(
         timestamp=(msg.date or datetime.now(UTC)).astimezone(UTC),
         is_outgoing=bool(msg.out),
         reply_to_message_id=getattr(msg, "reply_to_msg_id", None),
+        reply_to_is_mine=reply_to_is_mine,
         text=text if mtype == MediaType.none else None,
         media_type=mtype,
         caption=text if mtype != MediaType.none else None,
@@ -81,10 +83,26 @@ async def event_to_stored_message(event) -> StoredMessage:
     msg = event.message
     chat = await event.get_chat()
     sender = await event.get_sender()
+    reply_is_mine = await resolve_reply_to_is_mine(msg)
     return telegram_message_to_stored_message(
         msg,
         chat=chat,
         sender=sender,
         chat_id=str(event.chat_id),
         ingested_at=datetime.now(UTC),
+        reply_to_is_mine=reply_is_mine,
     )
+
+
+async def resolve_reply_to_is_mine(message) -> bool | None:
+    if not getattr(message, "reply_to_msg_id", None):
+        return None
+    if not hasattr(message, "get_reply_message"):
+        return None
+    try:
+        parent = await message.get_reply_message()
+    except Exception:
+        return None
+    if parent is None:
+        return None
+    return bool(parent.out)

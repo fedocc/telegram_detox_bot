@@ -16,6 +16,7 @@ def msg(
     media_type: MediaType = MediaType.none,
     timestamp: datetime | None = None,
     reply_to_message_id: int | None = None,
+    reply_to_is_mine: bool | None = None,
 ) -> StoredMessage:
     return StoredMessage(
         chat_id=chat_id,
@@ -27,6 +28,7 @@ def msg(
         timestamp=timestamp or datetime.fromisoformat("2026-07-07T12:00:00+03:00"),
         is_outgoing=is_outgoing,
         reply_to_message_id=reply_to_message_id,
+        reply_to_is_mine=reply_to_is_mine,
         text=text if media_type == MediaType.none else None,
         media_type=media_type,
         caption=text if media_type != MediaType.none else None,

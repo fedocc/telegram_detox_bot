@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.db import repository
 from app.email.sender import EmailSender
+from app.ignored_chats import load_ignored_chats_from_settings
 from app.llm.client import HaikuClient, LLMError
 from app.models.schemas import (
     P0_MIN_CONFIDENCE,
@@ -53,6 +54,15 @@ PLANNING_OR_AVAILABILITY_RE = re.compile(
     r"(?:сегодня|завтра)\s+свобод(?:ен|на)|"
     r"будешь\s+свобод(?:ен|на)|"
     r"получится\s+(?:(?:сегодня|завтра)\s+)?(?:встретиться|созвониться)|"
+    r"(?:ид[её]м|пойд[её]м|го|давай)"
+    r"(?=[^.!?\n]{0,60}(?:\?|(?:сегодня|завтра)\b))|"
+    r"(?:сегодня|завтра)\b[^.!?\n]{0,40}\b"
+    r"(?:ид[её]м|пойд[её]м|увидимся|встретимся|погулять|встретиться|"
+    r"созвониться|свободен|свободна)|"
+    r"(?:увидимся|встретимся|погулять|встретиться|созвониться)"
+    r"(?=[^.!?\n]{0,40}\?)|"
+    r"(?:го|давай)\b[^.!?\n]{0,40}\b"
+    r"(?:гулять|погулять|увидеться|встретиться|созвониться)|"
     r"are\s+you\s+(?:free|available)|can\s+you\s+(?:meet|talk)"
     r")(?!\w)",
     re.IGNORECASE,
@@ -298,6 +308,8 @@ def _mentions_me(message: StoredMessage, settings: Settings | None) -> bool:
 def _replies_to_me(session: Session, message: StoredMessage) -> bool:
     if not message.reply_to_message_id:
         return False
+    if message.reply_to_is_mine is not None:
+        return message.reply_to_is_mine
     parent = repository.get_message(session, message.chat_id, message.reply_to_message_id)
     if parent is None:
         # TODO: Persist reply-parent direction from Telegram when the parent is unavailable.
@@ -355,8 +367,11 @@ def _has_important_context(raw_text: str) -> bool:
 
 
 def _response_may_be_expected(raw_text: str) -> bool:
+    has_meaningful_question = bool(
+        "?" in raw_text and any(len(token) >= 3 for token in re.findall(r"\w+", raw_text))
+    )
     return bool(
-        "?" in raw_text
+        has_meaningful_question
         or _has_request_or_action(raw_text)
         or _has_planning_or_availability(raw_text)
     )
@@ -431,7 +446,6 @@ def _policy_context(
 ) -> dict[str, bool]:
     raw_text = message.text or message.caption or ""
     if _is_private(message):
-        small_talk = _is_obvious_small_talk(raw_text)
         request_or_action = _has_request_or_action(raw_text)
         planning_or_availability = _has_planning_or_availability(raw_text)
         urgent_or_important = _has_urgency(raw_text) or _has_important_context(raw_text)
@@ -440,6 +454,7 @@ def _policy_context(
             request_or_action or planning_or_availability or urgent_or_important
         )
         private_signal = _has_private_signal(raw_text)
+        small_talk = _is_obvious_small_talk(raw_text) and not private_signal
         deterministic_strict = private_signal
         return {
             "small_talk": small_talk,
@@ -625,7 +640,7 @@ def _send_strict_decision(
         session,
         message,
         email_sender,
-        subject=f"[СРОЧНО] Telegram: {message.chat_title}",
+        subject=f"[Telegram Detox][P0] [СРОЧНО] Telegram: {message.chat_title}",
         body=_decision_body(session, message, policy_context),
         html=None,
         alert_type="p0",
@@ -638,7 +653,12 @@ def handle_p0_candidate(
     llm: HaikuClient,
     email_sender: EmailSender,
     settings: Settings | None = None,
+    ignored_chat_ids: frozenset[str] | set[str] | None = None,
 ) -> bool:
+    if ignored_chat_ids is None and settings is not None:
+        ignored_chat_ids = load_ignored_chats_from_settings(settings).chat_ids
+    if ignored_chat_ids and message.chat_id in ignored_chat_ids:
+        return False
     if message.is_outgoing:
         return _mark_not_p0(session, message)
     existing = repository.get_message(session, message.chat_id, message.message_id)

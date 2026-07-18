@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
 from uuid import uuid4
@@ -19,6 +20,8 @@ from app.db.tables import (
     MessageRecord,
 )
 from app.models.schemas import P0_MIN_CONFIDENCE, DailyDigest, P0Status, StoredMessage
+
+_CANONICAL_CHAT_ID_RE = re.compile(r"-?[1-9]\d*")
 
 
 def _backoff_minutes(attempts: int) -> int:
@@ -150,6 +153,24 @@ def mark_birthday_notification_sent(
     session.commit()
 
 
+def mark_birthday_notification_attempted(
+    session: Session,
+    *,
+    person_key: str,
+    birthday_date: date,
+    notification_type: str,
+    attempted_at: datetime,
+) -> None:
+    session.execute(
+        update(BirthdayNotification)
+        .where(BirthdayNotification.person_key == person_key)
+        .where(BirthdayNotification.birthday_date == birthday_date)
+        .where(BirthdayNotification.notification_type == notification_type)
+        .values(attempted_at=_utc_db_time(attempted_at))
+    )
+    session.commit()
+
+
 def release_stale_birthday_notification_claims(
     session: Session,
     now: datetime,
@@ -159,6 +180,7 @@ def release_stale_birthday_notification_claims(
     result = session.execute(
         delete(BirthdayNotification).where(
             BirthdayNotification.sent_at.is_(None),
+            BirthdayNotification.attempted_at.is_(None),
             BirthdayNotification.claimed_at <= cutoff,
         )
     )
@@ -178,6 +200,8 @@ def release_birthday_notification(
             BirthdayNotification.person_key == person_key,
             BirthdayNotification.birthday_date == birthday_date,
             BirthdayNotification.notification_type == notification_type,
+            BirthdayNotification.sent_at.is_(None),
+            BirthdayNotification.attempted_at.is_(None),
         )
     )
     session.commit()
@@ -370,6 +394,7 @@ def messages_between(
     *,
     only_undigested: bool = True,
     limit: int | None = None,
+    excluded_chat_ids: frozenset[str] | set[str] | None = None,
 ) -> list[MessageRecord]:
     start = _utc_db_time(start)
     end = _utc_db_time(end)
@@ -381,19 +406,27 @@ def messages_between(
     if only_undigested:
         stmt = stmt.where(MessageRecord.digested_at.is_(None))
         stmt = stmt.where(MessageRecord.claimed_digest_id.is_(None))
+    if excluded_chat_ids:
+        stmt = stmt.where(MessageRecord.chat_id.not_in(excluded_chat_ids))
     if limit is not None:
         stmt = stmt.limit(limit)
     return list(session.scalars(stmt))
 
 
-def messages_claimed_by_digest(session: Session, digest_id: int) -> list[MessageRecord]:
-    return list(
-        session.scalars(
-            select(MessageRecord)
-            .where(MessageRecord.claimed_digest_id == digest_id)
-            .order_by(MessageRecord.chat_title, MessageRecord.timestamp, MessageRecord.message_id)
-        )
+def messages_claimed_by_digest(
+    session: Session,
+    digest_id: int,
+    *,
+    excluded_chat_ids: frozenset[str] | set[str] | None = None,
+) -> list[MessageRecord]:
+    stmt = (
+        select(MessageRecord)
+        .where(MessageRecord.claimed_digest_id == digest_id)
+        .order_by(MessageRecord.chat_title, MessageRecord.timestamp, MessageRecord.message_id)
     )
+    if excluded_chat_ids:
+        stmt = stmt.where(MessageRecord.chat_id.not_in(excluded_chat_ids))
+    return list(session.scalars(stmt))
 
 
 def mark_messages_digested(session: Session, rows: list, digested_at: datetime) -> int:
@@ -425,6 +458,47 @@ def _delivery_id_for_key(digest_key: str) -> str:
     return f"<telegram-digest-{digest_hash}@local>"
 
 
+def _serialize_source_chat_ids(chat_ids: set[str]) -> str:
+    return json.dumps(sorted(chat_ids), ensure_ascii=True, separators=(",", ":"))
+
+
+def _source_chat_ids_from_digest(digest: DailyDigest) -> set[str]:
+    items = [
+        *digest.p0_alerts,
+        *digest.direct_messages,
+        *digest.group_updates,
+        *digest.review,
+    ]
+    return {ref.chat_id for item in items for ref in item.source_refs}
+
+
+def _parse_digest_source_chat_ids(record: DigestRecord) -> set[str] | None:
+    if record.source_chat_ids is None:
+        return None
+    try:
+        payload = json.loads(record.source_chat_ids)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, list) or not payload:
+        return None
+    normalized: set[str] = set()
+    for item in payload:
+        if isinstance(item, bool):
+            return None
+        if isinstance(item, int):
+            chat_id = str(item)
+        elif isinstance(item, str):
+            if item != item.strip():
+                return None
+            chat_id = item
+        else:
+            return None
+        if _CANONICAL_CHAT_ID_RE.fullmatch(chat_id) is None:
+            return None
+        normalized.add(chat_id)
+    return normalized or None
+
+
 def claim_digest_run_for_rows(
     session: Session,
     *,
@@ -447,6 +521,7 @@ def claim_digest_run_for_rows(
         subject="",
         text_payload="",
         json_payload=DailyDigest(date=digest_date).model_dump_json(),
+        source_chat_ids=_serialize_source_chat_ids(set()),
         html_payload="",
         generated_by="llm",
         email_status="building",
@@ -471,6 +546,9 @@ def claim_digest_run_for_rows(
         if not claimed_refs:
             session.rollback()
             return None, [], False
+        record.source_chat_ids = _serialize_source_chat_ids(
+            {chat_id for chat_id, _ in claimed_refs}
+        )
         session.commit()
     except Exception:
         session.rollback()
@@ -493,6 +571,10 @@ def update_digest_payload(
     if not subject.strip() or not text.strip() or not html.strip():
         raise ValueError("Digest payload must be non-empty before it can be sent")
     now = _utc_db_time(datetime.now(UTC))
+    claimed_chat_ids = {
+        row.chat_id for row in messages_claimed_by_digest(session, record.id)
+    }
+    source_chat_ids = claimed_chat_ids or _source_chat_ids_from_digest(digest)
     # A stale building ORM object must never reset a claimed sender back to pending.
     result = session.execute(
         update(DigestRecord)
@@ -503,6 +585,7 @@ def update_digest_payload(
             text_payload=text,
             html_payload=html,
             json_payload=digest.model_dump_json(),
+            source_chat_ids=_serialize_source_chat_ids(source_chat_ids),
             generated_by=digest.generated_by,
             error_summary=digest.error_summary,
             email_status="pending",
@@ -540,6 +623,7 @@ def save_digest(
     text: str = "",
 ) -> DigestRecord:
     now = _utc_db_time(datetime.now(UTC))
+    source_chat_ids = _source_chat_ids_from_digest(digest)
     record = DigestRecord(
         digest_date=digest.date,
         digest_key=None,
@@ -548,6 +632,9 @@ def save_digest(
         subject=subject,
         text_payload=text,
         json_payload=digest.model_dump_json(),
+        source_chat_ids=(
+            _serialize_source_chat_ids(source_chat_ids) if source_chat_ids else None
+        ),
         html_payload=html,
         generated_by=digest.generated_by,
         email_status=digest.email_status,
@@ -632,23 +719,87 @@ def undigested_message_timestamps_before(session: Session, before: datetime) -> 
     )
 
 
-def retry_pending_digests(session: Session, email_sender, now: datetime) -> int:
+def _cancel_unsafe_digest(
+    session: Session,
+    record: DigestRecord,
+    reason: str,
+) -> None:
+    record.email_status = "cancelled"
+    record.last_error_safe = reason
+    record.subject = ""
+    record.text_payload = ""
+    record.html_payload = ""
+    record.json_payload = ""
+    record.next_attempt_at = None
+    record.claimed_at = None
+    record.claim_token = None
+    session.execute(
+        update(MessageRecord)
+        .where(MessageRecord.claimed_digest_id == record.id)
+        .values(claimed_digest_id=None)
+    )
+    session.commit()
+
+
+def _digest_retry_is_safe(
+    record: DigestRecord,
+    ignored_chat_ids: frozenset[str] | set[str],
+) -> tuple[bool, str | None]:
+    source_chat_ids = _parse_digest_source_chat_ids(record)
+    if source_chat_ids is None:
+        return False, "unsafe_digest_missing_source_chat_ids"
+    if source_chat_ids & ignored_chat_ids:
+        return False, "unsafe_digest_contains_ignored_chat"
+    return True, None
+
+
+def cancel_unsafe_pending_digests(
+    session: Session,
+    ignored_chat_ids: frozenset[str] | set[str],
+) -> int:
+    records = list(
+        session.scalars(
+            select(DigestRecord)
+            .where(DigestRecord.email_status.in_(["pending", "sending"]))
+            .order_by(DigestRecord.created_at)
+        )
+    )
+    cancelled = 0
+    for record in records:
+        safe, reason = _digest_retry_is_safe(record, ignored_chat_ids)
+        if not safe:
+            _cancel_unsafe_digest(session, record, reason or "unsafe_digest")
+            cancelled += 1
+    return cancelled
+
+
+def retry_pending_digests(
+    session: Session,
+    email_sender,
+    now: datetime,
+    *,
+    ignored_chat_ids: frozenset[str] | set[str],
+) -> int:
     now = _utc_db_time(now)
     release_stale_digest_claims(session, now)
     candidates = list(
         session.scalars(
-            select(DigestRecord.id)
+            select(DigestRecord)
             .where(DigestRecord.email_status == "pending")
             .where(DigestRecord.next_attempt_at <= now)
             .order_by(DigestRecord.created_at)
         )
     )
     sent = 0
-    for record_id in candidates:
+    for record in candidates:
+        safe, reason = _digest_retry_is_safe(record, ignored_chat_ids)
+        if not safe:
+            _cancel_unsafe_digest(session, record, reason or "unsafe_digest")
+            continue
         token = uuid4().hex
-        record = claim_pending_digest(session, record_id, now, token)
-        if record:
-            sent += int(send_claimed_digest(session, record.id, token, email_sender, now))
+        claimed = claim_pending_digest(session, record.id, now, token)
+        if claimed:
+            sent += int(send_claimed_digest(session, claimed.id, token, email_sender, now))
     return sent
 
 
@@ -889,25 +1040,32 @@ def send_claimed_alert(
     return True
 
 
-def retry_pending_alerts(session: Session, email_sender, now: datetime) -> int:
+def retry_pending_alerts(
+    session: Session,
+    email_sender,
+    now: datetime,
+    *,
+    excluded_chat_ids: frozenset[str] | set[str] | None = None,
+) -> int:
     now = _utc_db_time(now)
     release_stale_alert_claims(session, now)
-    job_ids = list(
-        session.scalars(
-            select(AlertJob.id)
-            .join(
-                MessageRecord,
-                (AlertJob.chat_id == MessageRecord.chat_id)
-                & (AlertJob.message_id == MessageRecord.message_id),
-            )
-            .where(AlertJob.status == "pending")
-            .where(AlertJob.next_attempt_at <= now)
-            .where(AlertJob.alert_type == "p0")
-            .where(MessageRecord.p0_classification == P0Status.p0_strict.value)
-            .where(MessageRecord.p0_confidence >= P0_MIN_CONFIDENCE)
-            .order_by(AlertJob.created_at, AlertJob.id)
+    stmt = (
+        select(AlertJob.id)
+        .join(
+            MessageRecord,
+            (AlertJob.chat_id == MessageRecord.chat_id)
+            & (AlertJob.message_id == MessageRecord.message_id),
         )
+        .where(AlertJob.status == "pending")
+        .where(AlertJob.next_attempt_at <= now)
+        .where(AlertJob.alert_type == "p0")
+        .where(MessageRecord.p0_classification == P0Status.p0_strict.value)
+        .where(MessageRecord.p0_confidence >= P0_MIN_CONFIDENCE)
+        .order_by(AlertJob.created_at, AlertJob.id)
     )
+    if excluded_chat_ids:
+        stmt = stmt.where(AlertJob.chat_id.not_in(excluded_chat_ids))
+    job_ids = list(session.scalars(stmt))
     sent = 0
     for job_id in job_ids:
         token = uuid4().hex

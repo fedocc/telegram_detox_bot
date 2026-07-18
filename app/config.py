@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     birthday_reminder_time: str = "09:00"
     birthday_lookahead_days: int = Field(default=1, ge=0, le=1)
     birthday_manual_path: Path = Path("data/birthdays.json")
+    ignore_chat_ids: str = ""
+    ignored_chats_path: Path = Path("data/ignored_chats.json")
     p0_classify_private_text: bool = True
     p0_classify_all_groups: bool = False
     p0_classify_mentions: bool = True

@@ -36,6 +36,17 @@ COUNT_ONLY_SUMMARY_RE = re.compile(
     r")[.!]?$",
     re.IGNORECASE,
 )
+FALLBACK_REQUEST_RE = re.compile(
+    r"(?<!\w)(?:ответь|отпиши|позвони|набери|посмотри|проверь|пришли|"
+    r"отправь|подтверди|можешь|нужен\s+ответ|надо\s+(?:обсудить|решить)|"
+    r"reply|call|send|check|confirm)(?!\w)",
+    re.IGNORECASE,
+)
+FALLBACK_DEADLINE_RE = re.compile(
+    r"(?<!\w)(?:сейчас|сегодня|завтра|now|today|tomorrow|deadline|дедлайн|"
+    r"(?:до|к)\s+\d{1,2}(?::\d{2})?|до\s+завтра|by\s+tomorrow)(?!\w)",
+    re.IGNORECASE,
+)
 MEDIA_LABELS = {
     "photo": "фото",
     "voice": "голосовое",
@@ -227,6 +238,7 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
         if incoming and _chat_type_value(incoming[0]) == ChatType.private.value:
             first = min(r.timestamp for r in incoming)
             last = max(r.timestamp for r in incoming)
+            fallback_semantics = _fallback_semantics(incoming)
             direct.append(
                 DigestDirectMessage(
                     chat=chat,
@@ -238,15 +250,15 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
                         )
                         or f"Получено {len(incoming)} личных сообщений."
                     ),
-                    needs_reply=False,
+                    needs_reply=fallback_semantics["possible_request"],
                     action=None,
                     what_happened=_local_chat_summary(incoming),
-                    requests_to_me="Явного запроса не обнаружено.",
-                    important_context=_local_chat_summary(incoming),
-                    action_items="Действий не требуется.",
-                    should_open_telegram=False,
-                    open_reason="Краткий контекст есть в digest.",
-                    open_telegram=False,
+                    requests_to_me=fallback_semantics["requests_to_me"],
+                    important_context=fallback_semantics["important_context"],
+                    action_items=fallback_semantics["action_items"],
+                    should_open_telegram=True,
+                    open_reason=fallback_semantics["open_reason"],
+                    open_telegram=True,
                     source_refs=[
                         MessageRef(chat_id=r.chat_id, message_id=r.message_id)
                         for r in incoming
@@ -274,6 +286,7 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
                 ChatType.supergroup.value,
                 ChatType.channel.value,
             }:
+                fallback_semantics = _fallback_semantics(chat_rows)
                 # Use group updates for fallback digests so user sees one concise group line.
                 group_updates.append(
                     DigestGroupUpdate(
@@ -282,13 +295,11 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
                         what_happened=_clean_summary(
                             summary or "Получены сообщения без текста."
                         ),
-                        requests_to_me="Явного запроса не обнаружено.",
-                        important_context=_clean_summary(
-                            summary or "Получены сообщения без текста."
-                        ),
-                        action_items="Действий не требуется.",
-                        should_open_telegram=False,
-                        open_reason="Краткий контекст есть в digest.",
+                        requests_to_me=fallback_semantics["requests_to_me"],
+                        important_context=fallback_semantics["important_context"],
+                        action_items=fallback_semantics["action_items"],
+                        should_open_telegram=True,
+                        open_reason=fallback_semantics["open_reason"],
                         source_refs=direct_refs,
                         message_count=len(chat_rows),
                         first_message_at=first,
@@ -318,6 +329,34 @@ def _local_chat_summary(chat_rows: list) -> str:
     if snippets:
         return _clean_summary("; ".join(snippets))
     return "Получены сообщения с медиа без подписи."
+
+
+def _fallback_semantics(chat_rows: list) -> dict[str, str | bool]:
+    raw_text = "\n".join(
+        row.text or row.caption or "" for row in chat_rows if row.text or row.caption
+    )
+    possible_request = bool("?" in raw_text or FALLBACK_REQUEST_RE.search(raw_text))
+    possible_deadline = bool(FALLBACK_DEADLINE_RE.search(raw_text))
+    requests = (
+        "Возможен вопрос или запрос; проверьте сводку."
+        if possible_request
+        else "Запрос не определён: сводка построена без анализа LLM."
+    )
+    action = (
+        "Возможно требуется действие; проверьте исходное сообщение."
+        if possible_request or possible_deadline
+        else "Действие не определено: сводка построена без анализа LLM."
+    )
+    important_context = _local_chat_summary(chat_rows)
+    if possible_deadline:
+        important_context += " Возможен срок или дедлайн; проверьте исходное сообщение."
+    return {
+        "possible_request": possible_request,
+        "requests_to_me": requests,
+        "important_context": important_context,
+        "action_items": action,
+        "open_reason": "Сводка построена без анализа LLM; возможен вопрос или действие.",
+    }
 
 
 def _item_for_chat(items: list, chat_id: str):
@@ -366,21 +405,25 @@ def _ensure_chat_summaries(digest: DailyDigest, rows: list) -> DailyDigest:
             continue
 
         summary = _local_chat_summary(chat_rows)
+        fallback_semantics = _fallback_semantics(chat_rows)
         semantic = {
             "chat": first_row.chat_title,
             "summary": summary,
             "what_happened": summary,
-            "requests_to_me": "Явного запроса не обнаружено.",
-            "important_context": summary,
-            "action_items": "Действий не требуется.",
-            "should_open_telegram": False,
-            "open_reason": "Краткий контекст есть в digest.",
+            "requests_to_me": fallback_semantics["requests_to_me"],
+            "important_context": fallback_semantics["important_context"],
+            "action_items": fallback_semantics["action_items"],
+            "should_open_telegram": True,
+            "open_reason": fallback_semantics["open_reason"],
             "source_refs": refs,
             "needs_manual_review": False,
         }
         if is_private:
             digest.direct_messages.append(
-                DigestDirectMessage(needs_reply=False, **semantic)
+                DigestDirectMessage(
+                    needs_reply=bool(fallback_semantics["possible_request"]),
+                    **semantic,
+                )
             )
         else:
             digest.group_updates.append(DigestGroupUpdate(**semantic))
@@ -507,6 +550,7 @@ def generate_digest(
     max_messages_per_window: int = MAX_MESSAGES_PER_DIGEST_WINDOW,
     max_messages_per_chat: int = MAX_MESSAGES_PER_CHAT,
     max_chars_per_group: int = MAX_CHARS_PER_GROUP,
+    ignored_chat_ids: frozenset[str] | set[str] | None = None,
 ) -> DailyDigest:
     start, end = day_bounds(day, timezone)
     overflow_notes: list[dict] = []
@@ -516,6 +560,7 @@ def generate_digest(
             start,
             end,
             limit=max_messages_per_window + 1,
+            excluded_chat_ids=ignored_chat_ids,
         )
         if len(fetched) > max_messages_per_window:
             overflow_notes.append(
@@ -530,6 +575,8 @@ def generate_digest(
             rows = fetched[:max_messages_per_window]
         else:
             rows = fetched
+    elif ignored_chat_ids:
+        rows = [row for row in rows if row.chat_id not in ignored_chat_ids]
     payload = build_structured_payload(
         rows,
         max_messages_per_chat=max_messages_per_chat,
@@ -559,8 +606,8 @@ def generate_digest(
 
 def _subject_for(digest: DailyDigest) -> str:
     if digest.generated_by == "fallback":
-        return f"[FALLBACK] Telegram digest — {digest.date}"
-    return digest_subject(digest)
+        return f"[Telegram Detox][Digest] [FALLBACK] Telegram digest — {digest.date}"
+    return f"[Telegram Detox][Digest] {digest_subject(digest)}"
 
 
 def _deliver_pending_digest(
@@ -612,16 +659,29 @@ def send_daily_digest_pipeline(
     email_sender: EmailSender,
     day: date,
     timezone: str,
+    *,
+    ignored_chat_ids: frozenset[str] | set[str] | None = None,
 ) -> DailyDigest:
     pending = repository.pending_digest_for_date(session, day.isoformat())
     if pending:
         if pending.email_status == "building":
-            rows_for_digest = repository.messages_claimed_by_digest(session, pending.id)
+            rows_for_digest = repository.messages_claimed_by_digest(
+                session,
+                pending.id,
+                excluded_chat_ids=ignored_chat_ids,
+            )
             if not rows_for_digest:
                 return DailyDigest(date=day.isoformat(), email_status="pending")
             record = pending
             rows = rows_for_digest
-            digest = generate_digest(session, llm, day, timezone, rows=rows_for_digest)
+            digest = generate_digest(
+                session,
+                llm,
+                day,
+                timezone,
+                rows=rows_for_digest,
+                ignored_chat_ids=ignored_chat_ids,
+            )
             html = render_html(digest)
             text = render_plain_text(digest)
             subject = _subject_for(digest)
@@ -652,6 +712,7 @@ def send_daily_digest_pipeline(
         start,
         end,
         limit=MAX_MESSAGES_PER_DIGEST_WINDOW + 1,
+        excluded_chat_ids=ignored_chat_ids,
     )
     rows_for_digest = rows[:MAX_MESSAGES_PER_DIGEST_WINDOW]
     if not rows_for_digest:
@@ -668,7 +729,14 @@ def send_daily_digest_pipeline(
         digest.email_status = record.email_status
         return digest
     rows_for_digest = claimed_rows
-    digest = generate_digest(session, llm, day, timezone, rows=rows_for_digest)
+    digest = generate_digest(
+        session,
+        llm,
+        day,
+        timezone,
+        rows=rows_for_digest,
+        ignored_chat_ids=ignored_chat_ids,
+    )
     if len(rows) > MAX_MESSAGES_PER_DIGEST_WINDOW:
         digest.review.append(
             DigestReviewItem(

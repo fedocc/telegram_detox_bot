@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, time, timedelta
+from hashlib import sha256
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -157,9 +158,11 @@ def render_birthday_email(due: list[DueBirthday]) -> tuple[str, str]:
     today = [item for item in due if item.notification_type == "today"]
     tomorrow = [item for item in due if item.notification_type == "tomorrow"]
     if today:
-        subject = "[ДР] Сегодня: " + ", ".join(item.person.display_name for item in today)
+        subject = "[Telegram Detox][ДР] Сегодня: " + ", ".join(
+            item.person.display_name for item in today
+        )
     else:
-        subject = "[ДР] Скоро дни рождения"
+        subject = "[Telegram Detox][ДР] Скоро дни рождения"
 
     def lines(items: list[DueBirthday], label: str) -> list[str]:
         return [f"- {item.person.display_name} — {label}" for item in items] or ["- Нет"]
@@ -179,6 +182,19 @@ def render_birthday_email(due: list[DueBirthday]) -> tuple[str, str]:
         "- поздравить / написать в Telegram",
     ]
     return subject, "\n".join(body_lines)
+
+
+def birthday_idempotency_key(item: DueBirthday) -> str:
+    return (
+        f"birthday:{item.person.person_key}:"
+        f"{item.birthday_date.isoformat()}:{item.notification_type}"
+    )
+
+
+def birthday_message_id(due: list[DueBirthday]) -> str:
+    material = "|".join(sorted(birthday_idempotency_key(item) for item in due))
+    digest = sha256(material.encode("utf-8")).hexdigest()
+    return f"<telegram-detox-birthday-{digest}@local>"
 
 
 def send_birthday_notifications(
@@ -203,17 +219,19 @@ def send_birthday_notifications(
         return 0
 
     subject, body = render_birthday_email(claimed)
-    try:
-        email_sender.send(subject, body)
-    except Exception:
-        for item in claimed:
-            repository.release_birthday_notification(
-                session,
-                person_key=item.person.person_key,
-                birthday_date=item.birthday_date,
-                notification_type=item.notification_type,
-            )
-        raise
+    for item in claimed:
+        repository.mark_birthday_notification_attempted(
+            session,
+            person_key=item.person.person_key,
+            birthday_date=item.birthday_date,
+            notification_type=item.notification_type,
+            attempted_at=now,
+        )
+    email_sender.send(
+        subject,
+        body,
+        message_id=birthday_message_id(claimed),
+    )
     for item in claimed:
         repository.mark_birthday_notification_sent(
             session,
