@@ -11,7 +11,13 @@ from sqlalchemy.orm import Session
 from app.db import repository
 from app.email.render import digest_subject, render_html, render_plain_text
 from app.email.sender import EmailSender
-from app.llm.client import HaikuClient, LLMError
+from app.llm.client import (
+    HaikuClient,
+    LLMError,
+    sanitize_validation_codes,
+    sanitize_validation_error_type,
+    sanitize_validation_paths,
+)
 from app.models.schemas import (
     ChatType,
     DailyDigest,
@@ -208,6 +214,41 @@ def _merge_digests(day: date, digests: list[DailyDigest]) -> DailyDigest:
         }
     )
     merged.diagnostics.validation_error_type = ",".join(validation_types) or None
+    merged.diagnostics.validation_error_paths = list(
+        dict.fromkeys(
+            path
+            for digest in digests
+            for path in digest.diagnostics.validation_error_paths
+        )
+    )
+    merged.diagnostics.validation_error_codes = list(
+        dict.fromkeys(
+            code
+            for digest in digests
+            for code in digest.diagnostics.validation_error_codes
+        )
+    )
+    merged.diagnostics.repair_attempted = any(
+        digest.diagnostics.repair_attempted for digest in digests
+    )
+    merged.diagnostics.repair_used = any(
+        digest.diagnostics.repair_used for digest in digests
+    )
+    merged.diagnostics.expected_chat_count = sum(
+        digest.diagnostics.expected_chat_count for digest in digests
+    )
+    merged.diagnostics.returned_chat_count = sum(
+        digest.diagnostics.returned_chat_count for digest in digests
+    )
+    merged.diagnostics.missing_chat_count = sum(
+        digest.diagnostics.missing_chat_count for digest in digests
+    )
+    merged.diagnostics.duplicate_chat_count = sum(
+        digest.diagnostics.duplicate_chat_count for digest in digests
+    )
+    merged.diagnostics.unknown_chat_count = sum(
+        digest.diagnostics.unknown_chat_count for digest in digests
+    )
     if merged.diagnostics.fallback_used:
         merged.generated_by = "fallback"
     return merged
@@ -655,6 +696,15 @@ def _call_daily_digest(llm: HaikuClient, payload: dict, day: date, rows: list) -
         if isinstance(exc, LLMError):
             digest.diagnostics.fallback_reason = exc.reason_code
             digest.diagnostics.validation_error_type = exc.validation_error_type
+            digest.diagnostics.validation_error_paths = exc.validation_error_paths
+            digest.diagnostics.validation_error_codes = exc.validation_error_codes
+            digest.diagnostics.repair_attempted = exc.repair_attempted
+            digest.diagnostics.repair_used = exc.repair_used
+            digest.diagnostics.expected_chat_count = exc.expected_chat_count
+            digest.diagnostics.returned_chat_count = exc.returned_chat_count
+            digest.diagnostics.missing_chat_count = exc.missing_chat_count
+            digest.diagnostics.duplicate_chat_count = exc.duplicate_chat_count
+            digest.diagnostics.unknown_chat_count = exc.unknown_chat_count
         else:
             digest.diagnostics.fallback_reason = "llm_runtime_error"
         digest.error_summary = digest.diagnostics.fallback_reason
@@ -727,16 +777,48 @@ def generate_digest(
     digest = _enrich_digest(digest, rows, overflow_notes)
     digest.diagnostics.chats_count = len({row.chat_id for row in rows})
     digest.diagnostics.messages_count = len(rows)
+    if digest.diagnostics.expected_chat_count == 0:
+        digest.diagnostics.expected_chat_count = digest.diagnostics.chats_count
+    if (
+        not digest.diagnostics.llm_used
+        and digest.diagnostics.returned_chat_count == 0
+        and digest.diagnostics.missing_chat_count == 0
+    ):
+        digest.diagnostics.missing_chat_count = digest.diagnostics.expected_chat_count
+    safe_validation_type = sanitize_validation_error_type(
+        digest.diagnostics.validation_error_type
+    )
+    safe_validation_paths = sanitize_validation_paths(
+        digest.diagnostics.validation_error_paths
+    )
+    safe_validation_codes = sanitize_validation_codes(
+        digest.diagnostics.validation_error_codes
+    )
+    digest.diagnostics.validation_error_type = safe_validation_type
+    digest.diagnostics.validation_error_paths = safe_validation_paths
+    digest.diagnostics.validation_error_codes = safe_validation_codes
     logger.info(
         "Digest generation diagnostics llm_attempted=%s llm_used=%s fallback_used=%s "
-        "fallback_reason=%s chats_count=%d messages_count=%d validation_error_type=%s",
+        "fallback_reason=%s chats_count=%d messages_count=%d validation_error_type=%s "
+        "validation_error_paths=%s validation_error_codes=%s repair_attempted=%s "
+        "repair_used=%s expected_chat_count=%d returned_chat_count=%d "
+        "missing_chat_count=%d duplicate_chat_count=%d unknown_chat_count=%d",
         digest.diagnostics.llm_attempted,
         digest.diagnostics.llm_used,
         digest.diagnostics.fallback_used,
         digest.diagnostics.fallback_reason or "none",
         digest.diagnostics.chats_count,
         digest.diagnostics.messages_count,
-        digest.diagnostics.validation_error_type or "none",
+        safe_validation_type or "none",
+        ",".join(safe_validation_paths) or "none",
+        ",".join(safe_validation_codes) or "none",
+        digest.diagnostics.repair_attempted,
+        digest.diagnostics.repair_used,
+        digest.diagnostics.expected_chat_count,
+        digest.diagnostics.returned_chat_count,
+        digest.diagnostics.missing_chat_count,
+        digest.diagnostics.duplicate_chat_count,
+        digest.diagnostics.unknown_chat_count,
     )
     return digest
 

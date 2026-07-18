@@ -12,6 +12,7 @@ from app.db.session import init_db
 @pytest.fixture()
 def settings(tmp_path: Path) -> Settings:
     return Settings(
+        _env_file=None,
         database_url=f"sqlite:///{tmp_path / 'test.db'}",
         aitunnel_api_key="test-key",
         smtp_username="user",

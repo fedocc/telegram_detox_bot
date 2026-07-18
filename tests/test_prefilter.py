@@ -24,4 +24,4 @@ def test_p0_prefilter_handles_asap_variants() -> None:
 def test_p0_prefilter_respects_moscow_timezone() -> None:
     from app.config import Settings
 
-    assert Settings().timezone == "Europe/Moscow"
+    assert Settings(_env_file=None).timezone == "Europe/Moscow"

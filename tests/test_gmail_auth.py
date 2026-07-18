@@ -57,6 +57,7 @@ class NoProfileService:
 
 def gmail_auth_settings(tmp_path: Path, email_from: str = "from@example.com") -> Settings:
     return Settings(
+        _env_file=None,
         aitunnel_api_key="test",
         email_transport="gmail_api",
         gmail_oauth_client_secret_path=tmp_path / "google_oauth_client.json",

@@ -24,6 +24,7 @@ def test_test_email_prints_safe_google_error(monkeypatch, capsys) -> None:
     import app.cli.test_email as cli
 
     settings = Settings(
+        _env_file=None,
         aitunnel_api_key="test",
         email_transport="gmail_api",
         email_from="from@example.com",

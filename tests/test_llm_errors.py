@@ -88,8 +88,6 @@ def digest_json(
             "items": [
                 {
                     "chat_id": "1",
-                    "chat_title": "Маша",
-                    "chat_type": "private",
                     "summary": summary,
                     "requests": ["ответить"],
                     "context": ["сообщение требует ответа"],
@@ -97,7 +95,6 @@ def digest_json(
                     "deadlines": deadlines or [],
                     "open_telegram": True,
                     "reason_to_open": "Нужен ответ.",
-                    "message_count": 1,
                 }
             ]
         },
@@ -368,7 +365,7 @@ def test_valid_llm_digest_uses_simple_schema(settings: Settings) -> None:
 
 
 def test_invalid_llm_digest_triggers_explicit_repair(settings: Settings) -> None:
-    incomplete = '{"items":[{"chat_id":"1","summary":"Нужен ответ."}]}'
+    incomplete = '{"items":[{"chat_id":"1"}]}'
     completions = SequenceCompletions(
         [response_with(incomplete), response_with(digest_json())]
     )
@@ -384,6 +381,59 @@ def test_invalid_llm_digest_triggers_explicit_repair(settings: Settings) -> None
     assert "ORIGINAL_INPUT" in repair_prompt
     assert "PREVIOUS_OUTPUT" in repair_prompt
     assert "No markdown" in repair_prompt
+    assert 'EXPECTED_CHAT_IDS:\n["1"]' in repair_prompt
+    assert "VALIDATION_ERROR_PATHS" in repair_prompt
+    assert "VALIDATION_ERROR_CODES" in repair_prompt
+    assert '"items[0].summary"' in repair_prompt
+    assert '"missing"' in repair_prompt
+    assert digest.diagnostics.validation_error_type == "ValidationError"
+    assert "items[0].summary" in digest.diagnostics.validation_error_paths
+    assert "missing" in digest.diagnostics.validation_error_codes
+    assert digest.diagnostics.repair_attempted is True
+    assert digest.diagnostics.repair_used is True
+    assert digest.diagnostics.expected_chat_count == 1
+    assert digest.diagnostics.returned_chat_count == 1
+    assert digest.diagnostics.missing_chat_count == 0
+
+
+@pytest.mark.parametrize(
+    ("open_value", "expected_open"),
+    [("true", True), (" false ", False)],
+)
+def test_production_like_digest_json_coerces_safe_shape_drift(
+    settings: Settings,
+    open_value,
+    expected_open,
+) -> None:
+    response = json.dumps(
+        {
+            "items": [
+                {
+                    "chat_id": 1,
+                    "summary": "  Просит подтвердить готовность.  ",
+                    "requests": None,
+                    "actions": None,
+                    "open_telegram": open_value,
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+    completions = MalformedCompletions(response_with(response))
+    client = HaikuClient(settings)
+    client.client = FakeClient(completions)
+
+    digest = client.daily_digest(digest_payload())
+    item = digest.direct_messages[0]
+
+    assert item.summary == "Просит подтвердить готовность."
+    assert item.should_open_telegram is expected_open
+    assert item.requests_to_me == "Явных запросов нет."
+    assert item.important_context == "Дополнительный контекст не выделен."
+    assert item.action_items == "Действий по переписке не указано."
+    assert item.open_reason == "Причина не указана."
+    assert digest.diagnostics.repair_attempted is False
+    assert len(completions.calls) == 1
 
 
 def test_count_only_llm_summary_triggers_repair(settings: Settings) -> None:
@@ -441,6 +491,98 @@ def test_missing_chat_summary_after_repair_is_rejected(settings: Settings) -> No
 
     assert error.value.reason_code == "validation_failed"
     assert error.value.validation_error_type == "DigestChatCoverageError"
+    assert error.value.validation_error_paths == ["items"]
+    assert error.value.validation_error_codes == ["missing_expected_chat"]
+    assert error.value.expected_chat_count == 2
+    assert error.value.returned_chat_count == 1
+    assert error.value.missing_chat_count == 1
+
+
+def test_duplicate_chat_is_rejected_after_repair(settings: Settings) -> None:
+    item = json.loads(digest_json())["items"][0]
+    response = json.dumps({"items": [item, item]}, ensure_ascii=False)
+    client = HaikuClient(settings)
+    client.client = FakeClient(MalformedCompletions(response_with(response)))
+
+    with pytest.raises(LLMError) as error:
+        client.daily_digest(digest_payload())
+
+    assert error.value.validation_error_codes == ["duplicate_chat_id"]
+    assert error.value.duplicate_chat_count == 1
+
+
+def test_unknown_chat_is_rejected_after_repair(settings: Settings) -> None:
+    known = json.loads(digest_json())["items"][0]
+    unknown = {**known, "chat_id": "999"}
+    response = json.dumps({"items": [known, unknown]}, ensure_ascii=False)
+    client = HaikuClient(settings)
+    client.client = FakeClient(MalformedCompletions(response_with(response)))
+
+    with pytest.raises(LLMError) as error:
+        client.daily_digest(digest_payload())
+
+    assert error.value.validation_error_codes == ["unexpected_chat_id"]
+    assert error.value.unknown_chat_count == 1
+
+
+def test_count_only_summary_is_rejected_after_repair(settings: Settings) -> None:
+    response = digest_json(summary="5 сообщений")
+    client = HaikuClient(settings)
+    client.client = FakeClient(MalformedCompletions(response_with(response)))
+
+    with pytest.raises(LLMError) as error:
+        client.daily_digest(digest_payload())
+
+    assert error.value.validation_error_paths == ["items[0].summary"]
+    assert error.value.validation_error_codes == ["count_only_summary"]
+
+
+def test_unknown_llm_field_name_is_sanitized_from_diagnostics_and_logs(
+    settings: Settings,
+    caplog,
+) -> None:
+    sensitive_field = "PRIVATE_TEXT_OR_TOKEN_secret_marker"
+    item = json.loads(digest_json())["items"][0]
+    item[sensitive_field] = "synthetic value"
+    response = json.dumps({"items": [item]}, ensure_ascii=False)
+    client = HaikuClient(settings)
+    client.client = FakeClient(MalformedCompletions(response_with(response)))
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(LLMError) as error:
+            client.daily_digest(digest_payload())
+
+    assert error.value.validation_error_paths == ["items[0].<unknown_field>"]
+    assert error.value.validation_error_codes == ["extra_forbidden"]
+    assert sensitive_field not in " ".join(error.value.validation_error_paths)
+    assert sensitive_field not in caplog.text
+
+
+def test_combined_private_chat_summary_is_rejected_as_missing_chat(
+    settings: Settings,
+) -> None:
+    payload = digest_payload()
+    payload["chats"].append(
+        {
+            "chat_id": "2",
+            "chat_title": "Иван",
+            "chat_type": "private",
+            "messages": [
+                {
+                    "text": "вторая переписка",
+                    "source_ref": {"chat_id": "2", "message_id": 1},
+                }
+            ],
+        }
+    )
+    response = digest_json(summary="Общее резюме двух личных переписок.")
+    client = HaikuClient(settings)
+    client.client = FakeClient(MalformedCompletions(response_with(response)))
+
+    with pytest.raises(LLMError) as error:
+        client.daily_digest(payload)
+
+    assert error.value.validation_error_codes == ["missing_expected_chat"]
 
 
 def test_daily_digest_missing_fields_after_repair_becomes_llm_error(
@@ -449,7 +591,7 @@ def test_daily_digest_missing_fields_after_repair_becomes_llm_error(
     client = HaikuClient(settings)
     client.client = FakeClient(
         MalformedCompletions(
-            response_with('{"items":[{"chat_id":"1","summary":"Есть сообщение."}]}')
+            response_with('{"items":[{"chat_id":"1"}]}')
         )
     )
 
@@ -458,6 +600,10 @@ def test_daily_digest_missing_fields_after_repair_becomes_llm_error(
 
     assert error.value.reason_code == "validation_failed"
     assert error.value.validation_error_type == "ValidationError"
+    assert "items[0].summary" in error.value.validation_error_paths
+    assert "missing" in error.value.validation_error_codes
+    assert error.value.repair_attempted is True
+    assert error.value.repair_used is False
 
 
 def test_digest_models_use_deadline_text_and_deadline_at() -> None:

@@ -969,6 +969,12 @@ def test_still_invalid_llm_digest_falls_back_with_safe_reason(
     assert digest.diagnostics.fallback_used is True
     assert digest.diagnostics.fallback_reason == "validation_failed"
     assert digest.diagnostics.validation_error_type == "ValidationError"
+    assert "items[0].summary" in digest.diagnostics.validation_error_paths
+    assert "missing" in digest.diagnostics.validation_error_codes
+    assert digest.diagnostics.repair_attempted is True
+    assert digest.diagnostics.repair_used is False
+    assert "validation_error_paths=items[0].summary" in caplog.text
+    assert "validation_error_codes=missing" in caplog.text
     assert private_marker not in caplog.text
 
 
@@ -1017,6 +1023,25 @@ def test_digest_now_dry_run_does_not_send_email(settings, monkeypatch) -> None:
 def test_digest_now_dry_run_reports_fallback_reason(settings, monkeypatch) -> None:
     from app.cli import digest_now
 
+    sensitive_field = "PRIVATE_TEXT_OR_TOKEN_secret_marker"
+
+    class DiagnosticFailingLLM:
+        def daily_digest(self, payload: dict) -> DailyDigest:
+            raise LLMError(
+                "invalid digest",
+                reason_code="validation_failed",
+                validation_error_type="ValidationError",
+                validation_error_paths=[f"items[0].{sensitive_field}"],
+                validation_error_codes=["extra_forbidden"],
+                repair_attempted=True,
+                repair_used=False,
+                expected_chat_count=1,
+                returned_chat_count=1,
+                missing_chat_count=0,
+                duplicate_chat_count=0,
+                unknown_chat_count=0,
+            )
+
     session_factory = init_db(settings)
     with session_factory() as session:
         repository.save_message(session, msg(message_id=317, text="обычный тест"))
@@ -1029,15 +1054,29 @@ def test_digest_now_dry_run_reports_fallback_reason(settings, monkeypatch) -> No
 
     digest_now.run(
         dry_run=True,
+        llm_debug=True,
         settings=settings,
         session_factory=session_factory,
-        llm=FailingLLM(),
+        llm=DiagnosticFailingLLM(),
         now=datetime.fromisoformat("2026-07-07T18:00:00+03:00"),
         output=output.append,
     )
 
     assert "llm_used=false" in output
-    assert "fallback_reason=llm_error" in output
+    assert "fallback_reason=validation_failed" in output
+    assert "validation_error_type=ValidationError" in output
+    assert "validation_error_paths=items[0].<unknown_field>" in output
+    assert "validation_error_codes=extra_forbidden" in output
+    assert "repair_attempted=true" in output
+    assert "repair_used=false" in output
+    assert "expected_chat_count=1" in output
+    assert "returned_chat_count=1" in output
+    assert "missing_chat_count=0" in output
+    assert "duplicate_chat_count=0" in output
+    assert "unknown_chat_count=0" in output
+    assert sensitive_field not in "\n".join(output)
+    with session_factory() as session:
+        assert repository.pending_digests(session) == []
 
 
 def test_digest_now_normal_run_sends_email(settings, monkeypatch) -> None:

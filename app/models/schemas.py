@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ChatType(StrEnum):
@@ -172,26 +172,46 @@ class DigestNoiseCount(BaseModel):
 
 
 class DigestLLMItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     chat_id: str
-    chat_title: str
-    chat_type: Literal["private", "group", "channel"]
     summary: str
-    requests: list[str]
-    context: list[str]
-    actions: list[str]
-    deadlines: list[str]
-    open_telegram: bool
-    reason_to_open: str
-    message_count: int = Field(ge=1)
+    requests: list[str] = Field(default_factory=list)
+    context: list[str] = Field(default_factory=list)
+    actions: list[str] = Field(default_factory=list)
+    deadlines: list[str] = Field(default_factory=list)
+    open_telegram: bool = True
+    reason_to_open: str = "Причина не указана."
 
-    @field_validator("chat_id", "chat_title", "summary", "reason_to_open")
+    @field_validator("chat_id", mode="before")
+    @classmethod
+    def normalize_chat_id(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @field_validator("reason_to_open", mode="before")
+    @classmethod
+    def default_optional_text(cls, value: Any, info) -> Any:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return cls.model_fields[info.field_name].default
+        return value
+
+    @field_validator("summary", "reason_to_open")
     @classmethod
     def require_non_empty_text(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("field must not be blank")
         return value.strip()
+
+    @field_validator("requests", "context", "actions", "deadlines", mode="before")
+    @classmethod
+    def default_optional_lists(cls, value: Any) -> Any:
+        return [] if value is None else value
 
     @field_validator("requests", "context", "actions", "deadlines")
     @classmethod
@@ -201,18 +221,23 @@ class DigestLLMItem(BaseModel):
             raise ValueError("list items must not be blank")
         return normalized
 
+    @field_validator("open_telegram", mode="before")
+    @classmethod
+    def normalize_open_telegram(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized == "true":
+                return True
+            if normalized == "false":
+                return False
+            raise ValueError("open_telegram string must be true or false")
+        return value
+
 
 class DigestLLMResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     items: list[DigestLLMItem]
-
-    @model_validator(mode="after")
-    def require_one_item_per_chat(self) -> DigestLLMResponse:
-        chat_ids = [item.chat_id for item in self.items]
-        if len(chat_ids) != len(set(chat_ids)):
-            raise ValueError("duplicate chat_id")
-        return self
 
 
 class DigestDiagnostics(BaseModel):
@@ -223,6 +248,15 @@ class DigestDiagnostics(BaseModel):
     chats_count: int = 0
     messages_count: int = 0
     validation_error_type: str | None = None
+    validation_error_paths: list[str] = Field(default_factory=list)
+    validation_error_codes: list[str] = Field(default_factory=list)
+    repair_attempted: bool = False
+    repair_used: bool = False
+    expected_chat_count: int = 0
+    returned_chat_count: int = 0
+    missing_chat_count: int = 0
+    duplicate_chat_count: int = 0
+    unknown_chat_count: int = 0
 
 
 class DailyDigest(BaseModel):

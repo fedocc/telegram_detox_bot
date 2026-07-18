@@ -51,6 +51,7 @@ class FakeSMTP:
 
 def smtp_settings(mode: str, port: int) -> Settings:
     return Settings(
+        _env_file=None,
         aitunnel_api_key="test",
         email_transport="smtp",
         smtp_host="smtp.example.com",
@@ -65,6 +66,7 @@ def smtp_settings(mode: str, port: int) -> Settings:
 
 def gmail_settings(tmp_path: Path) -> Settings:
     return Settings(
+        _env_file=None,
         aitunnel_api_key="test",
         email_transport="gmail_api",
         gmail_oauth_client_secret_path=tmp_path / "google_oauth_client.json",
