@@ -147,7 +147,8 @@ def test_p0_prompt_and_user_payload_include_trusted_sender_context(settings: Set
 
     messages = completions.calls[0]["messages"]
     assert "message.trusted_sender" in messages[0]["content"]
-    assert "never makes ordinary chat P0" in messages[0]["content"]
+    assert "never makes obvious small talk P0" in messages[0]["content"]
+    assert "Prioritize recall" in messages[0]["content"]
     assert '"trusted_sender": true' in messages[1]["content"]
 
 

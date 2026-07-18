@@ -40,7 +40,7 @@ async def interactive_login(settings: Settings) -> None:
     print("Telegram session created.")
 
 
-async def run_listener(settings: Settings, session_factory) -> None:
+async def run_listener(settings: Settings, session_factory, on_connected=None) -> None:
     client = make_client(settings)
     await client.connect()
     if not await client.is_user_authorized():
@@ -49,6 +49,8 @@ async def run_listener(settings: Settings, session_factory) -> None:
 
     llm = HaikuClient(settings)
     email = EmailSender(settings)
+    if on_connected is not None:
+        on_connected(client)
 
     @client.on(events.NewMessage(incoming=None, outgoing=None))
     async def handler(event) -> None:

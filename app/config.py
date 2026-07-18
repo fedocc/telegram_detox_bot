@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     digest_time: str = "20:30"
     raw_retention_days: int = Field(default=14, ge=1)
     digest_retention_days: int = Field(default=90, ge=1)
+    birthday_reminders_enabled: bool = False
+    birthday_poll_interval_hours: int = Field(default=6, ge=1, le=24)
+    birthday_reminder_time: str = "09:00"
+    birthday_lookahead_days: int = Field(default=1, ge=0, le=1)
+    birthday_manual_path: Path = Path("data/birthdays.json")
     p0_classify_private_text: bool = True
     p0_classify_all_groups: bool = False
     p0_classify_mentions: bool = True
@@ -82,6 +87,17 @@ class Settings(BaseSettings):
         if normalized not in {"gmail_api", "smtp"}:
             raise ValueError("EMAIL_TRANSPORT must be one of: gmail_api, smtp")
         return normalized
+
+    @field_validator("birthday_reminder_time")
+    @classmethod
+    def validate_birthday_reminder_time(cls, value: str) -> str:
+        parts = value.strip().split(":")
+        if len(parts) != 2 or not all(part.isdigit() for part in parts):
+            raise ValueError("BIRTHDAY_REMINDER_TIME must use HH:MM")
+        hour, minute = (int(part) for part in parts)
+        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+            raise ValueError("BIRTHDAY_REMINDER_TIME must use HH:MM")
+        return f"{hour:02d}:{minute:02d}"
 
     def ensure_runtime_dirs(self) -> None:
         Path("data").mkdir(mode=0o700, exist_ok=True)

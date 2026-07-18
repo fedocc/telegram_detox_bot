@@ -284,7 +284,7 @@ def test_personal_message_always_appears_in_digest(session) -> None:
     assert digest.direct_messages[0].chat == "Маша"
 
 
-def test_group_flood_is_compressed_to_noise_count(session, now) -> None:
+def test_group_flood_gets_concise_summary_instead_of_noise_count(session, now) -> None:
     for idx in range(1, 6):
         repository.save_message(
             session,
@@ -300,7 +300,11 @@ def test_group_flood_is_compressed_to_noise_count(session, now) -> None:
 
     digest = generate_digest(session, FakeLLM(), date(2026, 7, 7), "Europe/Moscow")
 
-    assert digest.noise_counts == [DigestNoiseCount(chat="Общий чат", count=5)]
+    assert digest.noise_counts == []
+    assert len(digest.group_updates) == 1
+    assert digest.group_updates[0].chat == "Общий чат"
+    assert "флуд" in digest.group_updates[0].summary
+    assert digest.group_updates[0].message_count == 5
 
 
 def test_unprocessed_media_without_caption_is_inside_group_summary(session, now) -> None:
@@ -435,7 +439,9 @@ def test_non_urgent_private_message_not_routed_to_review_with_internal_text(sess
 def test_fallback_digest_keeps_direct_messages(now) -> None:
     digest = fallback_digest(date(2026, 7, 7), [msg(timestamp=now)])
 
-    assert digest.direct_messages[0].needs_manual_review is True
+    assert digest.direct_messages[0].needs_manual_review is False
+    assert digest.direct_messages[0].what_happened
+    assert digest.direct_messages[0].action_items == "Действий не требуется."
 
 
 def test_digest_cannot_drop_private_message_when_llm_omits_it(session) -> None:
@@ -447,7 +453,7 @@ def test_digest_cannot_drop_private_message_when_llm_omits_it(session) -> None:
     item = digest.direct_messages[0]
     assert item.source_refs == [{"chat_id": "1", "message_id": 101}]
     assert item.chat == "Маша"
-    assert item.summary == "Личное сообщение."
+    assert item.summary == "Ты сможешь сегодня?"
 
 
 def test_private_message_never_becomes_p3(session) -> None:
@@ -957,6 +963,79 @@ def test_same_chat_title_different_chat_ids_are_not_merged(session) -> None:
     digest = generate_digest(session, FakeLLM(), date(2026, 7, 7), "Europe/Moscow")
 
     assert len(digest.direct_messages) == 2
+
+
+def test_digest_repairs_count_only_summary(session) -> None:
+    class CountOnlyLLM:
+        def daily_digest(self, payload: dict) -> DailyDigest:
+            return DailyDigest(
+                date=payload["date"],
+                direct_messages=[
+                    {
+                        "chat": "Маша",
+                        "summary": "5 сообщений",
+                        "what_happened": "5 сообщений",
+                        "needs_reply": False,
+                        "source_refs": [
+                            payload["chats"][0]["messages"][0]["source_ref"]
+                        ],
+                    }
+                ],
+            )
+
+    repository.save_message(session, msg(message_id=970, text="обычная переписка"))
+
+    digest = generate_digest(
+        session,
+        CountOnlyLLM(),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+    )
+    item = digest.direct_messages[0]
+
+    assert item.summary == "Была обычная переписка без явного запроса."
+    assert item.what_happened == "Была обычная переписка без явного запроса."
+    assert "5 сообщений" not in render_plain_text(digest)
+
+
+def test_digest_replaces_cross_chat_llm_item_with_one_item_per_chat(session) -> None:
+    class CombinedChatsLLM:
+        def daily_digest(self, payload: dict) -> DailyDigest:
+            refs = [chat["messages"][0]["source_ref"] for chat in payload["chats"]]
+            return DailyDigest(
+                date=payload["date"],
+                direct_messages=[
+                    {
+                        "chat": "Несколько чатов",
+                        "summary": "Общее резюме двух переписок.",
+                        "needs_reply": False,
+                        "source_refs": refs,
+                    }
+                ],
+            )
+
+    repository.save_message(
+        session,
+        msg(chat_id="private-a", chat_title="Анна", message_id=1, text="первое"),
+    )
+    repository.save_message(
+        session,
+        msg(chat_id="private-b", chat_title="Борис", message_id=1, text="второе"),
+    )
+
+    digest = generate_digest(
+        session,
+        CombinedChatsLLM(),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+    )
+
+    assert len(digest.direct_messages) == 2
+    assert {item.chat for item in digest.direct_messages} == {"Анна", "Борис"}
+    assert all(
+        len({ref.chat_id for ref in item.source_refs}) == 1
+        for item in digest.direct_messages
+    )
 
 
 def test_fallback_keeps_same_title_chats_separate() -> None:

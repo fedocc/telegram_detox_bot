@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -23,27 +23,69 @@ SAFE_TEXT_LIMIT = 500
 DEFAULT_MAX_CONTEXT_MESSAGES = 5
 DEFAULT_MAX_MESSAGE_CHARS = 1000
 DEFAULT_MAX_LLM_CALLS_PER_HOUR = 100
+EMAIL_CONTEXT_LIMIT = 10
+EMAIL_CONTEXT_WINDOW = timedelta(minutes=60)
 
 REQUEST_OR_ACTION_RE = re.compile(
     r"(?<!\w)(?:"
-    r"ответь|позвони|набери|посмотри|проверь|пришли|отправь|подтверди|"
-    r"можешь\s+(?:(?:сегодня|сейчас|потом)\s+)?"
-    r"(?:ответить|позвонить|посмотреть|проверить|прислать|отправить|подтвердить)|"
+    r"ответь|отпиши|напиши|скажи|позвони|набери|посмотри|проверь|пришли|"
+    r"отправь|подтверди|посмотрите|проверьте|пришлите|отправьте|подтвердите|"
+    r"можешь\s+(?:(?:сегодня|завтра|сейчас|потом)\s+)?"
+    r"(?:ответить|написать|позвонить|посмотреть|проверить|прислать|отправить|"
+    r"подтвердить|созвониться|встретиться)|"
     r"нужен\s+(?:ответ|код|файл)|"
+    r"(?:надо|нужно)\s+(?:обсудить|поговорить|решить|проверить|ответить)|"
+    r"(?:можно\s+вопрос|есть\s+минутка)|"
+    r"дай\s+знать|созвонимся|"
+    r"кто\s+может\s+(?:ответить|проверить|посмотреть)|"
     r"call\s+me|reply\s+please|"
     r"can\s+we\s+call|"
     r"(?:can|could)\s+you\s+(?:reply|call|check|send|confirm)|"
-    r"send\s+me|check\s+this"
+    r"send\s+me|check\s+this|need\s+(?:an?\s+)?(?:answer|reply|file|code)"
+    r")(?!\w)",
+    re.IGNORECASE,
+)
+PLANNING_OR_AVAILABILITY_RE = re.compile(
+    r"(?<!\w)(?:"
+    r"(?:сегодня|завтра)\s+сможешь|"
+    r"сможешь\s+(?:сегодня|завтра)|"
+    r"можешь\s+(?:сегодня|завтра)|"
+    r"(?:сегодня|завтра)\s+свобод(?:ен|на)|"
+    r"будешь\s+свобод(?:ен|на)|"
+    r"получится\s+(?:(?:сегодня|завтра)\s+)?(?:встретиться|созвониться)|"
+    r"are\s+you\s+(?:free|available)|can\s+you\s+(?:meet|talk)"
     r")(?!\w)",
     re.IGNORECASE,
 )
 URGENCY_RE = re.compile(r"\b(?:asap|important|urgent|важн\w*|сроч\w*)\b", re.IGNORECASE)
+IMPORTANT_CONTEXT_RE = re.compile(
+    r"\b(?:авари\w*|блокиров\w*|доступ\w*|интервью|ошибк\w*|плат[её]ж\w*|"
+    r"проблем\w*|собес\w*|суд\w*|не\s+работает|сломал\w*)\b",
+    re.IGNORECASE,
+)
 EXPLICIT_DEADLINE_RE = re.compile(
-    r"\b(?:at\s+\d{1,2}(?::\d{2})?|by\s+\d{1,2}(?::\d{2})?|deadline|"
+    r"\b(?:at\s+\d{1,2}(?::\d{2})?|by\s+\d{1,2}(?::\d{2})?|deadline|дедлайн|"
     r"in\s+(?:\d+|one|two|three|thirty)\s+(?:minutes?|hours?)|"
     r"within\s+\d+\s+(?:minutes?|hours?)|до\s+\d{1,2}(?::\d{2})?|"
-    r"сегодня\s+до\s+\d{1,2}(?::\d{2})?|"
+    r"до\s+завтра|by\s+tomorrow|"
+    r"сегодня\s+до\s+\d{1,2}(?::\d{2})?|срок\s+(?:сегодня|завтра)|"
     r"через\s+(?:\d+\s+)?(?:минут\w*|час\w*))\b",
+    re.IGNORECASE,
+)
+SMALL_TALK_PHRASES = (
+    "hi how are you",
+    "how are you",
+    "what s up",
+    "привет как дела",
+    "как дела у тебя",
+    "как дела",
+    "что делаешь",
+    "как ты",
+    "обычная болтовня",
+    "пишу просто так",
+)
+ISO_TIMESTAMP_RE = re.compile(
+    r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})?\b",
     re.IGNORECASE,
 )
 
@@ -95,24 +137,126 @@ def _context_with_reply_parent(session: Session, message: StoredMessage, limit: 
     return context[-limit:] if limit > 0 else context[:1]
 
 
-def _deadline_line(decision) -> str:
-    deadline_at = getattr(decision, "deadline_at", None)
-    if deadline_at:
-        return deadline_at.isoformat()
-    return getattr(decision, "deadline_text", None) or "-"
+def _normalized_words(raw_text: str) -> str:
+    return " ".join(re.sub(r"[^\w\s]", " ", raw_text.casefold()).split())
 
 
-def _decision_body(message: StoredMessage, decision) -> str:
+def _is_obvious_small_talk(raw_text: str) -> bool:
+    normalized = _normalized_words(raw_text)
+    return any(phrase in normalized for phrase in SMALL_TALK_PHRASES)
+
+
+def _deadline_label(message: StoredMessage) -> str:
     raw_text = message.text or message.caption or ""
-    reason = getattr(decision, "reason", None) or decision.summary
+    lowered = raw_text.casefold()
+    iso_timestamp = ISO_TIMESTAMP_RE.search(raw_text)
+    if iso_timestamp:
+        return iso_timestamp.group(0)
+    exact = re.search(r"\b(до|к)\s+(\d{1,2}(?::\d{2})?)\b", lowered)
+    if exact:
+        return f"{exact.group(1)} {exact.group(2)}"
+    english_time = re.search(r"\b(by|at)\s+(\d{1,2}(?::\d{2})?)\b", lowered)
+    if english_time:
+        prefix = "до" if english_time.group(1) == "by" else "к"
+        return f"{prefix} {english_time.group(2)}"
+    if re.search(r"\b(?:до\s+завтра|by\s+tomorrow)\b", lowered):
+        return "до завтра"
+    if re.search(r"\b(?:сейчас|now)\b", lowered):
+        return "сейчас"
+    if re.search(r"\b(?:сегодня|today)\b", lowered):
+        return "сегодня"
+    if re.search(r"\b(?:завтра|tomorrow)\b", lowered):
+        return "завтра"
+    return "не указан"
+
+
+def _as_utc_naive(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)
+
+
+def _email_context(session: Session, message: StoredMessage) -> list:
+    rows = repository.recent_chat_context(
+        session,
+        message.chat_id,
+        limit=EMAIL_CONTEXT_LIMIT + 1,
+    )
+    current_at = _as_utc_naive(message.timestamp)
+    prior = [
+        row
+        for row in rows
+        if (row.chat_id, row.message_id) != (message.chat_id, message.message_id)
+        and _as_utc_naive(row.timestamp) <= current_at
+    ]
+    recent = [
+        row
+        for row in prior
+        if _as_utc_naive(row.timestamp) >= current_at - EMAIL_CONTEXT_WINDOW
+    ]
+    return (recent or prior[-5:])[-EMAIL_CONTEXT_LIMIT:]
+
+
+def _context_line(row, message: StoredMessage) -> str:
+    timestamp = row.timestamp
+    if timestamp.tzinfo is None and message.timestamp.tzinfo is not None:
+        timestamp = timestamp.replace(tzinfo=UTC).astimezone(message.timestamp.tzinfo)
+    sender = "Я" if row.is_outgoing else (row.sender_name or "Неизвестный отправитель")
+    raw_text = safe_truncate(
+        row.text or row.caption or "[медиа без подписи]",
+        DEFAULT_MAX_MESSAGE_CHARS,
+    )
+    return f"- {timestamp.strftime('%H:%M')} — {sender}: {raw_text}"
+
+
+def _russian_reason(
+    message: StoredMessage,
+    policy_context: dict[str, bool],
+) -> str:
+    if _is_private(message):
+        if policy_context["request_or_urgency"] or policy_context["response_expected"]:
+            return "похоже, от тебя ждут ответа или действия."
+        return "в личном сообщении есть важная информация, на которую стоит отреагировать."
+    if policy_context["direct_mention"]:
+        return "тебя напрямую упомянули в групповом чате."
+    if policy_context["reply_to_me"]:
+        return "это ответ на твоё сообщение."
+    if policy_context["urgent_or_important"]:
+        return "в групповом сообщении есть явная срочность или важность."
+    if policy_context["explicit_deadline"]:
+        return "в групповом сообщении указан срок, который может требовать реакции."
+    if policy_context["watchlist_match"]:
+        return "сообщение совпало с настроенным ключевым словом или важным чатом."
+    return "похоже, от тебя или участников ждут реакции."
+
+
+def _russian_action(message: StoredMessage) -> str:
+    if _is_private(message):
+        return "ответить в Telegram."
+    return "проверить сообщение и при необходимости ответить в Telegram."
+
+
+def _decision_body(
+    session: Session,
+    message: StoredMessage,
+    policy_context: dict[str, bool],
+) -> str:
+    raw_text = message.text or message.caption or ""
+    context = _email_context(session, message)
+    rendered_context = (
+        "\n".join(_context_line(row, message) for row in context)
+        if context
+        else "Предыдущих сообщений нет."
+    )
     parts = [
         f"Чат: {message.chat_title}",
-        f"Отправитель: {message.sender_name or 'Unknown'}",
+        f"Отправитель: {message.sender_name or 'Неизвестный отправитель'}",
         f"Время: {message.timestamp.isoformat()}",
+        f"Почему срочно: {_russian_reason(message, policy_context)}",
+        f"Что сделать: {_russian_action(message)}",
+        f"Срок: {_deadline_label(message)}",
         f"Исходный текст:\n{raw_text}",
-        f"Почему P0_STRICT: {reason}",
-        f"Конкретное действие: {decision.action or '-'}",
-        f"Дедлайн: {_deadline_line(decision)}",
+        f"Контекст переписки:\n{rendered_context}",
     ]
     return "\n\n".join(parts)
 
@@ -198,12 +342,40 @@ def _has_request_or_action(raw_text: str) -> bool:
     return bool(REQUEST_OR_ACTION_RE.search(raw_text))
 
 
+def _has_planning_or_availability(raw_text: str) -> bool:
+    return bool(PLANNING_OR_AVAILABILITY_RE.search(raw_text))
+
+
 def _has_urgency(raw_text: str) -> bool:
     return bool(URGENCY_RE.search(raw_text))
 
 
+def _has_important_context(raw_text: str) -> bool:
+    return bool(IMPORTANT_CONTEXT_RE.search(raw_text))
+
+
+def _response_may_be_expected(raw_text: str) -> bool:
+    return bool(
+        "?" in raw_text
+        or _has_request_or_action(raw_text)
+        or _has_planning_or_availability(raw_text)
+    )
+
+
+def _private_response_may_be_expected(raw_text: str) -> bool:
+    return bool(
+        _has_request_or_action(raw_text) or _has_planning_or_availability(raw_text)
+    )
+
+
 def _has_private_signal(raw_text: str) -> bool:
-    return bool(_has_request_or_action(raw_text) or _has_urgency(raw_text))
+    return bool(
+        _has_request_or_action(raw_text)
+        or _has_planning_or_availability(raw_text)
+        or _has_urgency(raw_text)
+        or _has_important_context(raw_text)
+        or EXPLICIT_DEADLINE_RE.search(raw_text)
+    )
 
 
 def _group_policy_context(
@@ -214,7 +386,10 @@ def _group_policy_context(
     raw_text = message.text or message.caption or ""
     direct_mention = _mentions_me(message, settings)
     reply_to_me = _replies_to_me(session, message)
-    request_or_urgency = _has_request_or_action(raw_text) or _has_urgency(raw_text)
+    request_or_action = _has_request_or_action(raw_text)
+    urgent_or_important = _has_urgency(raw_text) or _has_important_context(raw_text)
+    response_expected = _response_may_be_expected(raw_text)
+    request_or_urgency = request_or_action or urgent_or_important
     explicit_deadline = bool(EXPLICIT_DEADLINE_RE.search(raw_text))
     watchlist_match = bool(
         _watchlist_keyword_matches(settings, raw_text)
@@ -229,14 +404,20 @@ def _group_policy_context(
     watchlist_enabled = settings is None or settings.p0_classify_watchlist_chats
     deterministic_strict = bool(
         (mention_enabled and direct_mention)
-        or (reply_enabled and reply_to_me and request_or_urgency)
-        or (explicit_deadline and request_or_urgency)
-        or (watchlist_enabled and watchlist_match and request_or_urgency)
+        or (reply_enabled and reply_to_me)
+        or request_or_action
+        or urgent_or_important
+        or explicit_deadline
+        or response_expected
+        or (watchlist_enabled and watchlist_match)
     )
     return {
+        "small_talk": False,
         "direct_mention": direct_mention,
         "reply_to_me": reply_to_me,
         "request_or_urgency": request_or_urgency,
+        "response_expected": response_expected,
+        "urgent_or_important": urgent_or_important,
         "explicit_deadline": explicit_deadline,
         "watchlist_match": watchlist_match,
         "deterministic_strict": deterministic_strict,
@@ -250,16 +431,24 @@ def _policy_context(
 ) -> dict[str, bool]:
     raw_text = message.text or message.caption or ""
     if _is_private(message):
-        request_or_urgency = bool(
-            _has_request_or_action(raw_text) or _has_urgency(raw_text)
+        small_talk = _is_obvious_small_talk(raw_text)
+        request_or_action = _has_request_or_action(raw_text)
+        planning_or_availability = _has_planning_or_availability(raw_text)
+        urgent_or_important = _has_urgency(raw_text) or _has_important_context(raw_text)
+        response_expected = _private_response_may_be_expected(raw_text)
+        request_or_urgency = (
+            request_or_action or planning_or_availability or urgent_or_important
         )
         private_signal = _has_private_signal(raw_text)
-        deterministic_strict = request_or_urgency
+        deterministic_strict = private_signal
         return {
+            "small_talk": small_talk,
             "private_signal": private_signal,
             "direct_mention": False,
             "reply_to_me": False,
             "request_or_urgency": request_or_urgency,
+            "response_expected": response_expected,
+            "urgent_or_important": urgent_or_important,
             "explicit_deadline": bool(EXPLICIT_DEADLINE_RE.search(raw_text)),
             "watchlist_match": False,
             "deterministic_strict": deterministic_strict,
@@ -381,15 +570,7 @@ def _local_strict_reason(
     message: StoredMessage,
     policy_context: dict[str, bool],
 ) -> str:
-    if _is_private(message):
-        return "Incoming private message contains a response/action request or urgent wording."
-    if policy_context["direct_mention"]:
-        return "Group message directly mentions the user."
-    if policy_context["reply_to_me"]:
-        return "Group message replies to the user and contains a request or urgency."
-    if policy_context["explicit_deadline"]:
-        return "Group message contains an explicit deadline plus a request or urgency."
-    return "Group watchlist matched a message containing a request or urgency."
+    return _russian_reason(message, policy_context)
 
 
 def _promote_to_strict(
@@ -400,13 +581,9 @@ def _promote_to_strict(
     reason = _local_strict_reason(message, policy_context)
     return P0Decision(
         status=P0Status.p0_strict,
-        summary=decision.summary if decision else reason,
+        summary=reason,
         reason=reason,
-        action=(
-            decision.action
-            if decision and decision.action
-            else "Open the original Telegram message and respond or act as requested."
-        ),
+        action=_russian_action(message),
         deadline_text=decision.deadline_text if decision else None,
         deadline_at=decision.deadline_at if decision else None,
         confidence=max(decision.confidence if decision else 1.0, P0_MIN_CONFIDENCE),
@@ -434,6 +611,7 @@ def _send_strict_decision(
     message: StoredMessage,
     decision: P0Decision,
     email_sender: EmailSender,
+    policy_context: dict[str, bool],
 ) -> bool:
     repository.mark_p0_classified(
         session,
@@ -448,7 +626,7 @@ def _send_strict_decision(
         message,
         email_sender,
         subject=f"[СРОЧНО] Telegram: {message.chat_title}",
-        body=_decision_body(message, decision),
+        body=_decision_body(session, message, policy_context),
         html=None,
         alert_type="p0",
     )
@@ -481,7 +659,13 @@ def handle_p0_candidate(
     if cap <= repository.p0_llm_calls_since(session, since):
         if policy_context["deterministic_strict"]:
             decision = _promote_to_strict(message, policy_context)
-            return _send_strict_decision(session, message, decision, email_sender)
+            return _send_strict_decision(
+                session,
+                message,
+                decision,
+                email_sender,
+                policy_context,
+            )
         return _mark_budget_review(session, message)
 
     context = _context_with_reply_parent(session, message, _max_context_messages(settings))
@@ -503,12 +687,24 @@ def handle_p0_candidate(
         )
         if _decision_qualifies_for_strict(message, policy_context, decision):
             decision = _promote_to_strict(message, policy_context, decision)
-            return _send_strict_decision(session, message, decision, email_sender)
+            return _send_strict_decision(
+                session,
+                message,
+                decision,
+                email_sender,
+                policy_context,
+            )
         if decision.status == P0Status.not_p0:
             return _mark_not_p0(session, message, decision.confidence)
         return _mark_candidate(session, message, decision.confidence)
     except LLMError:
         if policy_context["deterministic_strict"]:
             decision = _promote_to_strict(message, policy_context)
-            return _send_strict_decision(session, message, decision, email_sender)
+            return _send_strict_decision(
+                session,
+                message,
+                decision,
+                email_sender,
+                policy_context,
+            )
         return _mark_candidate(session, message)

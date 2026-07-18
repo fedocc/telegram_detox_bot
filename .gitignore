@@ -3,7 +3,9 @@
 !.env.example
 *.session
 *.session-journal
-data/
+data/*
+!data/birthdays.example.json
+data/birthdays.json
 logs/
 secrets/
 backups/

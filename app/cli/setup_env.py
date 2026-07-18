@@ -42,6 +42,11 @@ def main() -> None:
         "SMTP_PORT": "465",
         "DATABASE_URL": "sqlite:///data/telegram_digest.db",
         "TG_SESSION_PATH": "data/telegram_digest.session",
+        "BIRTHDAY_REMINDERS_ENABLED": "false",
+        "BIRTHDAY_POLL_INTERVAL_HOURS": "6",
+        "BIRTHDAY_REMINDER_TIME": "09:00",
+        "BIRTHDAY_LOOKAHEAD_DAYS": "1",
+        "BIRTHDAY_MANUAL_PATH": "data/birthdays.json",
     }
     if email_transport == "gmail_api":
         values["GMAIL_OAUTH_CLIENT_SECRET_PATH"] = "secrets/google_oauth_client.json"  # noqa: S105

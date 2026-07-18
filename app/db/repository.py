@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
 from uuid import uuid4
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.db.tables import AlertJob, BackfillState, DigestRecord, MessageRecord
+from app.db.tables import (
+    AlertJob,
+    BackfillState,
+    BirthdayContact,
+    BirthdayNotification,
+    DigestRecord,
+    MessageRecord,
+)
 from app.models.schemas import P0_MIN_CONFIDENCE, DailyDigest, P0Status, StoredMessage
 
 
@@ -21,6 +29,158 @@ def safe_error(exc: Exception | str | None) -> str | None:
     if exc is None:
         return None
     return exc if isinstance(exc, str) else exc.__class__.__name__
+
+
+def upsert_birthday_contact(
+    session: Session,
+    *,
+    person_key: str,
+    telegram_user_id: int | None,
+    display_name_safe: str,
+    username: str | None,
+    day: int,
+    month: int,
+    year: int | None,
+    source: str,
+    seen_at: datetime,
+) -> BirthdayContact:
+    seen_at = _utc_db_time(seen_at)
+    record = session.scalar(
+        select(BirthdayContact).where(BirthdayContact.person_key == person_key)
+    )
+    if record is None:
+        record = BirthdayContact(
+            person_key=person_key,
+            telegram_user_id=telegram_user_id,
+            display_name_safe=display_name_safe,
+            username=username,
+            day=day,
+            month=month,
+            year=year,
+            source=source,
+            first_seen_at=seen_at,
+            last_seen_at=seen_at,
+        )
+        session.add(record)
+    else:
+        record.telegram_user_id = telegram_user_id
+        record.display_name_safe = display_name_safe
+        record.username = username
+        record.day = day
+        record.month = month
+        record.year = year
+        record.source = source
+        record.last_seen_at = seen_at
+    session.commit()
+    return record
+
+
+def birthday_contacts(session: Session) -> list[BirthdayContact]:
+    return list(session.scalars(select(BirthdayContact).order_by(BirthdayContact.id)))
+
+
+def prune_manual_birthday_contacts(session: Session, active_keys: set[str]) -> int:
+    stmt = delete(BirthdayContact).where(BirthdayContact.source == "manual")
+    if active_keys:
+        stmt = stmt.where(BirthdayContact.person_key.not_in(active_keys))
+    result = session.execute(stmt)
+    session.commit()
+    return int(result.rowcount or 0)
+
+
+def has_birthday_notification(
+    session: Session,
+    person_keys: set[str],
+    birthday_date: date,
+    notification_type: str,
+) -> bool:
+    if not person_keys:
+        return False
+    return bool(
+        session.scalar(
+            select(BirthdayNotification.id)
+            .where(BirthdayNotification.person_key.in_(person_keys))
+            .where(BirthdayNotification.birthday_date == birthday_date)
+            .where(BirthdayNotification.notification_type == notification_type)
+            .limit(1)
+        )
+    )
+
+
+def claim_birthday_notification(
+    session: Session,
+    *,
+    person_key: str,
+    birthday_date: date,
+    notification_type: str,
+    claimed_at: datetime,
+) -> bool:
+    session.add(
+        BirthdayNotification(
+            person_key=person_key,
+            birthday_date=birthday_date,
+            notification_type=notification_type,
+            sent_at=None,
+            claimed_at=_utc_db_time(claimed_at),
+        )
+    )
+    try:
+        session.commit()
+        return True
+    except IntegrityError:
+        session.rollback()
+        return False
+
+
+def mark_birthday_notification_sent(
+    session: Session,
+    *,
+    person_key: str,
+    birthday_date: date,
+    notification_type: str,
+    sent_at: datetime,
+) -> None:
+    session.execute(
+        update(BirthdayNotification)
+        .where(BirthdayNotification.person_key == person_key)
+        .where(BirthdayNotification.birthday_date == birthday_date)
+        .where(BirthdayNotification.notification_type == notification_type)
+        .values(sent_at=_utc_db_time(sent_at), claimed_at=None)
+    )
+    session.commit()
+
+
+def release_stale_birthday_notification_claims(
+    session: Session,
+    now: datetime,
+    stale_minutes: int = 10,
+) -> int:
+    cutoff = _utc_db_time(now) - timedelta(minutes=stale_minutes)
+    result = session.execute(
+        delete(BirthdayNotification).where(
+            BirthdayNotification.sent_at.is_(None),
+            BirthdayNotification.claimed_at <= cutoff,
+        )
+    )
+    session.commit()
+    return int(result.rowcount or 0)
+
+
+def release_birthday_notification(
+    session: Session,
+    *,
+    person_key: str,
+    birthday_date: date,
+    notification_type: str,
+) -> None:
+    session.execute(
+        delete(BirthdayNotification).where(
+            BirthdayNotification.person_key == person_key,
+            BirthdayNotification.birthday_date == birthday_date,
+            BirthdayNotification.notification_type == notification_type,
+        )
+    )
+    session.commit()
 
 
 def _db_time(value: datetime) -> datetime:

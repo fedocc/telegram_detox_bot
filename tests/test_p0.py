@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+from datetime import datetime, timedelta
+
 import pytest
 
 from app.db import repository
@@ -32,6 +35,7 @@ class FakeLLM:
         fail: bool = False,
         status: P0Status = P0Status.p0,
         deadline_text: str | None = None,
+        deadline_at: datetime | None = None,
         confidence: float = 0.9,
         summary: str = "Сервер недоступен; требуется срочный звонок инженеру.",
         reason: str | None = None,
@@ -40,6 +44,7 @@ class FakeLLM:
         self.fail = fail
         self.status = status
         self.deadline_text = deadline_text
+        self.deadline_at = deadline_at
         self.confidence = confidence
         self.summary = summary
         self.reason = reason
@@ -58,6 +63,7 @@ class FakeLLM:
             reason=self.reason,
             action=self.action,
             deadline_text=self.deadline_text,
+            deadline_at=self.deadline_at,
             confidence=self.confidence,
         )
 
@@ -106,8 +112,17 @@ def test_random_private_text_does_not_send_email(session) -> None:
     assert repository.pending_alert_jobs(session) == []
 
 
-def test_private_kak_dela_does_not_send_email(session) -> None:
-    message = msg(text="как дела")
+@pytest.mark.parametrize(
+    "raw_text",
+    [
+        "как дела",
+        "Привет, как дела?",
+        "как дела у тебя?",
+        "Hi, how are you?",
+    ],
+)
+def test_private_small_talk_questions_do_not_send_email(session, raw_text) -> None:
+    message = msg(text=raw_text)
     repository.save_message(session, message)
     email = FakeEmail()
 
@@ -134,6 +149,51 @@ def test_private_boring_test_text_does_not_send_email(session) -> None:
     ) is False
     assert email.sent == []
     assert repository.pending_alert_jobs(session) == []
+
+
+def test_private_writing_just_because_stays_in_digest(session) -> None:
+    message = msg(text="пишу просто так")
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(
+        session,
+        message,
+        FakeLLM(status=P0Status.p0_strict, confidence=0.99),
+        email,
+    ) is False
+    assert email.sent == []
+    assert repository.pending_alert_jobs(session) == []
+
+
+@pytest.mark.parametrize(
+    "raw_text",
+    [
+        "ответь",
+        "можешь сегодня ответить?",
+        "завтра сможешь погулять?",
+        "есть минутка?",
+        "важный вопрос",
+        "меня завтра срочно приглашают на собес",
+        "получится завтра созвониться?",
+        "сегодня свободен?",
+        "надо обсудить",
+        "отпиши",
+    ],
+)
+def test_high_recall_private_reaction_signals_send_email(session, raw_text) -> None:
+    message = msg(text=raw_text)
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(
+        session,
+        message,
+        FakeLLM(status=P0Status.not_p0, confidence=0.99),
+        email,
+    ) is True
+    assert len(email.sent) == 1
+    assert repository.get_message(session, "1", 1).p0_classification == "P0_STRICT"
 
 
 @pytest.mark.parametrize("status", [P0Status.not_p0, P0Status.p0_strict])
@@ -667,10 +727,130 @@ def test_contract_file_deadline_sends_strict_email_with_raw_text(session) -> Non
     assert "Чат: Маша" in body
     assert "Отправитель: Sender" in body
     assert "Время: 2026-07-07T12:00:00+03:00" in body
-    assert "Почему P0_STRICT:" in body
-    assert "Конкретное действие: Прислать файл договора." in body
-    assert "Дедлайн: до 18:00" in body
+    assert "Почему срочно: похоже, от тебя ждут ответа или действия." in body
+    assert "Что сделать: ответить в Telegram." in body
+    assert "Срок: до 18:00" in body
+    assert "Контекст переписки:" in body
     assert repository.get_message(session, "1", 1).p0_classification == "P0_STRICT"
+
+
+def test_p0_email_uses_russian_comments_and_ignores_english_model_comments(session) -> None:
+    message = msg(text="ответь")
+    repository.save_message(session, message)
+    llm = FakeLLM(
+        summary="Incoming private message contains an urgent request.",
+        reason="Incoming private message contains an urgent request.",
+        action="Respond immediately.",
+        confidence=0.99,
+    )
+    email = FakeEmail()
+
+    assert handle_p0_candidate(session, message, llm, email) is True
+    body = email.sent[0][1]
+    assert "Почему срочно: похоже, от тебя ждут ответа или действия." in body
+    assert "Что сделать: ответить в Telegram." in body
+    assert "Incoming private message" not in body
+    assert "Respond immediately" not in body
+
+
+def test_p0_email_includes_recent_conversation_context(session) -> None:
+    repository.save_message(
+        session,
+        msg(
+            message_id=1,
+            text="Первое сообщение из контекста",
+            timestamp=msg().timestamp - timedelta(minutes=45),
+        ),
+    )
+    repository.save_message(
+        session,
+        msg(
+            message_id=2,
+            text="Второе сообщение из контекста",
+            timestamp=msg().timestamp - timedelta(minutes=10),
+            is_outgoing=True,
+        ),
+    )
+    message = msg(message_id=3, text="ответь сейчас")
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(session, message, FakeLLM(), email) is True
+    body = email.sent[0][1]
+    assert "Контекст переписки:" in body
+    assert "Первое сообщение из контекста" in body
+    assert "Второе сообщение из контекста" in body
+    assert "— Я: Второе сообщение из контекста" in body
+
+
+def test_p0_email_does_not_use_message_timestamp_as_deadline(session) -> None:
+    message = msg(text="ответь")
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(
+        session,
+        message,
+        FakeLLM(deadline_text=None, deadline_at=message.timestamp),
+        email,
+    ) is True
+    assert "Срок: не указан" in email.sent[0][1]
+
+
+@pytest.mark.parametrize(
+    ("raw_text", "expected_deadline"),
+    [
+        ("дедлайн", "не указан"),
+        ("deadline", "не указан"),
+        ("ответь сейчас", "сейчас"),
+        ("надо до завтра", "до завтра"),
+    ],
+)
+def test_p0_email_deadline_is_grounded_in_raw_text(
+    session,
+    raw_text,
+    expected_deadline,
+) -> None:
+    message = msg(text=raw_text)
+    repository.save_message(session, message)
+    email = FakeEmail()
+    llm = FakeLLM(
+        reason="Incoming private message contains an urgent request.",
+        action="Respond immediately до завтра.",
+        deadline_text="Respond immediately до завтра",
+        deadline_at=message.timestamp,
+    )
+
+    assert handle_p0_candidate(session, message, llm, email) is True
+    body = email.sent[0][1]
+
+    assert f"Срок: {expected_deadline}" in body
+    assert "Срок: 2026-" not in body
+    assert "Incoming private message contains" not in body
+    assert "Respond immediately" not in body
+    assert "Почему срочно: " in body
+    assert "Что сделать: ответить в Telegram." in body
+
+
+def test_p0_email_renders_iso_deadline_only_when_iso_is_in_raw_text(session) -> None:
+    raw_deadline = "2026-07-08T18:00:00+03:00"
+    message = msg(text=f"ответь до {raw_deadline}")
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(session, message, FakeLLM(), email) is True
+    assert f"Срок: {raw_deadline}" in email.sent[0][1]
+
+
+def test_p0_processing_does_not_log_private_text(session, caplog) -> None:
+    private_text = "ответь уникальный приватный текст для проверки логов"
+    message = msg(text=private_text)
+    repository.save_message(session, message)
+
+    with caplog.at_level(logging.DEBUG):
+        assert handle_p0_candidate(session, message, FakeLLM(), FakeEmail()) is True
+
+    assert private_text not in caplog.text
 
 
 def test_deterministic_private_request_overrides_low_confidence(session) -> None:
@@ -1034,11 +1214,69 @@ def test_group_reply_with_request_sends_immediate_email(session, settings) -> No
     assert repository.get_message(session, "g1", 2).p0_classification == "P0_STRICT"
 
 
-def test_group_reply_with_missing_parent_stays_fail_closed(session, settings) -> None:
+def test_group_reply_to_me_ok_question_sends_email(session, settings) -> None:
+    parent = msg(chat_id="g1", chat_type=ChatType.group, message_id=1, is_outgoing=True)
     message = msg(
         chat_id="g1",
         chat_type=ChatType.group,
-        text="можешь сегодня ответить?",
+        message_id=2,
+        text="ок?",
+        reply_to_message_id=1,
+    )
+    repository.save_message(session, parent)
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(
+        session,
+        message,
+        FakeLLM(status=P0Status.not_p0),
+        email,
+        settings=settings,
+    ) is True
+    assert len(email.sent) == 1
+
+
+@pytest.mark.parametrize(
+    "raw_text",
+    [
+        "важно",
+        "срочно",
+        "нужно решение до 18:00",
+        "дедлайн сегодня",
+        "кто может ответить?",
+        "посмотрите договор",
+        "есть проблема с платежом",
+    ],
+)
+def test_high_recall_group_reaction_signals_send_email(
+    session,
+    settings,
+    raw_text,
+) -> None:
+    message = msg(chat_id="g1", chat_type=ChatType.group, text=raw_text)
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(
+        session,
+        message,
+        FakeLLM(status=P0Status.not_p0),
+        email,
+        settings=settings,
+    ) is True
+    assert len(email.sent) == 1
+    assert repository.get_message(session, "g1", 1).p0_classification == "P0_STRICT"
+
+
+def test_group_missing_reply_parent_without_other_signal_stays_fail_closed(
+    session,
+    settings,
+) -> None:
+    message = msg(
+        chat_id="g1",
+        chat_type=ChatType.group,
+        text="ок",
         reply_to_message_id=999,
     )
     repository.save_message(session, message)
@@ -1051,7 +1289,7 @@ def test_group_reply_with_missing_parent_stays_fail_closed(session, settings) ->
     assert repository.pending_alert_jobs(session) == []
 
 
-def test_unrouted_group_urgency_does_not_send_email(session, settings) -> None:
+def test_group_urgency_sends_email_without_mention(session, settings) -> None:
     message = msg(
         chat_id="g1",
         chat_type=ChatType.group,
@@ -1061,10 +1299,10 @@ def test_unrouted_group_urgency_does_not_send_email(session, settings) -> None:
     llm = FakeLLM(status=P0Status.p0_strict, confidence=0.99)
     email = FakeEmail()
 
-    assert handle_p0_candidate(session, message, llm, email, settings=settings) is False
-    assert llm.calls == 0
-    assert email.sent == []
-    assert repository.pending_alert_jobs(session) == []
+    assert handle_p0_candidate(session, message, llm, email, settings=settings) is True
+    assert llm.calls == 1
+    assert len(email.sent) == 1
+    assert repository.get_message(session, "g1", 1).p0_classification == "P0_STRICT"
 
 
 def test_group_deadline_plus_urgency_sends_email(session, settings) -> None:
@@ -1107,15 +1345,18 @@ def test_group_watchlist_keyword_with_request_sends_email(session, settings) -> 
     assert len(email.sent) == 1
 
 
-def test_group_watchlist_without_request_does_not_trigger_llm(session, settings) -> None:
+def test_group_watchlist_chat_sends_email_without_request(session, settings) -> None:
     settings.p0_watchlist_chat_ids = "g1"
     message = msg(chat_id="g1", chat_type=ChatType.group, text="обычное обсуждение")
     repository.save_message(session, message)
     llm = FakeLLM(status=P0Status.not_p0)
 
-    handle_p0_candidate(session, message, llm, FakeEmail(), settings=settings)
+    email = FakeEmail()
 
-    assert llm.calls == 0
+    assert handle_p0_candidate(session, message, llm, email, settings=settings) is True
+
+    assert llm.calls == 1
+    assert len(email.sent) == 1
 
 
 def test_only_p0_sends_immediate_email(session, settings) -> None:

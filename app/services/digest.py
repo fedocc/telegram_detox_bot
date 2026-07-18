@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -27,6 +28,14 @@ MAX_MESSAGES_PER_DIGEST_WINDOW = 5_000
 MAX_MESSAGES_PER_CHAT = 100
 MAX_CHARS_PER_GROUP = 12_000
 BAD_SUMMARY_PHRASES = ("короткая переписка",)
+USEFUL_FALLBACK_SUMMARY = "Была обычная переписка без явного запроса."
+COUNT_ONLY_SUMMARY_RE = re.compile(
+    r"^(?:"
+    r"(?:всего\s+)?\d+\s+(?:новых\s+)?(?:сообщени(?:е|я|й)|messages?)|"
+    r"(?:сообщени(?:е|я|й)|messages?)\s*:\s*\d+"
+    r")[.!]?$",
+    re.IGNORECASE,
+)
 MEDIA_LABELS = {
     "photo": "фото",
     "voice": "голосовое",
@@ -46,7 +55,9 @@ def safe_truncate(text: str | None, limit: int = REVIEW_TEXT_LIMIT) -> str:
 
 
 def _clean_summary(text: str | None) -> str:
-    summary = safe_truncate(text or "обновление", 280)
+    summary = safe_truncate(text, 280).strip()
+    if not summary or COUNT_ONLY_SUMMARY_RE.fullmatch(summary):
+        return USEFUL_FALLBACK_SUMMARY
     for phrase in BAD_SUMMARY_PHRASES:
         summary = summary.replace(phrase, "обсуждение")
     return summary
@@ -229,13 +240,18 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
                     ),
                     needs_reply=False,
                     action=None,
-                    open_telegram=True,
-                    open_telegram_reason="Нужен контекст переписки.",
+                    what_happened=_local_chat_summary(incoming),
+                    requests_to_me="Явного запроса не обнаружено.",
+                    important_context=_local_chat_summary(incoming),
+                    action_items="Действий не требуется.",
+                    should_open_telegram=False,
+                    open_reason="Краткий контекст есть в digest.",
+                    open_telegram=False,
                     source_refs=[
                         MessageRef(chat_id=r.chat_id, message_id=r.message_id)
                         for r in incoming
                     ],
-                    needs_manual_review=True,
+                    needs_manual_review=False,
                     message_count=len(incoming),
                     first_message_at=first,
                     last_message_at=last,
@@ -263,6 +279,16 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
                     DigestGroupUpdate(
                         chat=chat,
                         summary=_clean_summary(summary or f"{len(chat_rows)} сообщений."),
+                        what_happened=_clean_summary(
+                            summary or "Получены сообщения без текста."
+                        ),
+                        requests_to_me="Явного запроса не обнаружено.",
+                        important_context=_clean_summary(
+                            summary or "Получены сообщения без текста."
+                        ),
+                        action_items="Действий не требуется.",
+                        should_open_telegram=False,
+                        open_reason="Краткий контекст есть в digest.",
                         source_refs=direct_refs,
                         message_count=len(chat_rows),
                         first_message_at=first,
@@ -283,47 +309,85 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
     return digest
 
 
-def _classified_refs(digest: DailyDigest) -> set[tuple[str, int]]:
-    refs: set[tuple[str, int]] = set()
-    for item in [*digest.direct_messages, *digest.review]:
-        refs.update((ref.chat_id, ref.message_id) for ref in item.source_refs)
-    return refs
+def _local_chat_summary(chat_rows: list) -> str:
+    snippets = [
+        safe_truncate(row.text or row.caption, 120)
+        for row in chat_rows[-3:]
+        if row.text or row.caption
+    ]
+    if snippets:
+        return _clean_summary("; ".join(snippets))
+    return "Получены сообщения с медиа без подписи."
 
 
-def _protect_private_messages(digest: DailyDigest, rows: list) -> DailyDigest:
-    classified = _classified_refs(digest)
-    private_refs = {
-        (row.chat_id, row.message_id)
-        for row in rows
-        if row.chat_type == ChatType.private and not row.is_outgoing
-    }
-    missing = private_refs - classified
-    if missing:
-        digest.noise_counts = [
-            count
-            for count in digest.noise_counts
-            if not any(
-                row.chat_title == count.chat
-                and (row.chat_id, row.message_id) in private_refs
-                and row.chat_type == ChatType.private
-                for row in rows
-            )
-        ]
+def _item_for_chat(items: list, chat_id: str):
+    for item in items:
+        if any(ref.chat_id == chat_id for ref in item.source_refs):
+            return item
+    return None
+
+
+def _drop_cross_chat_items(digest: DailyDigest) -> DailyDigest:
+    """Reject LLM summaries that blur multiple conversations into one item."""
+
+    def belongs_to_one_chat(item) -> bool:
+        return len({ref.chat_id for ref in item.source_refs}) == 1
+
+    digest.direct_messages = [
+        item for item in digest.direct_messages if belongs_to_one_chat(item)
+    ]
+    digest.group_updates = [
+        item for item in digest.group_updates if belongs_to_one_chat(item)
+    ]
+    return digest
+
+
+def _ensure_chat_summaries(digest: DailyDigest, rows: list) -> DailyDigest:
+    grouped: dict[str, list] = defaultdict(list)
     for row in rows:
-        if (row.chat_id, row.message_id) not in missing:
-            continue
-        digest.direct_messages.append(
-            DigestDirectMessage(
-                chat=row.chat_title,
-                summary="Личное сообщение.",
-                needs_reply=False,
-                source_refs=[MessageRef(chat_id=row.chat_id, message_id=row.message_id)],
-                needs_manual_review=False,
-                message_count=1,
-                first_message_at=row.timestamp,
-                last_message_at=row.timestamp,
+        if not row.is_outgoing:
+            grouped[row.chat_id].append(row)
+
+    summarized_titles: set[str] = set()
+    for chat_id, chat_rows in grouped.items():
+        first_row = chat_rows[0]
+        summarized_titles.add(first_row.chat_title)
+        is_private = _chat_type_value(first_row) == ChatType.private.value
+        items = digest.direct_messages if is_private else digest.group_updates
+        item = _item_for_chat(items, chat_id)
+        refs = [MessageRef(chat_id=chat_id, message_id=row.message_id) for row in chat_rows]
+        if item is not None:
+            existing_refs = {(ref.chat_id, ref.message_id) for ref in item.source_refs}
+            item.source_refs.extend(
+                ref
+                for ref in refs
+                if (ref.chat_id, ref.message_id) not in existing_refs
             )
-        )
+            continue
+
+        summary = _local_chat_summary(chat_rows)
+        semantic = {
+            "chat": first_row.chat_title,
+            "summary": summary,
+            "what_happened": summary,
+            "requests_to_me": "Явного запроса не обнаружено.",
+            "important_context": summary,
+            "action_items": "Действий не требуется.",
+            "should_open_telegram": False,
+            "open_reason": "Краткий контекст есть в digest.",
+            "source_refs": refs,
+            "needs_manual_review": False,
+        }
+        if is_private:
+            digest.direct_messages.append(
+                DigestDirectMessage(needs_reply=False, **semantic)
+            )
+        else:
+            digest.group_updates.append(DigestGroupUpdate(**semantic))
+
+    digest.noise_counts = [
+        count for count in digest.noise_counts if count.chat not in summarized_titles
+    ]
     return digest
 
 
@@ -343,6 +407,8 @@ def _metrics_for_refs(item, rows_by_ref: dict[tuple[str, int], object]) -> None:
     item.first_message_at = min(row.timestamp for row in rows)
     item.last_message_at = max(row.timestamp for row in rows)
     item.summary = _clean_summary(item.summary)
+    if item.what_happened:
+        item.what_happened = _clean_summary(item.what_happened)
 
 
 def _merge_items_by_chat(items: list) -> list:
@@ -390,7 +456,8 @@ def _merge_items_by_chat(items: list) -> list:
 
 def _ensure_semantic_completeness(digest: DailyDigest) -> None:
     for item in [*digest.direct_messages, *digest.group_updates]:
-        item.what_happened = item.what_happened or item.summary
+        item.summary = _clean_summary(item.summary)
+        item.what_happened = _clean_summary(item.what_happened or item.summary)
         item.requests_to_me = item.requests_to_me or item.requests or "Не определено."
         item.important_context = item.important_context or item.context or "Не определено."
         item.action_items = item.action_items or item.action or "Не определено; проверьте чат."
@@ -484,7 +551,8 @@ def generate_digest(
                 chunk_rows = [row for row in rows if row.chat_id in chat_ids]
                 chunk_digests.append(_call_daily_digest(llm, chunk_payload, day, chunk_rows))
         digest = _merge_digests(day, chunk_digests)
-    digest = _protect_private_messages(digest, rows)
+    digest = _drop_cross_chat_items(digest)
+    digest = _ensure_chat_summaries(digest, rows)
     _attach_collapsed_media_summaries(digest, rows)
     return _enrich_digest(digest, rows, overflow_notes)
 

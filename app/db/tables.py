@@ -1,8 +1,18 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -84,6 +94,42 @@ class BackfillState(Base):
     messages_processed: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class BirthdayContact(Base):
+    __tablename__ = "birthday_contacts"
+    __table_args__ = (UniqueConstraint("person_key", name="uq_birthday_contact_person"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    person_key: Mapped[str] = mapped_column(String(128), index=True)
+    telegram_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    display_name_safe: Mapped[str] = mapped_column(String(512))
+    username: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    day: Mapped[int] = mapped_column(Integer)
+    month: Mapped[int] = mapped_column(Integer)
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str] = mapped_column(String(32))
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class BirthdayNotification(Base):
+    __tablename__ = "birthday_notifications"
+    __table_args__ = (
+        UniqueConstraint(
+            "person_key",
+            "birthday_date",
+            "notification_type",
+            name="uq_birthday_notification_person_date_type",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    person_key: Mapped[str] = mapped_column(String(128), index=True)
+    birthday_date: Mapped[date] = mapped_column(Date, index=True)
+    notification_type: Mapped[str] = mapped_column(String(16), index=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AlertJob(Base):

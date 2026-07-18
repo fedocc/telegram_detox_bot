@@ -17,13 +17,37 @@ Codex не является частью runtime-пайплайна. В runtime 
 
 - Private messages are never silently dropped. After every LLM digest, the app checks all incoming private message IDs for the day. Any private message omitted by the LLM is added to `REVIEW`.
 - Private messages are never counted as P3/background noise. If classification is uncertain, the message is surfaced for review.
-- Immediate email is reserved for `P0_STRICT`. In private chats, explicit response/action/call/check requests and urgent wording qualify; time words alone and ordinary conversation do not. In groups, exact configured username mentions, replies with a request, explicit deadline pressure, and configured watchlist matches are the strict routes. Set exact usernames with `P0_MENTION_USERNAMES`.
-- Trusted private senders can lower uncertainty for an actionable or urgent message, but ordinary messages such as `привет` remain digest-only. Unrouted group urgency also remains digest-only.
+- Immediate email is reserved for `P0_STRICT`, with recall prioritized over precision. In private chats, requests, planning or availability questions, important context, urgency, and borderline messages where a response may be expected qualify; obvious small talk remains digest-only. In groups, exact configured username mentions, replies, urgency, importance, deadlines, actionable requests, questions, and watchlist matches qualify. Set exact usernames with `P0_MENTION_USERNAMES`.
+- Trusted private senders can lower uncertainty, but ordinary messages such as `привет` remain digest-only.
 - `P0_CANDIDATE` and `NOT_P0` stay in the digest.
-- Every `P0_STRICT` email includes chat title, sender, timestamp, complete original message text, classification reason, concrete action, and deadline when present.
+- Every `P0_STRICT` email is in Russian and includes chat title, sender, timestamp, a local classification reason, suggested action, a deadline derived from the message text, complete original text, and up to ten previous messages from the same chat. Model-generated English comments are not rendered.
+- Every non-P0 conversation gets a concise semantic digest summary. Quiet chats are summarized instead of being reduced to message counts whenever text is available.
 - AITunnel/LLM outage triggers a deterministic fallback digest. The fallback includes incoming private messages, group counts, P0 review candidates, and unprocessed media notices.
 - Runtime never performs Telegram login. `python -m app.cli.telegram_login` is the only interactive authentication command. The 24/7 listener only connects with an existing session and exits closed if the session is missing or unauthorized.
 - The service is read-only by design. Static tests fail if runtime code uses Telegram write/action methods such as send, delete, reaction, pin, mute, join, leave, or mark-read calls.
+
+## Напоминания о днях рождения
+
+Отдельный birthday-модуль читает `contacts.getBirthdays` через raw Telethon API каждые 6 часов и сохраняет локальный cache контактов. Он не проходит через P0 classifier и не вызывает Telegram write API. Ежедневное русскоязычное письмо отправляется в настроенное время; если день рождения на сегодня обнаружен позже, пропущенное уведомление отправляется один раз сразу.
+
+Настройки:
+
+```env
+BIRTHDAY_REMINDERS_ENABLED=true
+BIRTHDAY_POLL_INTERVAL_HOURS=6
+BIRTHDAY_REMINDER_TIME=09:00
+BIRTHDAY_LOOKAHEAD_DAYS=1
+BIRTHDAY_MANUAL_PATH=data/birthdays.json
+```
+
+Для manual fallback скопируйте `data/birthdays.example.json` в `data/birthdays.json` и измените локальную копию. `data/birthdays.json` игнорируется Git. Telegram и manual-записи с одинаковым username или именем и датой объединяются без повторного email.
+
+Проверка без отправки письма не выводит реальные имена и даты:
+
+```bash
+python -m app.cli.check_birthdays --dry-run
+python -m app.cli.check_birthdays
+```
 
 ## Риск MTProto session
 
@@ -142,6 +166,8 @@ python -m app.cli.run
 python -m app.cli.digest_now
 python -m app.cli.cleanup
 python -m app.cli.gmail_auth
+python -m app.cli.check_birthdays --dry-run
+python -m app.cli.check_birthdays
 ```
 
 ## Docker
@@ -152,7 +178,7 @@ docker compose run --rm telegram-digest python -m app.cli.telegram_login
 docker compose up -d
 ```
 
-`./data` и `./logs` монтируются как volume. `.env`, `data/`, `logs/`, `*.session` и базы исключены из Git.
+`./data` и `./logs` монтируются как volume. `.env`, runtime-файлы в `data/`, `logs/`, `*.session` и базы исключены из Git; исключение — безопасный `data/birthdays.example.json`.
 
 ## Будущий перенос на VPS
 
@@ -193,7 +219,7 @@ rm -rf logs/*
 - Raw messages удаляются через 14 дней.
 - Digests хранятся 90 дней.
 - Тексты сообщений, API keys, SMTP credentials, OAuth tokens, OAuth client secrets и session details не пишутся намеренно в логи; logging filter редактирует секретоподобные значения.
-- `.env`, session-файлы, data, logs, secrets и database files не должны попадать в Git/GitHub.
+- `.env`, session-файлы, `data/birthdays.json`, остальные runtime-файлы в `data/`, logs, secrets и database files не должны попадать в Git/GitHub.
 
 ## Тесты без Telegram и сети
 
