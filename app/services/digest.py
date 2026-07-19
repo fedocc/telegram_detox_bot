@@ -129,6 +129,8 @@ def build_structured_payload(
     chats: dict[str, dict] = {}
     overflow_notes: list[dict] = []
     for row in rows:
+        if row.is_outgoing is not False:
+            continue
         chat = chats.setdefault(
             row.chat_id,
             {
@@ -272,7 +274,7 @@ def _chat_chunks(chats: list[dict]) -> list[list[dict]]:
 def _attach_collapsed_media_summaries(digest: DailyDigest, rows: list) -> None:
     grouped: dict[tuple[str, str], list] = defaultdict(list)
     for row in rows:
-        if not row.is_outgoing and row.media_type != "none":
+        if row.is_outgoing is False and row.media_type != "none":
             grouped[(row.chat_id, row.chat_title)].append(row)
     for (chat_id, chat_title), media_rows in grouped.items():
         counts = Counter(str(row.media_type) for row in media_rows)
@@ -312,6 +314,7 @@ def _attach_collapsed_media_summaries(digest: DailyDigest, rows: list) -> None:
 
 
 def fallback_digest(day: date, rows: list) -> DailyDigest:
+    rows = [row for row in rows if row.is_outgoing is False]
     direct: list[DigestDirectMessage] = []
     group_updates: list[DigestGroupUpdate] = []
     review: list[DigestReviewItem] = []
@@ -332,7 +335,7 @@ def fallback_digest(day: date, rows: list) -> DailyDigest:
                 )
             )
     for (_, chat), chat_rows in grouped.items():
-        incoming = [r for r in chat_rows if not r.is_outgoing]
+        incoming = [r for r in chat_rows if r.is_outgoing is False]
         if incoming and _chat_type_value(incoming[0]) == ChatType.private.value:
             first = min(r.timestamp for r in incoming)
             last = max(r.timestamp for r in incoming)
@@ -535,7 +538,7 @@ def _drop_cross_chat_items(digest: DailyDigest) -> DailyDigest:
 def _ensure_chat_summaries(digest: DailyDigest, rows: list) -> DailyDigest:
     grouped: dict[str, list] = defaultdict(list)
     for row in rows:
-        if not row.is_outgoing:
+        if row.is_outgoing is False:
             grouped[row.chat_id].append(row)
 
     summarized_titles: set[str] = set()
@@ -732,6 +735,7 @@ def generate_digest(
             end,
             limit=max_messages_per_window + 1,
             excluded_chat_ids=ignored_chat_ids,
+            incoming_only=True,
         )
         if len(fetched) > max_messages_per_window:
             overflow_notes.append(
@@ -746,8 +750,12 @@ def generate_digest(
             rows = fetched[:max_messages_per_window]
         else:
             rows = fetched
-    elif ignored_chat_ids:
-        rows = [row for row in rows if row.chat_id not in ignored_chat_ids]
+    else:
+        rows = [row for row in rows if row.is_outgoing is False]
+        if ignored_chat_ids:
+            rows = [row for row in rows if row.chat_id not in ignored_chat_ids]
+    if not rows:
+        return DailyDigest(date=day.isoformat())
     payload = build_structured_payload(
         rows,
         max_messages_per_chat=max_messages_per_chat,
@@ -882,12 +890,20 @@ def send_daily_digest_pipeline(
     ignored_chat_ids: frozenset[str] | set[str] | None = None,
 ) -> DailyDigest:
     pending = repository.pending_digest_for_date(session, day.isoformat())
+    if (
+        pending
+        and pending.digest_key
+        and not repository.digest_claims_are_incoming_only(session, pending)
+    ):
+        repository.cancel_digest_with_nonincoming_claims(session, pending)
+        pending = None
     if pending:
         if pending.email_status == "building":
             rows_for_digest = repository.messages_claimed_by_digest(
                 session,
                 pending.id,
                 excluded_chat_ids=ignored_chat_ids,
+                incoming_only=True,
             )
             if not rows_for_digest:
                 return DailyDigest(date=day.isoformat(), email_status="pending")
@@ -932,6 +948,7 @@ def send_daily_digest_pipeline(
         end,
         limit=MAX_MESSAGES_PER_DIGEST_WINDOW + 1,
         excluded_chat_ids=ignored_chat_ids,
+        incoming_only=True,
     )
     rows_for_digest = rows[:MAX_MESSAGES_PER_DIGEST_WINDOW]
     if not rows_for_digest:

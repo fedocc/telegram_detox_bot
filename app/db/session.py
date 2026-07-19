@@ -42,6 +42,8 @@ def init_db(settings: Settings) -> sessionmaker[Session]:
                 )
             if "ingested_at" not in columns:
                 connection.execute(text("ALTER TABLE messages ADD COLUMN ingested_at DATETIME"))
+            if "is_outgoing" not in columns:
+                connection.execute(text("ALTER TABLE messages ADD COLUMN is_outgoing BOOLEAN"))
             if "p0_classified_at" not in columns:
                 connection.execute(
                     text("ALTER TABLE messages ADD COLUMN p0_classified_at DATETIME")

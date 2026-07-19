@@ -285,6 +285,145 @@ def test_personal_message_always_appears_in_digest(session) -> None:
     assert digest.direct_messages[0].chat == "Маша"
 
 
+def test_outgoing_only_private_chat_is_excluded_from_digest(session) -> None:
+    repository.save_message(
+        session,
+        msg(text="@fedocc срочно ответь", is_outgoing=True),
+    )
+
+    class NeverDigestLLM:
+        def daily_digest(self, payload):
+            raise AssertionError("outgoing-only chat reached digest LLM")
+
+    digest = generate_digest(
+        session,
+        NeverDigestLLM(),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+    )
+
+    assert digest.direct_messages == []
+    assert digest.group_updates == []
+    assert digest.review == []
+    assert digest.diagnostics.messages_count == 0
+
+
+def test_mixed_private_chat_digest_is_driven_only_by_incoming_messages(session) -> None:
+    outgoing_text = "Федя просит срочно отправить файл"
+    repository.save_message(
+        session,
+        msg(message_id=40, text=outgoing_text, is_outgoing=True),
+    )
+    repository.save_message(
+        session,
+        msg(message_id=41, text="Привет", is_outgoing=False),
+    )
+
+    class CapturingIncomingLLM(FakeLLM):
+        def __init__(self) -> None:
+            self.payload = None
+
+        def daily_digest(self, payload: dict) -> DailyDigest:
+            self.payload = payload
+            return super().daily_digest(payload)
+
+    llm = CapturingIncomingLLM()
+    digest = generate_digest(session, llm, date(2026, 7, 7), "Europe/Moscow")
+    output = render_plain_text(digest)
+
+    assert llm.payload is not None
+    payload_messages = llm.payload["chats"][0]["messages"]
+    assert [item["message_id"] for item in payload_messages] == [41]
+    assert payload_messages[0]["is_outgoing"] is False
+    refs = digest.direct_messages[0].source_refs
+    assert [(ref.chat_id, ref.message_id) for ref in refs] == [("1", 41)]
+    assert outgoing_text not in output
+
+
+def test_outgoing_only_chat_does_not_create_or_send_digest(session) -> None:
+    repository.save_message(
+        session,
+        msg(text="завтра в 10 вылет ты готов?", is_outgoing=True),
+    )
+    email = FakeEmail()
+
+    class NeverDigestLLM:
+        def daily_digest(self, payload):
+            raise AssertionError("outgoing-only chat reached digest pipeline")
+
+    digest = send_daily_digest_pipeline(
+        session,
+        NeverDigestLLM(),
+        email,
+        date(2026, 7, 7),
+        "Europe/Moscow",
+    )
+
+    assert digest.email_status == "sent"
+    assert email.sent == []
+    assert repository.pending_digest_for_date(session, "2026-07-07") is None
+    stored = repository.get_message(session, "1", 1)
+    assert stored is not None
+    assert stored.claimed_digest_id is None
+    assert stored.digested_at is None
+
+
+def test_unknown_legacy_direction_does_not_drive_digest(session) -> None:
+    repository.save_message(session, msg(text="legacy direction unknown"))
+    stored = repository.get_message(session, "1", 1)
+    assert stored is not None
+    stored.is_outgoing = None
+    session.commit()
+
+    class NeverDigestLLM:
+        def daily_digest(self, payload):
+            raise AssertionError("unknown-direction row reached digest LLM")
+
+    digest = generate_digest(
+        session,
+        NeverDigestLLM(),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+    )
+
+    assert digest.direct_messages == []
+    assert digest.group_updates == []
+
+
+def test_existing_digest_claim_with_outgoing_driver_is_cancelled(session) -> None:
+    repository.save_message(session, msg(text="legacy claimed self message"))
+    row = repository.get_message(session, "1", 1)
+    record, _, created = repository.claim_digest_run_for_rows(
+        session,
+        digest_date="2026-07-07",
+        rows=[row],
+    )
+    assert record is not None and created is True
+    row = repository.get_message(session, "1", 1)
+    row.is_outgoing = True
+    session.commit()
+    email = FakeEmail()
+
+    class NeverDigestLLM:
+        def daily_digest(self, payload):
+            raise AssertionError("unsafe legacy digest reached LLM")
+
+    digest = send_daily_digest_pipeline(
+        session,
+        NeverDigestLLM(),
+        email,
+        date(2026, 7, 7),
+        "Europe/Moscow",
+    )
+
+    session.refresh(record)
+    session.refresh(row)
+    assert digest.email_status == "sent"
+    assert record.email_status == "cancelled"
+    assert row.claimed_digest_id is None
+    assert email.sent == []
+
+
 def test_group_flood_gets_concise_summary_instead_of_noise_count(session, now) -> None:
     for idx in range(1, 6):
         repository.save_message(
@@ -691,7 +830,7 @@ def test_new_pending_digest_is_immediately_retryable(session) -> None:
     assert record.next_attempt_at <= record.created_at
 
 
-def test_crash_after_save_digest_before_smtp_is_recovered_by_retry_scheduler(session) -> None:
+def test_legacy_keyless_digest_without_claims_is_cancelled_by_retry_scheduler(session) -> None:
     digest = DailyDigest(
         date="2026-07-07",
         direct_messages=[
@@ -719,9 +858,141 @@ def test_crash_after_save_digest_before_smtp_is_recovered_by_retry_scheduler(ses
         ignored_chat_ids=set(),
     )
 
-    assert sent == 1
-    assert email.sent == [("saved subject", "saved plain", "<p>saved html</p>")]
+    session.refresh(record)
+    assert sent == 0
+    assert email.sent == []
+    assert record.email_status == "cancelled"
+    assert record.subject == ""
+    assert record.text_payload == ""
+    assert record.html_payload == ""
+    assert record.json_payload == ""
     assert repository.pending_digests(session) == []
+
+
+def _legacy_keyless_digest_with_claim(
+    session,
+    *,
+    message_id: int,
+    is_outgoing: bool | None,
+    payload_marker: str = "synthetic retry payload",
+):
+    repository.save_message(session, msg(message_id=message_id, text="synthetic source"))
+    row = repository.get_message(session, "1", message_id)
+    record, claimed_rows, created = repository.claim_digest_run_for_rows(
+        session,
+        digest_date="2026-07-07",
+        rows=[row],
+    )
+    assert record is not None and created is True
+    assert claimed_rows == [row]
+    assert repository.update_digest_payload(
+        session,
+        record,
+        DailyDigest(date="2026-07-07"),
+        subject="synthetic subject",
+        text=payload_marker,
+        html=f"<p>{payload_marker}</p>",
+    )
+    record = repository.get_digest_record(session, record.id)
+    row = repository.get_message(session, "1", message_id)
+    record.digest_key = None
+    row.is_outgoing = is_outgoing
+    session.commit()
+    return record, row
+
+
+def test_legacy_keyless_digest_with_outgoing_claim_is_cancelled(session, caplog) -> None:
+    marker = "synthetic-private-digest-marker"
+    record, row = _legacy_keyless_digest_with_claim(
+        session,
+        message_id=901,
+        is_outgoing=True,
+        payload_marker=marker,
+    )
+    email = FakeEmail()
+
+    sent = repository.retry_pending_digests(
+        session,
+        email,
+        now=record.next_attempt_at,
+        ignored_chat_ids=set(),
+    )
+
+    session.refresh(record)
+    session.refresh(row)
+    assert sent == 0
+    assert email.sent == []
+    assert record.email_status == "cancelled"
+    assert record.subject == ""
+    assert record.text_payload == ""
+    assert record.html_payload == ""
+    assert record.json_payload == ""
+    assert record.claim_token is None
+    assert record.claimed_at is None
+    assert row.claimed_digest_id is None
+    assert row.digested_at is None
+    assert marker not in caplog.text
+
+
+def test_claimed_legacy_keyless_digest_with_unknown_direction_is_cancelled(session) -> None:
+    record, row = _legacy_keyless_digest_with_claim(
+        session,
+        message_id=902,
+        is_outgoing=None,
+    )
+    claim_id = "synthetic-claim-id"
+    claimed = repository.claim_pending_digest(
+        session,
+        record.id,
+        record.next_attempt_at,
+        claim_id,
+    )
+    assert claimed is not None
+    email = FakeEmail()
+
+    sent = repository.send_claimed_digest(
+        session,
+        record.id,
+        claim_id,
+        email,
+        record.next_attempt_at,
+    )
+
+    session.refresh(record)
+    session.refresh(row)
+    assert sent is False
+    assert email.sent == []
+    assert record.email_status == "cancelled"
+    assert record.text_payload == ""
+    assert record.html_payload == ""
+    assert record.json_payload == ""
+    assert record.claim_token is None
+    assert row.claimed_digest_id is None
+    assert row.digested_at is None
+
+
+def test_legacy_keyless_digest_with_incoming_claim_can_retry(session) -> None:
+    record, row = _legacy_keyless_digest_with_claim(
+        session,
+        message_id=903,
+        is_outgoing=False,
+    )
+    email = FakeEmail()
+
+    sent = repository.retry_pending_digests(
+        session,
+        email,
+        now=record.next_attempt_at,
+        ignored_chat_ids=set(),
+    )
+
+    session.refresh(record)
+    session.refresh(row)
+    assert sent == 1
+    assert len(email.sent) == 1
+    assert record.email_status == "sent"
+    assert row.claimed_digest_id is None
+    assert row.digested_at is not None
 
 
 def test_successful_initial_digest_send_marks_digest_sent(session) -> None:
@@ -1200,6 +1471,66 @@ def test_fallback_digest_includes_review_and_media(session, now) -> None:
 
     assert "фото" in digest.group_updates[0].media_summary
     assert any(item.reason == "Возможно важное сообщение" for item in digest.review)
+
+
+def test_non_ignored_channel_text_and_media_enter_digest(session, now) -> None:
+    class CapturingChannelLLM(FakeLLM):
+        def __init__(self) -> None:
+            self.payload = None
+
+        def daily_digest(self, payload: dict) -> DailyDigest:
+            self.payload = payload
+            return super().daily_digest(payload)
+
+    repository.save_message(
+        session,
+        msg(
+            chat_id="channel-allowed",
+            chat_title="Учебный канал",
+            chat_type=ChatType.channel,
+            message_id=701,
+            text="Расписание на завтра",
+            timestamp=now,
+        ),
+    )
+    repository.save_message(
+        session,
+        msg(
+            chat_id="channel-allowed",
+            chat_title="Учебный канал",
+            chat_type=ChatType.channel,
+            message_id=702,
+            text=None,
+            media_type=MediaType.video,
+            timestamp=now,
+        ),
+    )
+    repository.save_message(
+        session,
+        msg(
+            chat_id="channel-ignored",
+            chat_title="Игнорируемый канал",
+            chat_type=ChatType.channel,
+            message_id=703,
+            text="Не включать",
+            timestamp=now,
+        ),
+    )
+    llm = CapturingChannelLLM()
+
+    generate_digest(
+        session,
+        llm,
+        date(2026, 7, 7),
+        "Europe/Moscow",
+        ignored_chat_ids={"channel-ignored"},
+    )
+
+    assert llm.payload is not None
+    assert [chat["chat_id"] for chat in llm.payload["chats"]] == ["channel-allowed"]
+    messages = llm.payload["chats"][0]["messages"]
+    assert {item["message_id"] for item in messages} == {701, 702}
+    assert any(item["media_type"] == MediaType.video.value for item in messages)
 
 
 def test_shallow_digest_is_marked_conservatively_for_manual_context(session) -> None:

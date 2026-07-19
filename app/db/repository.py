@@ -395,6 +395,7 @@ def messages_between(
     only_undigested: bool = True,
     limit: int | None = None,
     excluded_chat_ids: frozenset[str] | set[str] | None = None,
+    incoming_only: bool = False,
 ) -> list[MessageRecord]:
     start = _utc_db_time(start)
     end = _utc_db_time(end)
@@ -408,6 +409,8 @@ def messages_between(
         stmt = stmt.where(MessageRecord.claimed_digest_id.is_(None))
     if excluded_chat_ids:
         stmt = stmt.where(MessageRecord.chat_id.not_in(excluded_chat_ids))
+    if incoming_only:
+        stmt = stmt.where(MessageRecord.is_outgoing.is_(False))
     if limit is not None:
         stmt = stmt.limit(limit)
     return list(session.scalars(stmt))
@@ -418,6 +421,7 @@ def messages_claimed_by_digest(
     digest_id: int,
     *,
     excluded_chat_ids: frozenset[str] | set[str] | None = None,
+    incoming_only: bool = False,
 ) -> list[MessageRecord]:
     stmt = (
         select(MessageRecord)
@@ -426,6 +430,8 @@ def messages_claimed_by_digest(
     )
     if excluded_chat_ids:
         stmt = stmt.where(MessageRecord.chat_id.not_in(excluded_chat_ids))
+    if incoming_only:
+        stmt = stmt.where(MessageRecord.is_outgoing.is_(False))
     return list(session.scalars(stmt))
 
 
@@ -505,6 +511,7 @@ def claim_digest_run_for_rows(
     digest_date: str,
     rows: list[MessageRecord],
 ) -> tuple[DigestRecord | None, list[MessageRecord], bool]:
+    rows = [row for row in rows if row.is_outgoing is False]
     if not rows:
         return None, [], False
     digest_key = _digest_key_for_rows(digest_date, rows)
@@ -539,6 +546,7 @@ def claim_digest_run_for_rows(
                 .where(MessageRecord.message_id == row.message_id)
                 .where(MessageRecord.digested_at.is_(None))
                 .where(MessageRecord.claimed_digest_id.is_(None))
+                .where(MessageRecord.is_outgoing.is_(False))
                 .values(claimed_digest_id=record.id)
             )
             if result.rowcount:
@@ -741,10 +749,22 @@ def _cancel_unsafe_digest(
     session.commit()
 
 
+def digest_claims_are_incoming_only(session: Session, record: DigestRecord) -> bool:
+    rows = messages_claimed_by_digest(session, record.id)
+    return bool(rows) and all(row.is_outgoing is False for row in rows)
+
+
+def cancel_digest_with_nonincoming_claims(session: Session, record: DigestRecord) -> None:
+    _cancel_unsafe_digest(session, record, "unsafe_digest_nonincoming_driver")
+
+
 def _digest_retry_is_safe(
+    session: Session,
     record: DigestRecord,
     ignored_chat_ids: frozenset[str] | set[str],
 ) -> tuple[bool, str | None]:
+    if not digest_claims_are_incoming_only(session, record):
+        return False, "unsafe_digest_nonincoming_driver"
     source_chat_ids = _parse_digest_source_chat_ids(record)
     if source_chat_ids is None:
         return False, "unsafe_digest_missing_source_chat_ids"
@@ -766,7 +786,7 @@ def cancel_unsafe_pending_digests(
     )
     cancelled = 0
     for record in records:
-        safe, reason = _digest_retry_is_safe(record, ignored_chat_ids)
+        safe, reason = _digest_retry_is_safe(session, record, ignored_chat_ids)
         if not safe:
             _cancel_unsafe_digest(session, record, reason or "unsafe_digest")
             cancelled += 1
@@ -792,7 +812,7 @@ def retry_pending_digests(
     )
     sent = 0
     for record in candidates:
-        safe, reason = _digest_retry_is_safe(record, ignored_chat_ids)
+        safe, reason = _digest_retry_is_safe(session, record, ignored_chat_ids)
         if not safe:
             _cancel_unsafe_digest(session, record, reason or "unsafe_digest")
             continue
@@ -848,6 +868,9 @@ def send_claimed_digest(
         )
     )
     if not record:
+        return False
+    if not digest_claims_are_incoming_only(session, record):
+        cancel_digest_with_nonincoming_claims(session, record)
         return False
     if not _digest_is_sendable(record):
         return False
@@ -986,14 +1009,34 @@ def _is_retry_safe_p0_alert(session: Session, job: AlertJob) -> bool:
     message = get_message(session, job.chat_id, job.message_id)
     return bool(
         message
+        and message.is_outgoing is False
         and message.p0_classification == P0Status.p0_strict.value
         and message.p0_confidence is not None
         and message.p0_confidence >= P0_MIN_CONFIDENCE
     )
 
 
+def _set_alert_cancelled(job: AlertJob, reason: str) -> None:
+    job.status = "cancelled"
+    job.subject = ""
+    job.text_body = ""
+    job.html_body = ""
+    job.next_attempt_at = None
+    job.claimed_at = None
+    job.claim_token = None
+    job.last_error_safe = reason
+
+
+def _cancel_unsafe_alert(session: Session, job: AlertJob, reason: str) -> None:
+    _set_alert_cancelled(job, reason)
+    session.commit()
+
+
 def send_alert_job(session: Session, job: AlertJob, email_sender, now: datetime) -> bool:
-    if job.status == "sent" or not _is_retry_safe_p0_alert(session, job):
+    if job.status == "sent":
+        return False
+    if not _is_retry_safe_p0_alert(session, job):
+        _cancel_unsafe_alert(session, job, "unsafe_p0_retry_source")
         return False
     token = uuid4().hex
     claimed = claim_pending_alert(session, job.id, job.next_attempt_at or now, token)
@@ -1019,6 +1062,7 @@ def send_claimed_alert(
     if not job:
         return False
     if not _is_retry_safe_p0_alert(session, job):
+        _cancel_unsafe_alert(session, job, "unsafe_p0_retry_source")
         return False
     try:
         email_sender.send(
@@ -1049,6 +1093,7 @@ def retry_pending_alerts(
 ) -> int:
     now = _utc_db_time(now)
     release_stale_alert_claims(session, now)
+    cancel_legacy_alerts(session)
     stmt = (
         select(AlertJob.id)
         .join(
@@ -1059,6 +1104,7 @@ def retry_pending_alerts(
         .where(AlertJob.status == "pending")
         .where(AlertJob.next_attempt_at <= now)
         .where(AlertJob.alert_type == "p0")
+        .where(MessageRecord.is_outgoing.is_(False))
         .where(MessageRecord.p0_classification == P0Status.p0_strict.value)
         .where(MessageRecord.p0_confidence >= P0_MIN_CONFIDENCE)
         .order_by(AlertJob.created_at, AlertJob.id)
@@ -1086,11 +1132,7 @@ def cancel_legacy_alerts(session: Session) -> int:
     for job in jobs:
         if _is_retry_safe_p0_alert(session, job):
             continue
-        job.status = "cancelled"
-        job.next_attempt_at = None
-        job.claimed_at = None
-        job.claim_token = None
-        job.last_error_safe = "legacy_alert_cancelled"
+        _set_alert_cancelled(job, "legacy_alert_cancelled")
         cancelled += 1
     session.commit()
     return cancelled

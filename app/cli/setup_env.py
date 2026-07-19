@@ -21,6 +21,10 @@ EMAIL_FIELDS = [
     ("EMAIL_FROM", False, ""),
     ("EMAIL_TO", False, ""),
 ]
+GMAIL_EMAIL_FIELDS = [
+    ("GMAIL_SENDER_EMAIL", False, "fnikonov999@gmail.com"),
+    ("GMAIL_RECIPIENT_EMAIL", False, ""),
+]
 
 
 def quote_dotenv_value(value: str) -> str:
@@ -52,7 +56,7 @@ def main() -> None:
     if email_transport == "gmail_api":
         values["GMAIL_OAUTH_CLIENT_SECRET_PATH"] = "secrets/google_oauth_client.json"  # noqa: S105
         values["GMAIL_OAUTH_TOKEN_PATH"] = "data/gmail_oauth_token.json"  # noqa: S105
-        flow_fields = [*EMAIL_FIELDS, *FIELDS]
+        flow_fields = [*GMAIL_EMAIL_FIELDS, *FIELDS]
     else:
         flow_fields = [*SMTP_FIELDS, *EMAIL_FIELDS, *FIELDS]
     for name, secret, default in flow_fields:

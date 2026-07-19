@@ -978,8 +978,8 @@ def test_legacy_review_alert_is_not_retried_and_can_be_cancelled(session, now) -
 
     assert repository.retry_pending_alerts(session, email, now=now) == 0
     assert email.sent == []
-    assert repository.cancel_legacy_alerts(session) == 1
     assert job.status == "cancelled"
+    assert repository.cancel_legacy_alerts(session) == 0
 
 
 def test_legacy_p0_alert_without_confirmed_p0_is_not_retried(session, now) -> None:
@@ -997,8 +997,119 @@ def test_legacy_p0_alert_without_confirmed_p0_is_not_retried(session, now) -> No
     )
 
     assert repository.retry_pending_alerts(session, FakeEmail(), now=now) == 0
-    assert repository.cancel_legacy_alerts(session) == 1
     assert job.status == "cancelled"
+    assert repository.cancel_legacy_alerts(session) == 0
+
+
+@pytest.mark.parametrize("is_outgoing", [True, None], ids=["outgoing", "unknown"])
+def test_unsafe_direction_legacy_p0_retry_is_cancelled_without_churn(
+    session,
+    now,
+    caplog,
+    is_outgoing,
+) -> None:
+    marker = "synthetic-private-alert-marker"
+    email = FakeEmail()
+    message = msg(
+        chat_id="legacy-self",
+        message_id=20,
+        text="synthetic unsafe retry source",
+        is_outgoing=bool(is_outgoing),
+    )
+    repository.save_message(session, message)
+    stored = repository.get_message(session, message.chat_id, message.message_id)
+    stored.is_outgoing = is_outgoing
+    repository.mark_p0_classified(
+        session,
+        message.chat_id,
+        message.message_id,
+        P0Status.p0_strict.value,
+        now,
+        confidence=0.99,
+    )
+    job = repository.create_alert_job(
+        session,
+        chat_id=message.chat_id,
+        message_id=message.message_id,
+        alert_type="p0",
+        subject="synthetic subject",
+        text_body=marker,
+        html_body=f"<p>{marker}</p>",
+        now=now,
+    )
+
+    assert repository.retry_pending_alerts(session, email, now=now) == 0
+    assert email.sent == []
+    session.refresh(job)
+    assert job.status == "cancelled"
+    assert job.subject == ""
+    assert job.text_body == ""
+    assert job.html_body == ""
+    assert job.next_attempt_at is None
+    assert job.claimed_at is None
+    assert job.claim_token is None
+    assert marker not in caplog.text
+
+    assert repository.release_stale_alert_claims(
+        session,
+        now + timedelta(hours=1),
+    ) == 0
+    assert repository.retry_pending_alerts(
+        session,
+        email,
+        now=now + timedelta(hours=1),
+    ) == 0
+    session.refresh(job)
+    assert job.status == "cancelled"
+
+
+@pytest.mark.parametrize("is_outgoing", [True, None], ids=["outgoing", "unknown"])
+def test_claimed_unsafe_direction_p0_retry_is_cancelled_defensively(
+    session,
+    now,
+    is_outgoing,
+) -> None:
+    message = msg(chat_id="claimed-self", message_id=21, text="synthetic source")
+    repository.save_message(session, message)
+    repository.mark_p0_classified(
+        session,
+        message.chat_id,
+        message.message_id,
+        P0Status.p0_strict.value,
+        now,
+        confidence=0.99,
+    )
+    job = repository.create_alert_job(
+        session,
+        chat_id=message.chat_id,
+        message_id=message.message_id,
+        alert_type="p0",
+        subject="synthetic subject",
+        text_body="synthetic body",
+        html_body="<p>synthetic body</p>",
+        now=now,
+    )
+    claim_id = "synthetic-claim-id"
+    claimed = repository.claim_pending_alert(session, job.id, now, claim_id)
+    assert claimed is not None
+    stored = repository.get_message(session, message.chat_id, message.message_id)
+    stored.is_outgoing = is_outgoing
+    session.commit()
+    email = FakeEmail()
+
+    assert repository.send_claimed_alert(
+        session,
+        job.id,
+        claim_id,
+        email,
+        now,
+    ) is False
+
+    session.refresh(job)
+    assert email.sent == []
+    assert job.status == "cancelled"
+    assert job.claimed_at is None
+    assert job.claim_token is None
 
 
 def test_legacy_p0_with_false_positive_status_but_no_llm_marker_is_cancelled(session, now) -> None:
@@ -1026,8 +1137,8 @@ def test_legacy_p0_with_false_positive_status_but_no_llm_marker_is_cancelled(ses
 
     assert repository.retry_pending_alerts(session, email, now=now) == 0
     assert email.sent == []
-    assert repository.cancel_legacy_alerts(session) == 1
     assert job.status == "cancelled"
+    assert repository.cancel_legacy_alerts(session) == 0
 
 
 def test_new_policy_p0_with_marker_and_confidence_can_retry(session, now) -> None:
@@ -1100,8 +1211,23 @@ def test_incoming_private_text_triggers_immediate_llm_p0_classification(session,
     assert llm.calls == 1
 
 
-def test_outgoing_message_does_not_trigger_llm(session, settings) -> None:
-    message = msg(text="я отвечу", is_outgoing=True)
+@pytest.mark.parametrize(
+    ("chat_type", "raw_text"),
+    [
+        (ChatType.private, "@fedocc привет"),
+        (ChatType.private, "срочно ответь"),
+        (ChatType.private, "завтра в 10 вылет ты готов?"),
+        (ChatType.group, "@fedocc привет"),
+        (ChatType.channel, "@fedocc привет"),
+    ],
+)
+def test_outgoing_message_never_triggers_p0(
+    session,
+    settings,
+    chat_type,
+    raw_text,
+) -> None:
+    message = msg(text=raw_text, chat_type=chat_type, is_outgoing=True)
     repository.save_message(session, message)
     llm = FakeLLM()
 
@@ -1159,6 +1285,46 @@ def test_private_media_with_nonurgent_caption_does_not_send_email(session, setti
     assert email.sent == []
     assert repository.get_message(session, "1", 1).p0_classification == "NOT_P0"
     assert repository.pending_alert_jobs(session) == []
+
+
+@pytest.mark.parametrize("mention", ["@fedocc привет", "@Fedocc привет"])
+def test_private_exact_mention_overrides_small_talk(session, settings, mention) -> None:
+    message = msg(text=mention)
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(
+        session,
+        message,
+        FakeLLM(status=P0Status.not_p0),
+        email,
+        settings=settings,
+    ) is True
+
+    body = email.sent[0][1]
+    assert "Почему срочно: Сообщение содержит прямое упоминание @fedocc." in body
+    assert "Что сделать: Открыть Telegram и ответить." in body
+    assert "Срок: не указан" in body
+
+
+@pytest.mark.parametrize("mention", ["@fedocc_bot привет", "@fedoccc привет"])
+def test_private_username_suffix_is_not_a_direct_mention(
+    session,
+    settings,
+    mention,
+) -> None:
+    message = msg(text=mention)
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(
+        session,
+        message,
+        FakeLLM(status=P0Status.p0_strict, confidence=0.99),
+        email,
+        settings=settings,
+    ) is False
+    assert email.sent == []
 
 
 def test_group_message_without_routing_does_not_trigger_immediate_llm(session, settings) -> None:
@@ -1232,6 +1398,63 @@ def test_group_media_caption_exact_mention_sends_email(session, settings) -> Non
     assert llm.payloads[0]["message"]["policy"]["direct_mention"] is True
     assert len(email.sent) == 1
     assert "Исходный текст:\n@fedocc это важно" in email.sent[0][1]
+
+
+@pytest.mark.parametrize(
+    "raw_text",
+    [
+        "Опубликовано распределение студентов",
+        "Расписание на завтра",
+        "Дедлайн сдачи работы завтра",
+        "Новое видео",
+        "срочно ответьте до 18:00",
+    ],
+)
+def test_channel_ordinary_content_is_digest_only(session, settings, raw_text) -> None:
+    settings.p0_classify_all_groups = True
+    message = msg(chat_id="c1", chat_type=ChatType.channel, text=raw_text)
+    repository.save_message(session, message)
+    llm = FakeLLM(status=P0Status.p0_strict, confidence=0.99)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(session, message, llm, email, settings=settings) is False
+    assert llm.calls == 0
+    assert email.sent == []
+
+
+def test_channel_media_without_mention_is_digest_only(session, settings) -> None:
+    message = msg(
+        chat_id="c1",
+        chat_type=ChatType.channel,
+        text=None,
+        media_type=MediaType.video,
+    )
+    repository.save_message(session, message)
+    llm = FakeLLM(status=P0Status.p0_strict)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(session, message, llm, email, settings=settings) is False
+    assert llm.calls == 0
+    assert email.sent == []
+
+
+def test_channel_exact_mention_is_the_only_deterministic_override(session, settings) -> None:
+    message = msg(
+        chat_id="c1",
+        chat_type=ChatType.channel,
+        text="Федя @fedocc это важно",
+    )
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(
+        session,
+        message,
+        FakeLLM(status=P0Status.not_p0),
+        email,
+        settings=settings,
+    ) is True
+    assert "Сообщение содержит прямое упоминание @fedocc." in email.sent[0][1]
 
 
 def test_ignored_group_exact_mention_is_not_processed(

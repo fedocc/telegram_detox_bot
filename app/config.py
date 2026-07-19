@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     email_transport: str = "gmail_api"
     gmail_oauth_client_secret_path: Path = Path("secrets/google_oauth_client.json")
     gmail_oauth_token_path: Path = Path("data/gmail_oauth_token.json")
+    gmail_sender_email: str = "fnikonov999@gmail.com"
+    gmail_recipient_email: str = ""
 
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 465
@@ -49,7 +51,7 @@ class Settings(BaseSettings):
     p0_classify_watchlist_chats: bool = True
     p0_watchlist_chat_ids: str = ""
     p0_watchlist_keywords: str = ""
-    p0_mention_usernames: str = "fedocc"
+    p0_mention_usernames: str = "fedocc,me,fedornikonov"
     p0_trusted_sender_ids: str = ""
     p0_max_context_messages: int = Field(default=5, ge=0, le=20)
     p0_max_message_chars: int = Field(default=1000, ge=100, le=5000)
@@ -100,6 +102,13 @@ class Settings(BaseSettings):
         if not 0 <= hour <= 23 or not 0 <= minute <= 59:
             raise ValueError("BIRTHDAY_REMINDER_TIME must use HH:MM")
         return f"{hour:02d}:{minute:02d}"
+
+    @model_validator(mode="after")
+    def preserve_legacy_gmail_recipient(self):
+        # Existing deployments used EMAIL_TO for both Gmail API and SMTP.
+        if not self.gmail_recipient_email and self.email_to:
+            self.gmail_recipient_email = self.email_to
+        return self
 
     def ensure_runtime_dirs(self) -> None:
         Path("data").mkdir(mode=0o700, exist_ok=True)

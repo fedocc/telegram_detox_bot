@@ -54,6 +54,8 @@ def _should_mark_old_review(message: StoredMessage) -> bool:
     if message.media_type != MediaType.none and not (message.text or message.caption):
         return False
     text = message.text or message.caption
+    if message.chat_type == ChatType.channel:
+        return False
     if message.chat_type == ChatType.private:
         return is_p0_candidate(text) or is_urgent_call_candidate(text)
     return is_p0_candidate(text) or is_urgent_call_candidate(text)
@@ -181,7 +183,7 @@ async def run_startup_backfill(
                     stats.duplicates_skipped += 1
                 else:
                     stats.messages_inserted += 1
-                    if _should_run_immediate_p0(
+                    if not stored.is_outgoing and _should_run_immediate_p0(
                         stored,
                         now=now,
                         immediate_window_minutes=settings.p0_backfill_immediate_window_minutes,

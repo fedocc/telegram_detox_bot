@@ -71,8 +71,8 @@ def gmail_settings(tmp_path: Path) -> Settings:
         email_transport="gmail_api",
         gmail_oauth_client_secret_path=tmp_path / "google_oauth_client.json",
         gmail_oauth_token_path=tmp_path / "gmail_oauth_token.json",
-        email_from="from@example.com",
-        email_to="to@example.com",
+        gmail_sender_email="from@example.com",
+        gmail_recipient_email="to@example.com",
     )
 
 
@@ -111,6 +111,14 @@ class FakeGmailService:
 
     def users(self):
         return FakeUsers(self)
+
+    def userinfo(self):
+        return FakeUserInfo()
+
+
+class FakeUserInfo:
+    def get(self):
+        return FakeExecute({"email": "from@example.com"})
 
 
 class FakeHttpResponse:
@@ -276,6 +284,20 @@ def test_gmail_api_sender_sets_from_to_subject_and_message_id(tmp_path, monkeypa
     assert message["Message-ID"] == "<stable@test>"
 
 
+def test_gmail_api_sender_rejects_authenticated_account_mismatch(tmp_path, monkeypatch) -> None:
+    settings = gmail_settings(tmp_path)
+    settings.gmail_sender_email = "different@example.com"
+    token_file(settings.gmail_oauth_token_path)
+    service = FakeGmailService()
+    monkeypatch.setattr("app.email.sender.Credentials", FakeCredentials)
+    monkeypatch.setattr("app.email.sender.build", lambda *args, **kwargs: service)
+
+    with pytest.raises(EmailSendError, match="does not match GMAIL_SENDER_EMAIL"):
+        GmailApiSender(settings).send("Subject", "plain")
+
+    assert not service.calls
+
+
 def test_gmail_api_sender_uses_base64url_raw_payload(tmp_path, monkeypatch) -> None:
     settings = gmail_settings(tmp_path)
     token_file(settings.gmail_oauth_token_path)
@@ -420,6 +442,124 @@ def test_missing_gmail_token_fails_clearly(tmp_path) -> None:
 
     with pytest.raises(EmailSendError, match="Gmail OAuth token missing"):
         GmailApiSender(settings).send("Subject", "plain", "<p>html</p>")
+
+
+def test_insecure_existing_token_is_rejected_before_loader_or_google_api(
+    tmp_path,
+    monkeypatch,
+    caplog,
+) -> None:
+    settings = gmail_settings(tmp_path)
+    token_marker = "runtime-token-content-marker"  # noqa: S105
+    settings.gmail_oauth_token_path.write_text(token_marker, encoding="utf-8")
+    settings.gmail_oauth_token_path.chmod(0o644)
+    calls = {"credentials": 0, "google": 0}
+
+    class NeverReadCredentials:
+        @classmethod
+        def from_authorized_user_file(cls, path, scopes):
+            calls["credentials"] += 1
+            raise AssertionError("insecure token reached credentials loader")
+
+    def never_build_google_client(*args, **kwargs):
+        calls["google"] += 1
+        raise AssertionError("insecure token reached Google API construction")
+
+    monkeypatch.setattr("app.email.sender.Credentials", NeverReadCredentials)
+    monkeypatch.setattr("app.email.sender.build", never_build_google_client)
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(
+            EmailSendError,
+            match="Gmail token file permissions are insecure; expected 0600",
+        ) as exc_info:
+            GmailApiSender(settings).send("Subject", "plain")
+
+    assert calls == {"credentials": 0, "google": 0}
+    assert token_marker not in str(exc_info.value)
+    assert token_marker not in caplog.text
+
+
+def test_token_mode_stat_error_fails_closed_before_loader_or_google_api(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    settings = gmail_settings(tmp_path)
+    token_file(settings.gmail_oauth_token_path)
+    calls = {"credentials": 0, "google": 0}
+    real_stat = Path.stat
+
+    class NeverReadCredentials:
+        @classmethod
+        def from_authorized_user_file(cls, path, scopes):
+            calls["credentials"] += 1
+            raise AssertionError("unstatable token reached credentials loader")
+
+    def fail_token_stat(path, *args, **kwargs):
+        if path == settings.gmail_oauth_token_path:
+            raise OSError("stat denied")
+        return real_stat(path, *args, **kwargs)
+
+    def never_build_google_client(*args, **kwargs):
+        calls["google"] += 1
+        raise AssertionError("unstatable token reached Google API construction")
+
+    monkeypatch.setattr(Path, "stat", fail_token_stat)
+    monkeypatch.setattr("app.email.sender.Credentials", NeverReadCredentials)
+    monkeypatch.setattr("app.email.sender.build", never_build_google_client)
+
+    with pytest.raises(
+        EmailSendError,
+        match="Gmail token file permissions are insecure; expected 0600",
+    ):
+        GmailApiSender(settings).send("Subject", "plain")
+
+    assert calls == {"credentials": 0, "google": 0}
+
+
+def test_secure_existing_token_reaches_credentials_loader(tmp_path, monkeypatch) -> None:
+    settings = gmail_settings(tmp_path)
+    token_file(settings.gmail_oauth_token_path)
+    service = FakeGmailService()
+    FakeCredentials.loaded_path = None
+    monkeypatch.setattr("app.email.sender.Credentials", FakeCredentials)
+    monkeypatch.setattr("app.email.sender.build", lambda *args, **kwargs: service)
+
+    GmailApiSender(settings).send("Subject", "plain")
+
+    assert FakeCredentials.loaded_path == str(settings.gmail_oauth_token_path)
+    assert service.calls[0][0] == "send"
+
+
+def test_account_check_rejects_insecure_existing_token_before_google_api(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    settings = gmail_settings(tmp_path)
+    token_file(settings.gmail_oauth_token_path)
+    settings.gmail_oauth_token_path.chmod(0o644)
+    calls = {"credentials": 0, "google": 0}
+
+    class NeverReadCredentials:
+        @classmethod
+        def from_authorized_user_file(cls, path, scopes):
+            calls["credentials"] += 1
+            raise AssertionError("insecure account-check token reached credentials loader")
+
+    def never_build_google_client(*args, **kwargs):
+        calls["google"] += 1
+        raise AssertionError("insecure account-check token reached Google API")
+
+    monkeypatch.setattr("app.email.sender.Credentials", NeverReadCredentials)
+    monkeypatch.setattr("app.email.sender.build", never_build_google_client)
+
+    with pytest.raises(
+        EmailSendError,
+        match="Gmail token file permissions are insecure; expected 0600",
+    ):
+        GmailApiSender(settings).account_status()
+
+    assert calls == {"credentials": 0, "google": 0}
 
 
 def test_gmail_token_and_client_secret_never_appear_in_logs(tmp_path, monkeypatch, caplog) -> None:

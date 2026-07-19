@@ -5,6 +5,8 @@ import json
 import os
 import smtplib
 import ssl
+import stat
+import tempfile
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -22,9 +24,19 @@ except ImportError:  # pragma: no cover - exercised only without optional deps i
     HttpError = None
 
 GMAIL_SEND_SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
+GOOGLE_IDENTITY_SCOPES = ["https://www.googleapis.com/auth/userinfo.email"]
+GMAIL_OAUTH_SCOPES = [*GMAIL_SEND_SCOPES, *GOOGLE_IDENTITY_SCOPES]
 
 
 class EmailSendError(RuntimeError):
+    pass
+
+
+class CredentialPermissionError(RuntimeError):
+    pass
+
+
+class CredentialFileMissingError(CredentialPermissionError):
     pass
 
 
@@ -41,21 +53,71 @@ GMAIL_ERROR_HINTS = {
 def _chmod_600(path: Path) -> None:
     try:
         os.chmod(path, 0o600)
-    except OSError:
-        pass
+    except OSError as exc:
+        raise CredentialPermissionError(
+            "Could not set credential file permissions to 600."
+        ) from exc
+
+
+def _verify_mode_600(path: Path) -> None:
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        raise CredentialFileMissingError("Credential file is missing.") from None
+    except OSError as exc:
+        raise CredentialPermissionError("Could not verify credential file permissions.") from exc
+    if mode != 0o600:
+        raise CredentialPermissionError("Credential file permissions must be 600.")
 
 
 def _atomic_write_secret(path: Path, text: str) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    _chmod_600(tmp)
-    os.replace(tmp, path)
-    _chmod_600(path)
+    tmp_path: Path | None = None
+    replaced = False
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp.write(text)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            tmp_path = Path(tmp.name)
+        _chmod_600(tmp_path)
+        _verify_mode_600(tmp_path)
+        os.replace(tmp_path, path)
+        tmp_path = None
+        replaced = True
+        _chmod_600(path)
+        _verify_mode_600(path)
+    except Exception:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError as cleanup_exc:
+                raise CredentialPermissionError(
+                    "Could not remove an incomplete credential file."
+                ) from cleanup_exc
+        if replaced:
+            try:
+                _verify_mode_600(path)
+            except CredentialPermissionError:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as cleanup_exc:
+                    raise CredentialPermissionError(
+                        "Could not remove an insecure credential file."
+                    ) from cleanup_exc
+        raise
 
 
 def _build_message(
-    settings: Settings,
+    sender_email: str,
+    recipient_email: str,
     subject: str,
     text: str,
     html: str | None = None,
@@ -64,8 +126,8 @@ def _build_message(
 ) -> EmailMessage:
     msg = EmailMessage()
     msg["Subject"] = subject
-    msg["From"] = settings.email_from
-    msg["To"] = settings.email_to
+    msg["From"] = sender_email
+    msg["To"] = recipient_email
     if message_id:
         msg["Message-ID"] = message_id
     msg.set_content(text)
@@ -109,6 +171,20 @@ def _gmail_http_error_summary(exc) -> str:
     return "\n".join(lines)
 
 
+def authenticated_sender_email(credentials) -> str:
+    if build is None:
+        raise EmailSendError("Google account check dependencies missing")
+    try:
+        service = build("oauth2", "v2", credentials=credentials, cache_discovery=False)
+        profile = service.userinfo().get().execute()
+    except Exception as exc:
+        raise EmailSendError("Google account check failed") from exc
+    email = profile.get("email") if isinstance(profile, dict) else None
+    if not isinstance(email, str) or not email.strip():
+        raise EmailSendError("Google account check returned no email")
+    return email.strip()
+
+
 class SmtpEmailSender:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -121,7 +197,14 @@ class SmtpEmailSender:
         *,
         message_id: str | None = None,
     ) -> None:
-        msg = _build_message(self.settings, subject, text, html, message_id=message_id)
+        msg = _build_message(
+            self.settings.email_from,
+            self.settings.email_to,
+            subject,
+            text,
+            html,
+            message_id=message_id,
+        )
         try:
             if self.settings.smtp_tls_mode == "ssl":
                 with smtplib.SMTP_SSL(
@@ -164,14 +247,20 @@ class GmailApiSender:
         if Credentials is None or Request is None:
             raise EmailSendError("Gmail API dependencies missing")
         token_path = self.settings.gmail_oauth_token_path
-        if not token_path.exists():
+        try:
+            _verify_mode_600(token_path)
+        except CredentialFileMissingError:
             raise EmailSendError(
                 "Gmail OAuth token missing. Run: .venv/bin/python -m app.cli.gmail_auth"
-            )
+            ) from None
+        except CredentialPermissionError:
+            raise EmailSendError(
+                "Gmail token file permissions are insecure; expected 0600"
+            ) from None
         try:
             creds = Credentials.from_authorized_user_file(
                 str(token_path),
-                scopes=GMAIL_SEND_SCOPES,
+                scopes=GMAIL_OAUTH_SCOPES,
             )
         except Exception as exc:
             raise EmailSendError("Gmail OAuth token invalid") from exc
@@ -182,10 +271,27 @@ class GmailApiSender:
                 creds.refresh(Request())
             except Exception as exc:
                 raise EmailSendError("Gmail OAuth token refresh failed") from exc
-            _atomic_write_secret(token_path, creds.to_json())
+            try:
+                _atomic_write_secret(token_path, creds.to_json())
+            except CredentialPermissionError as exc:
+                raise EmailSendError(str(exc)) from exc
         if not getattr(creds, "valid", True):
             raise EmailSendError("Gmail OAuth token invalid")
         return creds
+
+    def _account_status_for_credentials(self, credentials) -> tuple[str, str, bool]:
+        recipient = self.settings.gmail_recipient_email.strip()
+        authenticated = authenticated_sender_email(credentials)
+        configured_sender = self.settings.gmail_sender_email.strip()
+        can_send = bool(
+            recipient
+            and configured_sender
+            and authenticated.casefold() == configured_sender.casefold()
+        )
+        return authenticated, recipient, can_send
+
+    def account_status(self) -> tuple[str, str, bool]:
+        return self._account_status_for_credentials(self._credentials())
 
     def send(
         self,
@@ -198,7 +304,21 @@ class GmailApiSender:
         if build is None:
             raise EmailSendError("Gmail API dependencies missing")
         creds = self._credentials()
-        msg = _build_message(self.settings, subject, text, html, message_id=message_id)
+        authenticated, recipient, can_send = self._account_status_for_credentials(creds)
+        if not self.settings.gmail_sender_email.strip():
+            raise EmailSendError("GMAIL_SENDER_EMAIL is required")
+        if not recipient:
+            raise EmailSendError("GMAIL_RECIPIENT_EMAIL is required")
+        if not can_send:
+            raise EmailSendError("Authenticated Gmail account does not match GMAIL_SENDER_EMAIL")
+        msg = _build_message(
+            authenticated,
+            recipient,
+            subject,
+            text,
+            html,
+            message_id=message_id,
+        )
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
         try:
             service = build("gmail", "v1", credentials=creds, cache_discovery=False)

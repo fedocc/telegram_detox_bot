@@ -53,6 +53,61 @@ sudo -u telegram-detox .venv/bin/python -m app.cli.cancel_legacy_alerts
 The OAuth client JSON and token are secrets. After copying them to a VPS, keep mode
 `600`. The VPS refreshes the OAuth token; it does not open a browser.
 
+### Change to the dedicated Gmail sender
+
+Keep the existing main Gmail recipient. Do not print the environment file or either OAuth
+JSON file while completing these steps.
+
+1. Stop the service:
+
+   ```bash
+   sudo systemctl stop telegram-detox
+   ```
+
+2. In `/opt/telegram-detox/.env`, set `GMAIL_SENDER_EMAIL=fnikonov999@gmail.com` and set
+   `GMAIL_RECIPIENT_EMAIL` to the existing recipient value.
+
+3. Back up the old token without displaying it:
+
+   ```bash
+   cd /opt/telegram-detox
+   sudo -u telegram-detox bash -c '
+     backup_path=$(mktemp "data/gmail_oauth_token.json.bak.$(date -u +%Y%m%d_%H%M%S).XXXXXX") &&
+     install -m 600 data/gmail_oauth_token.json "$backup_path"
+   '
+   ```
+
+   `mktemp` creates an exclusive filename, so repeated migrations cannot overwrite an earlier
+   backup. The auth CLI creates another unique backup before replacing the token and aborts if
+   either the backup or replacement token cannot be verified as mode `600`.
+
+4. Run Gmail OAuth on an interactive machine where the browser callback is reachable:
+
+   ```bash
+   .venv/bin/python -m app.cli.gmail_auth
+   ```
+
+   Log in as `fnikonov999@gmail.com`. If authentication is performed on another machine,
+   transfer only the resulting token through a secure channel, preserve the production backup,
+   and set the production token owner to `telegram-detox` with mode `600`.
+
+5. On the VPS, verify the accounts and send the test message:
+
+   ```bash
+   sudo -u telegram-detox .venv/bin/python -m app.cli.test_email --account-check
+   sudo -u telegram-detox .venv/bin/python -m app.cli.test_email
+   ```
+
+   Require `can_send=true`, verify the recipient is unchanged, and confirm receipt of the
+   `[Telegram Detox][Test] Gmail sender check` message.
+
+6. Restart the service:
+
+   ```bash
+   sudo systemctl start telegram-detox
+   sudo systemctl status telegram-detox --no-pager -l
+   ```
+
 ## 4. Install and operate systemd
 
 ```bash

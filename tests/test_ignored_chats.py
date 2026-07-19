@@ -87,6 +87,44 @@ async def test_ignored_live_event_is_rejected_before_mapping_or_storage(
     assert private_text not in caplog.text
 
 
+async def test_live_outgoing_message_is_context_only(
+    settings,
+    session_factory,
+    monkeypatch,
+    caplog,
+) -> None:
+    private_marker = "OUTGOING_CONTEXT_ONLY_MARKER"
+    outgoing = msg(text=private_marker, is_outgoing=True)
+
+    async def map_outgoing(event):
+        return outgoing
+
+    monkeypatch.setattr("app.telegram.client.event_to_stored_message", map_outgoing)
+    llm = NeverCalledLLM()
+    email = FakeEmail()
+
+    with caplog.at_level(logging.DEBUG):
+        processed = await ingest_event(
+            SimpleNamespace(chat_id=outgoing.chat_id),
+            settings=settings,
+            session_factory=session_factory,
+            llm=llm,
+            email=email,
+            ignored_chat_ids=set(),
+        )
+
+    with session_factory() as session:
+        stored = repository.get_message(session, outgoing.chat_id, outgoing.message_id)
+        assert stored is not None
+        assert stored.is_outgoing is True
+        assert stored.p0_classification is None
+        assert repository.pending_alert_jobs(session) == []
+    assert processed is True
+    assert llm.calls == 0
+    assert email.sent == []
+    assert private_marker not in caplog.text
+
+
 def test_ignored_chat_does_not_create_p0_or_context(session, settings, monkeypatch) -> None:
     message = msg(chat_id="ignored", text="ответь сейчас")
     repository.save_message(session, message)
@@ -158,13 +196,28 @@ def _pending_digest_with_chat_ids(session, chat_ids: list[str], private_marker: 
             for index, chat_id in enumerate(chat_ids, start=1)
         ],
     )
-    return repository.save_digest(
+    record = repository.save_digest(
         session,
         digest,
         f"<p>{private_marker}</p>",
         subject="[Telegram Detox][Digest] test",
         text=private_marker,
     )
+    for index, chat_id in enumerate(chat_ids, start=1):
+        message_id = record.id * 1000 + index
+        repository.save_message(
+            session,
+            msg(
+                chat_id=chat_id,
+                message_id=message_id,
+                text="synthetic incoming retry source",
+            ),
+        )
+        stored = repository.get_message(session, chat_id, message_id)
+        assert stored is not None
+        stored.claimed_digest_id = record.id
+    session.commit()
+    return record
 
 
 def test_old_pending_digest_without_source_metadata_is_cancelled(session, caplog) -> None:

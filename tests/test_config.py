@@ -68,4 +68,30 @@ def test_birthday_reminder_time_is_validated() -> None:
 
 
 def test_p0_mention_username_default() -> None:
-    assert Settings(_env_file=None).p0_mention_usernames == "fedocc"
+    assert Settings(_env_file=None).p0_mention_usernames == "fedocc,me,fedornikonov"
+
+
+def test_gmail_sender_defaults_to_dedicated_account() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.gmail_sender_email == "fnikonov999@gmail.com"
+
+
+def test_legacy_email_to_preserves_existing_gmail_recipient() -> None:
+    settings = Settings(
+        _env_file=None,
+        email_to="current-recipient@example.com",
+        gmail_recipient_email="",
+    )
+
+    assert settings.gmail_recipient_email == "current-recipient@example.com"
+
+
+def test_explicit_gmail_recipient_takes_precedence_over_legacy_email_to() -> None:
+    settings = Settings(
+        _env_file=None,
+        email_to="legacy@example.com",
+        gmail_recipient_email="current-recipient@example.com",
+    )
+
+    assert settings.gmail_recipient_email == "current-recipient@example.com"

@@ -32,7 +32,7 @@ class MessageRecord(Base):
     sender_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
     message_id: Mapped[int] = mapped_column(Integer)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-    is_outgoing: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_outgoing: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     reply_to_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reply_to_is_mine: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     text: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -13,6 +13,8 @@ def test_env_and_session_files_are_ignored_by_git() -> None:
         "logs/app.log",
         "secrets/google_oauth_client.json",
         "data/gmail_oauth_token.json",
+        "data/gmail_oauth_token.json.bak",
+        "data/gmail_oauth_token.json.bak-test",
         "data/birthdays.json",
         "data/ignored_chats.json",
     ]

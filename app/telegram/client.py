@@ -55,14 +55,15 @@ async def ingest_event(
     stored = await event_to_stored_message(event)
     with session_factory() as session:
         repository.save_message(session, stored)
-        handle_p0_candidate(
-            session,
-            stored,
-            llm,
-            email,
-            settings=settings,
-            ignored_chat_ids=ignored_chat_ids,
-        )
+        if not stored.is_outgoing:
+            handle_p0_candidate(
+                session,
+                stored,
+                llm,
+                email,
+                settings=settings,
+                ignored_chat_ids=ignored_chat_ids,
+            )
     return True
 
 

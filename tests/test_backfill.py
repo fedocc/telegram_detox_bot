@@ -548,6 +548,59 @@ async def test_old_outgoing_backfill_is_not_p0_candidate(
     assert stored.p0_classification is None
 
 
+async def test_recent_outgoing_backfill_is_context_only_and_not_digested(
+    settings,
+    session_factory,
+    now,
+) -> None:
+    sender = _user(42, "Sender")
+    llm = FakeP0LLM(status=P0Status.p0_strict)
+    email = FakeEmail()
+    client = _client_with_private_messages(
+        [
+            FakeTelegramMessage(
+                message_id=1,
+                text="@fedocc срочно ответь",
+                timestamp=now - timedelta(minutes=10),
+                sender=sender,
+                out=True,
+            )
+        ]
+    )
+
+    stats = await run_startup_backfill(
+        client=client,
+        settings=settings,
+        session_factory=session_factory,
+        llm=llm,
+        email_sender=email,
+        now=now,
+    )
+
+    class NeverDigestLLM:
+        def daily_digest(self, payload):
+            raise AssertionError("outgoing-only chat reached digest LLM")
+
+    with session_factory() as session:
+        stored = repository.get_message(session, "1", 1)
+        digest = generate_digest(
+            session,
+            NeverDigestLLM(),
+            date(2026, 7, 7),
+            "Europe/Moscow",
+        )
+
+    assert stored is not None
+    assert stored.is_outgoing is True
+    assert stored.p0_classification is None
+    assert stored.p0_review_candidate is False
+    assert stats.p0_classifications_triggered == 0
+    assert llm.calls == 0
+    assert email.sent == []
+    assert digest.direct_messages == []
+    assert digest.group_updates == []
+
+
 async def test_recent_backfilled_private_messages_can_trigger_p0_classification(
     settings,
     session_factory,

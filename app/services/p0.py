@@ -224,15 +224,15 @@ def _russian_reason(
     message: StoredMessage,
     policy_context: PolicyContext,
 ) -> str:
-    if _is_private(message):
-        if policy_context["request_or_urgency"] or policy_context["response_expected"]:
-            return "похоже, от тебя ждут ответа или действия."
-        return "в личном сообщении есть важная информация, на которую стоит отреагировать."
     if policy_context["direct_mention"]:
         mention_username = policy_context.get("direct_mention_username")
         if isinstance(mention_username, str):
             return f"Сообщение содержит прямое упоминание @{mention_username}."
         return "Сообщение содержит прямое упоминание."
+    if _is_private(message):
+        if policy_context["request_or_urgency"] or policy_context["response_expected"]:
+            return "похоже, от тебя ждут ответа или действия."
+        return "в личном сообщении есть важная информация, на которую стоит отреагировать."
     if policy_context["reply_to_me"]:
         return "это ответ на твоё сообщение."
     if policy_context["urgent_or_important"]:
@@ -248,10 +248,10 @@ def _russian_action(
     message: StoredMessage,
     policy_context: PolicyContext | None = None,
 ) -> str:
-    if _is_private(message):
-        return "ответить в Telegram."
     if policy_context and policy_context["direct_mention"]:
         return "Открыть Telegram и ответить."
+    if _is_private(message):
+        return "ответить в Telegram."
     return "проверить сообщение и при необходимости ответить в Telegram."
 
 
@@ -288,6 +288,10 @@ def _is_private(message: StoredMessage) -> bool:
     return message.chat_type == ChatType.private
 
 
+def _is_channel(message: StoredMessage) -> bool:
+    return message.chat_type == ChatType.channel
+
+
 def _is_groupish(message: StoredMessage) -> bool:
     return message.chat_type in {ChatType.group, ChatType.supergroup, ChatType.channel}
 
@@ -297,7 +301,11 @@ def _is_non_text_media(message: StoredMessage) -> bool:
 
 
 def _mention_usernames(settings: Settings | None) -> set[str]:
-    configured = settings.p0_mention_usernames if settings is not None else "fedocc"
+    configured = (
+        settings.p0_mention_usernames
+        if settings is not None
+        else "fedocc,me,fedornikonov"
+    )
     return {
         item.strip().removeprefix("@").casefold()
         for item in configured.split(",")
@@ -305,17 +313,23 @@ def _mention_usernames(settings: Settings | None) -> set[str]:
     }
 
 
-def _matched_mention_username(
-    message: StoredMessage,
+def matched_mention_username(
+    text: str,
     settings: Settings | None,
 ) -> str | None:
-    text = message.text or message.caption or ""
     configured = _mention_usernames(settings)
     for match in re.finditer(r"(?<!\w)@([A-Za-z0-9_]+)(?![A-Za-z0-9_])", text):
         username = match.group(1).casefold()
         if username in configured:
             return username
     return None
+
+
+def _matched_mention_username(
+    message: StoredMessage,
+    settings: Settings | None,
+) -> str | None:
+    return matched_mention_username(message.text or message.caption or "", settings)
 
 
 def _replies_to_me(session: Session, message: StoredMessage) -> bool:
@@ -414,7 +428,7 @@ def _group_policy_context(
     raw_text = message.text or message.caption or ""
     direct_mention_username = _matched_mention_username(message, settings)
     direct_mention = direct_mention_username is not None
-    reply_to_me = _replies_to_me(session, message)
+    reply_to_me = False if _is_channel(message) else _replies_to_me(session, message)
     request_or_action = _has_request_or_action(raw_text)
     urgent_or_important = _has_urgency(raw_text) or _has_important_context(raw_text)
     response_expected = _response_may_be_expected(raw_text)
@@ -431,15 +445,18 @@ def _group_policy_context(
     mention_enabled = settings is None or settings.p0_classify_mentions
     reply_enabled = settings is None or settings.p0_classify_replies
     watchlist_enabled = settings is None or settings.p0_classify_watchlist_chats
-    deterministic_strict = bool(
-        (mention_enabled and direct_mention)
-        or (reply_enabled and reply_to_me)
-        or request_or_action
-        or urgent_or_important
-        or explicit_deadline
-        or response_expected
-        or (watchlist_enabled and watchlist_match)
-    )
+    if _is_channel(message):
+        deterministic_strict = bool(mention_enabled and direct_mention)
+    else:
+        deterministic_strict = bool(
+            (mention_enabled and direct_mention)
+            or (reply_enabled and reply_to_me)
+            or request_or_action
+            or urgent_or_important
+            or explicit_deadline
+            or response_expected
+            or (watchlist_enabled and watchlist_match)
+        )
     return {
         "small_talk": False,
         "direct_mention": direct_mention,
@@ -461,6 +478,9 @@ def _policy_context(
 ) -> PolicyContext:
     raw_text = message.text or message.caption or ""
     if _is_private(message):
+        direct_mention_username = _matched_mention_username(message, settings)
+        direct_mention = direct_mention_username is not None
+        mention_enabled = settings is None or settings.p0_classify_mentions
         request_or_action = _has_request_or_action(raw_text)
         planning_or_availability = _has_planning_or_availability(raw_text)
         urgent_or_important = _has_urgency(raw_text) or _has_important_context(raw_text)
@@ -468,14 +488,16 @@ def _policy_context(
         request_or_urgency = (
             request_or_action or planning_or_availability or urgent_or_important
         )
-        private_signal = _has_private_signal(raw_text)
+        private_signal = bool(
+            _has_private_signal(raw_text) or (mention_enabled and direct_mention)
+        )
         small_talk = _is_obvious_small_talk(raw_text) and not private_signal
         deterministic_strict = private_signal
         return {
             "small_talk": small_talk,
             "private_signal": private_signal,
-            "direct_mention": False,
-            "direct_mention_username": None,
+            "direct_mention": direct_mention,
+            "direct_mention_username": direct_mention_username,
             "reply_to_me": False,
             "request_or_urgency": request_or_urgency,
             "response_expected": response_expected,
@@ -499,9 +521,64 @@ def _should_classify_immediately(
         return True if settings is None else settings.p0_classify_private_text
     if not _is_groupish(message):
         return False
+    if _is_channel(message):
+        return policy_context["deterministic_strict"]
     if settings is not None and settings.p0_classify_all_groups:
         return True
     return policy_context["deterministic_strict"]
+
+
+def debug_p0_check(
+    chat_type: ChatType,
+    text: str,
+    settings: Settings,
+    *,
+    is_outgoing: bool = False,
+) -> dict[str, bool | str]:
+    if is_outgoing:
+        return {
+            "is_p0": False,
+            "reason_category": "self_message",
+            "matched_signal": "self_message",
+            "chat_type": chat_type.value,
+            "is_outgoing": True,
+        }
+    mention = matched_mention_username(text, settings)
+    if settings.p0_classify_mentions and mention is not None:
+        return {
+            "is_p0": True,
+            "reason_category": "direct_mention",
+            "matched_signal": "mention",
+            "chat_type": chat_type.value,
+            "is_outgoing": False,
+        }
+    if chat_type == ChatType.channel:
+        return {
+            "is_p0": False,
+            "reason_category": "channel_digest_only",
+            "matched_signal": "none",
+            "chat_type": chat_type.value,
+            "is_outgoing": False,
+        }
+    if chat_type == ChatType.private:
+        matched = _has_private_signal(text)
+        reason_category = "private_signal" if matched else "none"
+    else:
+        matched = bool(
+            _has_request_or_action(text)
+            or _has_urgency(text)
+            or _has_important_context(text)
+            or EXPLICIT_DEADLINE_RE.search(text)
+            or _response_may_be_expected(text)
+        )
+        reason_category = "group_signal" if matched else "none"
+    return {
+        "is_p0": matched,
+        "reason_category": reason_category,
+        "matched_signal": "policy" if matched else "none",
+        "chat_type": chat_type.value,
+        "is_outgoing": False,
+    }
 
 
 def _max_context_messages(settings: Settings | None) -> int:

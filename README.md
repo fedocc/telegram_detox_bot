@@ -17,7 +17,7 @@ Codex не является частью runtime-пайплайна. В runtime 
 
 - Private messages are never silently dropped unless their exact chat ID is configured in the explicit ignored-chat blacklist. After every LLM digest, the app checks all other incoming private message IDs for the day. Any private message omitted by the LLM is added to `REVIEW`.
 - Private messages are never counted as P3/background noise. If classification is uncertain, the message is surfaced for review.
-- Immediate email is reserved for `P0_STRICT`, with recall prioritized over precision. In private chats, requests, planning or availability questions, important context, urgency, and borderline messages where a response may be expected qualify; obvious small talk remains digest-only. In groups, exact configured username mentions, replies, urgency, importance, deadlines, actionable requests, questions, and watchlist matches qualify. Set exact usernames with `P0_MENTION_USERNAMES`.
+- Immediate email is reserved for `P0_STRICT`, with recall prioritized over precision. In private chats, requests, planning or availability questions, important context, urgency, and exact configured username mentions qualify; obvious small talk remains digest-only. In groups, exact mentions, replies, urgency, importance, deadlines, actionable requests, questions, and watchlist matches qualify. Channels are digest-only unless a post or media caption contains an exact configured mention. Set comma-separated exact usernames with `P0_MENTION_USERNAMES`.
 - Trusted private senders can lower uncertainty, but ordinary messages such as `привет` remain digest-only.
 - `P0_CANDIDATE` and `NOT_P0` stay in the digest.
 - Every `P0_STRICT` email is in Russian and includes chat title, sender, timestamp, a local classification reason, suggested action, a deadline derived from the message text, complete original text, and up to ten previous messages from the same chat. Model-generated English comments are not rendered.
@@ -29,6 +29,27 @@ Codex не является частью runtime-пайплайна. В runtime 
 ## How to make sure I see your message
 
 Если важно — тегните @fedocc.
+
+Точное упоминание работает в личных чатах, группах, каналах и подписях к медиа. Регистр не
+важен, но username должен совпадать полностью. Например, `@fedocc_bot` не совпадает с
+`@fedocc`. По умолчанию используются:
+
+```env
+P0_MENTION_USERNAMES=fedocc,me,fedornikonov
+```
+
+Обычные сообщения каналов попадают в digest, но не создают немедленный P0. Исключение —
+точное упоминание настроенного username. Игнорируемые чаты не сохраняются и не попадают ни
+в P0, ни в digest.
+
+Безопасная локальная проверка не обращается к Telegram или БД и не печатает исходный текст:
+
+```bash
+python -m app.cli.p0_check --chat-type private --text "@fedocc привет"
+python -m app.cli.p0_check --chat-type group --text "@fedocc привет"
+python -m app.cli.p0_check --chat-type channel --text "Опубликовано распределение студентов"
+python -m app.cli.p0_check --chat-type channel --text "@fedocc посмотри"
+```
 
 ## Игнорируемые чаты
 
@@ -86,6 +107,7 @@ source .venv/bin/activate
 python -m app.cli.setup_env
 python -m app.cli.test_llm
 python -m app.cli.gmail_auth
+python -m app.cli.test_email --account-check
 python -m app.cli.test_email
 python -m app.cli.telegram_login
 python -m app.cli.run
@@ -113,8 +135,8 @@ python -m app.cli.telegram_login
 
 Default email transport is Gmail API over HTTPS:
 
-- `EMAIL_FROM`
-- `EMAIL_TO`
+- `GMAIL_SENDER_EMAIL=fnikonov999@gmail.com`
+- `GMAIL_RECIPIENT_EMAIL=<current main Gmail recipient>`
 - `EMAIL_TRANSPORT=gmail_api`
 - `GMAIL_OAUTH_CLIENT_SECRET_PATH=secrets/google_oauth_client.json`
 - `GMAIL_OAUTH_TOKEN_PATH=data/gmail_oauth_token.json`
@@ -127,12 +149,42 @@ Setup:
 4. Download OAuth client JSON.
 5. Save it as `secrets/google_oauth_client.json`.
 6. Run `python -m app.cli.gmail_auth`.
-7. Complete Google login under the same account as `EMAIL_FROM`.
-8. Run `python -m app.cli.test_email`.
+7. When prompted with `Log in as the sender account.`, authenticate as the account in
+   `GMAIL_SENDER_EMAIL`.
+8. Run `python -m app.cli.test_email --account-check` and require `can_send=true`.
+9. Run `python -m app.cli.test_email`.
 
-OAuth scope is only `https://www.googleapis.com/auth/gmail.send`. With this minimum scope,
-`gmail_auth` cannot read the Gmail profile to verify the account. `test_email` is the
-real verification: it confirms the OAuth account can send as `EMAIL_FROM`.
+OAuth uses Gmail send permission plus Google email identity permission. The identity check
+compares the authenticated account with `GMAIL_SENDER_EMAIL`; Gmail aliases are not used.
+For compatibility, an existing `EMAIL_TO` is used only when `GMAIL_RECIPIENT_EMAIL` is empty,
+so the current recipient remains unchanged during migration. New configurations should set
+`GMAIL_RECIPIENT_EMAIL` explicitly. `EMAIL_FROM` and `EMAIL_TO` remain the SMTP-only fields.
+
+### Switch the Gmail sender account on systemd
+
+This production procedure applies to the systemd deployment. Do not display or commit the
+environment file, OAuth client, token, or token backups.
+
+1. Stop `telegram-detox.service`.
+2. Set `GMAIL_SENDER_EMAIL=fnikonov999@gmail.com`. Copy the existing recipient value into
+   `GMAIL_RECIPIENT_EMAIL`; do not change that address.
+3. Create a unique mode-`600` backup as the service user:
+
+   ```bash
+   sudo -u telegram-detox bash -c '
+     backup_path=$(mktemp "data/gmail_oauth_token.json.bak.$(date -u +%Y%m%d_%H%M%S).XXXXXX") &&
+     install -m 600 data/gmail_oauth_token.json "$backup_path"
+   '
+   ```
+
+   The auth CLI also creates a unique backup before replacement. Any chmod or final mode-check
+   failure aborts authentication.
+4. Run `.venv/bin/python -m app.cli.gmail_auth` and log in as the sender account.
+5. Run `.venv/bin/python -m app.cli.test_email --account-check`. Continue only when it reports
+   the dedicated authenticated sender, the unchanged recipient, and `can_send=true`.
+6. Run `.venv/bin/python -m app.cli.test_email` and confirm receipt of
+   `[Telegram Detox][Test] Gmail sender check`.
+7. Restart `telegram-detox.service`.
 
 ## SMTP legacy mode
 
@@ -184,6 +236,7 @@ make cleanup
 
 ```bash
 python -m app.cli.test_llm
+python -m app.cli.test_email --account-check
 python -m app.cli.test_email
 python -m app.cli.telegram_login
 python -m app.cli.run
