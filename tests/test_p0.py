@@ -1086,6 +1086,41 @@ def test_legacy_p0_alert_without_confirmed_p0_is_not_retried(session, now) -> No
     assert repository.cancel_legacy_alerts(session) == 0
 
 
+def test_legacy_confirmed_p0_retry_uses_exact_delivery_subject(session, now) -> None:
+    message = msg(chat_id="legacy-subject", message_id=4, text="synthetic request")
+    repository.save_message(session, message)
+    repository.mark_p0_classified(
+        session,
+        message.chat_id,
+        message.message_id,
+        P0Status.p0_strict.value,
+        now,
+        confidence=0.99,
+    )
+    repository.create_alert_job(
+        session,
+        chat_id=message.chat_id,
+        message_id=message.message_id,
+        alert_type="p0",
+        subject="[Telegram Detox][P0] действия 2 срочное 1 — 2026-07-07",
+        text_body="synthetic body",
+        html_body="<p>synthetic body</p>",
+        now=now,
+    )
+    email = FakeEmail()
+
+    assert repository.retry_pending_alerts(session, email, now=now) == 1
+    assert email.sent[0][0] == "Telegram alert"
+    for forbidden in (
+        "[Telegram Detox]",
+        "[P0]",
+        "действия",
+        "срочное",
+        "2026-07-07",
+    ):
+        assert forbidden not in email.sent[0][0]
+
+
 @pytest.mark.parametrize("is_outgoing", [True, None], ids=["outgoing", "unknown"])
 def test_unsafe_direction_legacy_p0_retry_is_cancelled_without_churn(
     session,
@@ -1352,7 +1387,7 @@ def test_private_media_with_urgent_caption_can_send_p0_email(session, settings) 
         session, message, FakeLLM(status=P0Status.p0), email, settings=settings
     )
     assert len(email.sent) == 1
-    assert email.sent[0][0].startswith("[Telegram Detox][P0] [СРОЧНО]")
+    assert email.sent[0][0] == "Telegram alert"
 
 
 def test_private_media_with_nonurgent_caption_does_not_send_email(session, settings) -> None:

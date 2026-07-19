@@ -43,6 +43,7 @@ async def main() -> None:
                 settings.digest_retention_days,
                 now,
                 ignored_chat_ids=ignored_chat_ids,
+                mention_usernames=settings.p0_mention_usernames,
             )
 
     def cleanup_job() -> None:

@@ -69,6 +69,7 @@ IGNORE_CHAT_IDS=-1001234567890
 python -m app.cli.check_ignored_chats
 python -m app.cli.list_chats --limit 100
 python -m app.cli.list_chats --search "name"
+python -m app.cli.add_ignored_chat --chat-id=-1001234567890 --reason "групповой флуд"
 ```
 
 ## Напоминания о днях рождения

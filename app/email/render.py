@@ -3,11 +3,17 @@ from __future__ import annotations
 from html import escape
 
 from app.models.schemas import DailyDigest
+from app.services.text import sanitize_channel_summary
 
-INTERNAL_REVIEW_REASONS = {
-    "LLM did not classify this incoming private message": "Требуется проверить сообщение",
-    "Fallback digest includes incoming private message": "Личное сообщение",
-    "P0 review candidate": "Возможно важное сообщение",
+EMPTY_VALUES = {
+    "нет",
+    "не определено",
+    "не определено; проверьте чат",
+    "явных запросов нет",
+    "действий по переписке не указано",
+    "дополнительный контекст не выделен",
+    "полезные факты не выделены",
+    "открыть telegram: нет",
 }
 
 
@@ -26,124 +32,142 @@ def _summary(text: str) -> str:
     return (text or "").replace("короткая переписка", "обсуждение").strip()
 
 
-def _plain_deadline(item) -> str:
-    deadline = _deadline_value(item)
-    return f"; срок: {deadline}" if deadline else ""
-
-
-def _html_deadline(item) -> str:
-    deadline = _deadline_value(item)
-    return f" Срок: {_line(deadline)}." if deadline else ""
-
-
 def _time(value) -> str | None:
     return value.strftime("%H:%M") if value else None
 
 
-def _metrics(item) -> str:
-    parts = []
+def _optional(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = value.strip()
+    normalized = " ".join(cleaned.casefold().split()).rstrip(" .!?:;").strip()
+    if not cleaned or normalized in EMPTY_VALUES:
+        return None
+    return cleaned
+
+
+def _metrics_line(item) -> str | None:
+    parts: list[str] = []
     if getattr(item, "message_count", None):
-        parts.append(f"Сообщений: {item.message_count}.")
+        parts.append(f"Сообщений: {item.message_count}")
+    media = _optional(getattr(item, "media_summary", None))
+    if media:
+        parts.append(f"медиа: {media}")
+    return "; ".join(parts) or None
+
+
+def _time_line(item) -> str | None:
     first = _time(getattr(item, "first_message_at", None))
     last = _time(getattr(item, "last_message_at", None))
-    if first:
-        parts.append(f"Первое: {first}.")
-    if last:
-        parts.append(f"Последнее: {last}.")
-    return " " + " ".join(parts) if parts else ""
+    if first and last and first != last:
+        return f"{first}–{last}"
+    return last or first
 
 
-def _semantic_details(item) -> str:
-    parts = [
-        f"Запросы: {getattr(item, 'requests_to_me', None) or 'Не определено.'}.",
-        f"Контекст: {getattr(item, 'important_context', None) or 'Не определено.'}.",
-        f"Действия: {getattr(item, 'action_items', None) or 'Не определено; проверьте чат.'}.",
-    ]
-    if getattr(item, "should_open_telegram", None) is True:
-        reason = getattr(item, "open_reason", None) or "нужна проверка контекста"
-        parts.append(f"Открыть Telegram: да — {reason}.")
-    elif getattr(item, "should_open_telegram", None) is False:
-        parts.append("Открыть Telegram: нет.")
-    else:
-        parts.append("Открыть Telegram: не определено.")
-    if getattr(item, "media_summary", None):
-        parts.append(item.media_summary)
-    return " " + " ".join(parts)
+def _important_line(item, *, channel: bool = False) -> str | None:
+    values: list[str] = []
+    for attribute in (
+        "requests_to_me",
+        "important_context",
+        "action_items",
+        "action",
+    ):
+        raw_value = getattr(item, attribute, None)
+        if channel:
+            raw_value = sanitize_channel_summary(raw_value)
+        value = _optional(raw_value)
+        if value and value not in values:
+            values.append(value)
+    return "; ".join(values) or None
 
 
-def _review_reason(reason: str | None) -> str:
-    return INTERNAL_REVIEW_REASONS.get(reason or "", reason or "Проверить")
+def _limit_line(item) -> str | None:
+    analyzed = getattr(item, "analyzed_message_count", None)
+    total = getattr(item, "message_count", None)
+    if analyzed is not None and total is not None and analyzed < total:
+        return f"проанализировано {analyzed} из {total} сообщений."
+    return None
+
+
+def _item_lines(item, *, channel: bool = False) -> list[str]:
+    lines = [item.chat]
+    metrics = _metrics_line(item)
+    if metrics:
+        lines.append(f"- {metrics}")
+    time_value = _time_line(item)
+    if time_value:
+        lines.append(f"- Время: {time_value}")
+    summary_text = _summary(getattr(item, "what_happened", None) or item.summary)
+    if channel:
+        summary_text = sanitize_channel_summary(summary_text)
+    summary = _optional(summary_text)
+    if summary:
+        lines.append(f"- Суть: {summary}")
+    important = _important_line(item, channel=channel)
+    if important:
+        lines.append(f"- Важно: {important}")
+    deadline = _optional(_deadline_value(item))
+    if deadline:
+        lines.append(f"- Срок: {deadline}")
+    limit = _limit_line(item)
+    if limit:
+        lines.append(f"- Лимит: {limit}")
+    return lines
+
+
+def _plain_section(title: str, items: list, *, channel: bool = False) -> list[str]:
+    lines = [title]
+    if not items:
+        return [*lines, "Нет"]
+    for index, item in enumerate(items):
+        if index:
+            lines.append("")
+        lines.extend(_item_lines(item, channel=channel))
+    return lines
 
 
 def render_plain_text(digest: DailyDigest) -> str:
-    parts = [f"Telegram digest — {digest.date}", "", "СРОЧНОЕ"]
-    parts += [
-        f"- {x.chat}: {x.summary} "
-        f"({'уже отправлялось' if x.alert_sent else 'не отправлялось'})"
-        f"{_plain_deadline(x)}"
-        for x in digest.p0_alerts
-    ] or ["- Нет"]
-    parts += ["", "ЛИЧНЫЕ СООБЩЕНИЯ"]
-    parts += [
-        f"- {x.chat}: {_summary(x.what_happened or x.summary)}.{_semantic_details(x)}"
-        f"{_metrics(x)}{_plain_deadline(x)}"
-        for x in digest.direct_messages
-    ] or ["- Нет"]
-    parts += ["", "ГРУППЫ"]
-    parts += [
-        f"- {x.chat}: {_summary(x.what_happened or x.summary)}.{_semantic_details(x)}"
-        f"{_metrics(x)}{_plain_deadline(x)}"
-        for x in digest.group_updates
-    ] or ["- Нет"]
-    parts += ["", "ПРОВЕРИТЬ ЛИЧНО"]
-    parts += [
-        f"- {x.chat}: {_review_reason(x.reason)} — {x.summary}"
-        for x in digest.review
-    ] or ["- Нет"]
-    parts += ["", "ФОН"]
-    parts += [f"- {x.chat}: {x.count}" for x in digest.noise_counts] or ["- Нет"]
+    parts = ["Telegram digest", digest.date]
+    for title, items in (
+        ("СРОЧНОЕ", digest.p0_alerts),
+        ("ЛИЧНЫЕ СООБЩЕНИЯ", digest.direct_messages),
+        ("ГРУППЫ", digest.group_updates),
+        ("КАНАЛЫ", digest.channel_updates),
+    ):
+        parts.extend(["", *_plain_section(title, items, channel=title == "КАНАЛЫ")])
     return "\n".join(parts)
 
 
 def render_html(digest: DailyDigest) -> str:
-    def items(rows: list[str]) -> str:
+    def section(title: str, rows: list, *, channel: bool = False) -> str:
         if not rows:
-            return "<p>Нет</p>"
-        return "<ul>" + "".join(f"<li>{row}</li>" for row in rows) + "</ul>"
+            body = "<p>Нет</p>"
+        else:
+            blocks = []
+            for item in rows:
+                lines = _item_lines(item, channel=channel)
+                title_line, details = lines[0], lines[1:]
+                detail_html = "".join(
+                    f"<div style=\"margin-top:4px\">{_line(line.removeprefix('- '))}</div>"
+                    for line in details
+                )
+                blocks.append(
+                    "<div style=\"margin:0 0 18px 0\">"
+                    f"<strong>{_line(title_line)}</strong>{detail_html}</div>"
+                )
+            body = "".join(blocks)
+        return f"<h2 style=\"margin-top:28px\">{_line(title)}</h2>{body}"
 
-    p0 = items([
-        f"<b>{_line(x.chat)}</b>: {_line(x.summary)} "
-        f"<i>{'Уведомление уже отправлялось.' if x.alert_sent else ''}</i>"
-        f"{_html_deadline(x)}"
-        for x in digest.p0_alerts
-    ])
-    direct = items([
-        f"<b>{_line(x.chat)}</b>: {_line(_summary(x.what_happened or x.summary))}."
-        f"{_line(_semantic_details(x))}{_line(_metrics(x))}{_html_deadline(x)}"
-        for x in digest.direct_messages
-    ])
-    groups = items([
-        f"<b>{_line(x.chat)}</b>: {_line(_summary(x.what_happened or x.summary))}."
-        f"{_line(_semantic_details(x))}{_line(_metrics(x))}{_html_deadline(x)}"
-        for x in digest.group_updates
-    ])
-    review = items([
-        f"<b>{_line(x.chat)}</b>: {_line(_review_reason(x.reason))} — {_line(x.summary)}"
-        for x in digest.review
-    ])
-    noise = items([f"<b>{_line(x.chat)}</b>: {x.count} сообщений" for x in digest.noise_counts])
     return f"""<!doctype html>
-<html><body>
-<h1>Telegram digest — {_line(digest.date)}</h1>
-<h2>СРОЧНОЕ</h2>{p0}
-<h2>ЛИЧНЫЕ СООБЩЕНИЯ</h2>{direct}
-<h2>ГРУППЫ</h2>{groups}
-<h2>ПРОВЕРИТЬ ЛИЧНО</h2>{review}
-<h2>ФОН</h2>{noise}
+<html><body style="font-family:Arial,sans-serif;line-height:1.45;max-width:760px">
+<h1>Telegram digest</h1>
+<p>{_line(digest.date)}</p>
+{section("СРОЧНОЕ", digest.p0_alerts)}
+{section("ЛИЧНЫЕ СООБЩЕНИЯ", digest.direct_messages)}
+{section("ГРУППЫ", digest.group_updates)}
+{section("КАНАЛЫ", digest.channel_updates, channel=True)}
 </body></html>"""
 
 
 def digest_subject(digest: DailyDigest) -> str:
-    actions = sum(1 for x in [*digest.direct_messages, *digest.group_updates] if x.action)
-    urgent = len(digest.p0_alerts)
-    return f"Telegram digest — {digest.date} — {actions} действия, {urgent} срочное"
+    return "Telegram digest"

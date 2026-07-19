@@ -44,6 +44,7 @@ def run_daily_job(
     now: datetime,
     *,
     ignored_chat_ids: frozenset[str] | set[str] | None = None,
+    mention_usernames: str = "fedocc,me,fedornikonov",
 ) -> None:
     try:
         send_daily_digest_pipeline(
@@ -53,6 +54,7 @@ def run_daily_job(
             day,
             timezone,
             ignored_chat_ids=ignored_chat_ids,
+            mention_usernames=mention_usernames,
         )
     except Exception:
         logger.exception("Daily digest pipeline failed")

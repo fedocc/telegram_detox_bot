@@ -6,16 +6,17 @@ from pathlib import Path
 
 from app.db import repository
 from app.db.session import init_db
-from app.email.render import render_html, render_plain_text
+from app.email.render import digest_subject, render_html, render_plain_text
 from app.email.sender import EmailSendError
 from app.llm.client import LLMError
-from app.models.schemas import ChatType, DailyDigest, DigestNoiseCount, MediaType
+from app.models.schemas import ChatType, DailyDigest, DigestNoiseCount, MediaType, P0Status
 from app.services.digest import (
     day_bounds,
     fallback_digest,
     generate_digest,
     send_daily_digest_pipeline,
 )
+from app.services.text import sanitize_channel_summary
 from tests.fixtures.messages import msg
 
 
@@ -220,10 +221,9 @@ def test_multiple_private_messages_from_same_sender_render_as_one_line(now) -> N
 
     output = render_plain_text(digest)
 
-    assert output.count("- Маша:") == 1
+    assert output.count("\nМаша\n") == 1
     assert "Сообщений: 2" in output
-    assert "Первое: 18:42" in output
-    assert "Последнее: 19:10" in output
+    assert "Время: 18:42–19:10" in output
     assert "Ответ нужен" not in output
 
 
@@ -252,10 +252,9 @@ def test_grouped_line_includes_count_first_last_time() -> None:
 
     output = render_plain_text(digest)
 
-    assert "- Лаба:" in output
+    assert "\nЛаба\n" in output
     assert "Сообщений: 2" in output
-    assert "Первое: 20:05" in output
-    assert "Последнее: 21:17" in output
+    assert "Время: 20:05–21:17" in output
 
 
 def test_digest_output_does_not_contain_bad_phrases() -> None:
@@ -277,7 +276,7 @@ def test_digest_output_does_not_contain_bad_phrases() -> None:
 
 
 def test_personal_message_always_appears_in_digest(session) -> None:
-    repository.save_message(session, msg())
+    repository.save_message(session, msg(text="Обычное обновление"))
 
     digest = generate_digest(session, FakeLLM(), date(2026, 7, 7), "Europe/Moscow")
 
@@ -507,9 +506,9 @@ def test_daily_digest_groups_private_messages_into_semantic_chat_summary(session
     assert len(digest.direct_messages) == 1
     assert len(digest.direct_messages[0].source_refs) == 2
     assert "Обсуждение поездки в Китай" in output
-    assert "Запросы: Подтвердить даты" in output
-    assert "Контекст: Уезжает послезавтра" in output
-    assert "Открыть Telegram: да" in output
+    assert "Важно: Подтвердить даты" in output
+    assert "Уезжает послезавтра" in output
+    assert "Открыть Telegram:" not in output
 
 
 def test_html_email_renders_without_errors() -> None:
@@ -520,10 +519,12 @@ def test_html_email_renders_without_errors() -> None:
     html = render_html(digest)
 
     assert "<html" in html
-    assert "Общий" in html
+    assert "ФОН" not in html
+    assert "Общий" not in html
+    assert "КАНАЛЫ" in html
 
 
-def test_email_renders_should_open_telegram_false_as_no() -> None:
+def test_email_omits_should_open_telegram_false() -> None:
     digest = DailyDigest(
         date="2026-07-07",
         direct_messages=[
@@ -543,7 +544,7 @@ def test_email_renders_should_open_telegram_false_as_no() -> None:
 
     output = render_plain_text(digest) + render_html(digest)
 
-    assert "Открыть Telegram: нет." in output
+    assert "Открыть Telegram:" not in output
 
 
 def test_digest_output_does_not_contain_llm_did_not_classify(session) -> None:
@@ -564,6 +565,74 @@ def test_digest_section_title_is_groups_only() -> None:
     assert "ГРУППЫ / ЛАБОРАТОРИЯ" not in output
 
 
+def test_minimal_digest_has_exact_subject_and_four_sections() -> None:
+    digest = DailyDigest(date="2026-07-07")
+    output = render_plain_text(digest) + render_html(digest)
+
+    assert digest_subject(digest) == "Telegram digest"
+    assert "[Telegram Detox]" not in digest_subject(digest)
+    for section in ("СРОЧНОЕ", "ЛИЧНЫЕ СООБЩЕНИЯ", "ГРУППЫ", "КАНАЛЫ"):
+        assert section in output
+    assert "ФОН" not in output
+    assert "ПРОВЕРИТЬ ЛИЧНО" not in output
+
+
+def test_empty_optional_item_fields_are_not_rendered() -> None:
+    digest = DailyDigest(
+        date="2026-07-07",
+        direct_messages=[
+            {
+                "chat": "Synthetic private chat",
+                "summary": "Короткое обновление.",
+                "needs_reply": False,
+                "requests_to_me": "Явных запросов нет.",
+                "important_context": "Дополнительный контекст не выделен.",
+                "action_items": "Действий по переписке не указано.",
+                "should_open_telegram": False,
+            }
+        ],
+    )
+
+    output = render_plain_text(digest) + render_html(digest)
+
+    assert "Открыть Telegram: нет" not in output
+    assert "Явных запросов нет" not in output
+    assert "Действий по переписке не указано" not in output
+    assert "Дополнительный контекст не выделен" not in output
+    assert "\n\nГРУППЫ" in render_plain_text(digest)
+
+
+def test_optional_placeholder_filtering_ignores_case_spacing_and_punctuation() -> None:
+    placeholders = (
+        "Явных запросов нет",
+        "Явных запросов нет.",
+        "  ЯВНЫХ   ЗАПРОСОВ   НЕТ !  ",
+        "Действий по переписке не указано",
+        "Действий по переписке не указано.",
+        "Дополнительный контекст не выделен",
+        "Дополнительный контекст не выделен.",
+        "Открыть Telegram: нет",
+        "Открыть Telegram: нет.",
+    )
+    for placeholder in placeholders:
+        digest = DailyDigest(
+            date="2026-07-07",
+            direct_messages=[
+                {
+                    "chat": "Synthetic private chat",
+                    "summary": "Concrete fact is preserved.",
+                    "action": placeholder,
+                    "needs_reply": False,
+                }
+            ],
+        )
+
+        output = render_plain_text(digest) + render_html(digest)
+
+        assert placeholder.strip() not in output
+        assert "Concrete fact is preserved." in output
+
+
 def test_non_urgent_private_message_not_routed_to_review_with_internal_text(session) -> None:
     repository.save_message(session, msg(message_id=902, text="Ок, спасибо"))
 
@@ -572,7 +641,7 @@ def test_non_urgent_private_message_not_routed_to_review_with_internal_text(sess
 
     assert digest.direct_messages
     assert not digest.review
-    assert "ПРОВЕРИТЬ ЛИЧНО\n- Нет" in output
+    assert "ПРОВЕРИТЬ ЛИЧНО" not in output
     assert "LLM did not classify" not in output
 
 
@@ -640,7 +709,7 @@ def test_fallback_extracts_request_readiness_flight_deadline_and_urgency(now) ->
 
 
 def test_digest_cannot_drop_private_message_when_llm_omits_it(session) -> None:
-    repository.save_message(session, msg(message_id=101, text="Ты сможешь сегодня?"))
+    repository.save_message(session, msg(message_id=101, text="Обычное сообщение"))
 
     digest = generate_digest(session, OmittingLLM(), date(2026, 7, 7), "Europe/Moscow")
 
@@ -648,7 +717,7 @@ def test_digest_cannot_drop_private_message_when_llm_omits_it(session) -> None:
     item = digest.direct_messages[0]
     assert item.source_refs == [{"chat_id": "1", "message_id": 101}]
     assert item.chat == "Маша"
-    assert item.summary == "Ты сможешь сегодня?"
+    assert item.summary == "Обычное сообщение"
 
 
 def test_private_message_never_becomes_p3(session) -> None:
@@ -688,11 +757,23 @@ def test_private_message_not_masked_by_group_same_message_id(session, now) -> No
 def test_private_message_not_masked_by_other_private_chat_same_message_id(session, now) -> None:
     repository.save_message(
         session,
-        msg(chat_id="p1", chat_title="Маша", message_id=1, timestamp=now),
+        msg(
+            chat_id="p1",
+            chat_title="Маша",
+            message_id=1,
+            text="Обычное обновление",
+            timestamp=now,
+        ),
     )
     repository.save_message(
         session,
-        msg(chat_id="p2", chat_title="Иван", message_id=1, timestamp=now),
+        msg(
+            chat_id="p2",
+            chat_title="Иван",
+            message_id=1,
+            text="Обычное сообщение",
+            timestamp=now,
+        ),
     )
 
     class OnePrivateOnlyLLM:
@@ -746,9 +827,7 @@ def test_digest_llm_failure_sends_fallback_digest(session) -> None:
 
     assert digest.generated_by == "fallback"
     assert digest.email_status == "sent"
-    assert email.sent[0][0].startswith(
-        "[Telegram Detox][Digest] [FALLBACK] Telegram digest — 2026-07-07"
-    )
+    assert email.sent[0][0] == "Telegram digest"
 
 
 def test_daily_digest_openai_error_sends_fallback_digest(session) -> None:
@@ -889,7 +968,7 @@ def _legacy_keyless_digest_with_claim(
         session,
         record,
         DailyDigest(date="2026-07-07"),
-        subject="synthetic subject",
+        subject="[Telegram Detox][Digest] действия 3 срочное 1 — 2026-07-07",
         text=payload_marker,
         html=f"<p>{payload_marker}</p>",
     )
@@ -990,6 +1069,15 @@ def test_legacy_keyless_digest_with_incoming_claim_can_retry(session) -> None:
     session.refresh(row)
     assert sent == 1
     assert len(email.sent) == 1
+    assert email.sent[0][0] == "Telegram digest"
+    for forbidden in (
+        "[Telegram Detox]",
+        "[Digest]",
+        "действия",
+        "срочное",
+        "2026-07-07",
+    ):
+        assert forbidden not in email.sent[0][0]
     assert record.email_status == "sent"
     assert row.claimed_digest_id is None
     assert row.digested_at is not None
@@ -1009,7 +1097,7 @@ def test_successful_initial_digest_send_marks_digest_sent(session) -> None:
 
     assert digest.email_status == "sent"
     assert repository.pending_digests(session) == []
-    assert email.sent[0][0].startswith("[Telegram Detox][Digest]")
+    assert email.sent[0][0] == "Telegram digest"
 
 
 def test_failed_initial_digest_send_sets_backoff_timestamp(session) -> None:
@@ -1533,6 +1621,194 @@ def test_non_ignored_channel_text_and_media_enter_digest(session, now) -> None:
     assert any(item["media_type"] == MediaType.video.value for item in messages)
 
 
+def test_private_known_p0_appears_only_in_urgent_section(session, now) -> None:
+    message = msg(message_id=710, text="synthetic direct request", timestamp=now)
+    repository.save_message(session, message)
+    repository.mark_p0_classified(
+        session,
+        message.chat_id,
+        message.message_id,
+        P0Status.p0_strict.value,
+        now,
+        confidence=0.99,
+    )
+
+    digest = generate_digest(session, FakeLLM(), date(2026, 7, 7), "Europe/Moscow")
+    output = render_plain_text(digest)
+
+    assert len(digest.p0_alerts) == 1
+    assert digest.direct_messages == []
+    assert output.count("Synthetic") == 0
+    urgent_part, private_part = output.split("ЛИЧНЫЕ СООБЩЕНИЯ", 1)
+    assert "Маша" in urgent_part
+    assert "Маша" not in private_part
+
+
+def test_private_deterministic_p0_equivalent_is_urgent_without_persisted_status(
+    session,
+    now,
+) -> None:
+    repository.save_message(
+        session,
+        msg(
+            message_id=709,
+            text="завтра в 10 самолёт ты придёшь?",
+            timestamp=now,
+        ),
+    )
+
+    digest = generate_digest(session, FakeLLM(), date(2026, 7, 7), "Europe/Moscow")
+
+    assert len(digest.p0_alerts) == 1
+    assert digest.direct_messages == []
+
+
+def test_group_reply_to_me_is_urgent_and_not_duplicated(session, now) -> None:
+    repository.save_message(
+        session,
+        msg(
+            chat_id="reply-group",
+            chat_title="Synthetic group",
+            chat_type=ChatType.group,
+            message_id=708,
+            text="synthetic reply",
+            reply_to_message_id=1,
+            reply_to_is_mine=True,
+            timestamp=now,
+        ),
+    )
+
+    digest = generate_digest(session, FakeLLM(), date(2026, 7, 7), "Europe/Moscow")
+
+    assert len(digest.p0_alerts) == 1
+    assert digest.group_updates == []
+
+
+def test_ordinary_channel_deadline_stays_out_of_urgent(session, now) -> None:
+    repository.save_message(
+        session,
+        msg(
+            chat_id="channel-deadline",
+            chat_title="Synthetic channel",
+            chat_type=ChatType.channel,
+            message_id=711,
+            text="Дедлайн завтра в 10",
+            timestamp=now,
+        ),
+    )
+
+    digest = generate_digest(session, FakeLLM(), date(2026, 7, 7), "Europe/Moscow")
+
+    assert digest.p0_alerts == []
+    assert len(digest.channel_updates) == 1
+    assert digest.group_updates == []
+
+
+def test_channel_exact_mention_appears_only_in_urgent(session, now) -> None:
+    repository.save_message(
+        session,
+        msg(
+            chat_id="channel-mention",
+            chat_title="Mention channel",
+            chat_type=ChatType.channel,
+            message_id=712,
+            text="@fedocc посмотри",
+            timestamp=now,
+        ),
+    )
+
+    digest = generate_digest(
+        session,
+        FakeLLM(),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+        mention_usernames="fedocc",
+    )
+
+    assert len(digest.p0_alerts) == 1
+    assert digest.p0_alerts[0].chat == "Mention channel"
+    assert digest.channel_updates == []
+
+
+def test_channel_rendering_keeps_facts_and_removes_genre_labels(session, now) -> None:
+    class ChannelGenreLLM:
+        def daily_digest(self, payload: dict) -> DailyDigest:
+            source_refs = [
+                message["source_ref"] for message in payload["chats"][0]["messages"]
+            ]
+            return DailyDigest(
+                date=payload["date"],
+                group_updates=[
+                    {
+                        "chat": "Synthetic channel",
+                        "summary": (
+                            "Канал с юмористическим контентом. "
+                            "Есть объявление: квартира 116 кв.м., 150 тыс./мес."
+                        ),
+                        "source_refs": source_refs,
+                    }
+                ],
+            )
+
+    repository.save_message(
+        session,
+        msg(
+            chat_id="channel-facts",
+            chat_title="Synthetic channel",
+            chat_type=ChatType.channel,
+            message_id=713,
+            text="Квартира 116 кв.м., 150 тыс./мес.",
+            media_type=MediaType.photo,
+            timestamp=now,
+        ),
+    )
+
+    digest = generate_digest(
+        session,
+        ChannelGenreLLM(),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+    )
+    output = (render_plain_text(digest) + render_html(digest)).casefold()
+
+    assert "synthetic channel" in output
+    assert "сообщений: 1" in output
+    assert "1 фото" in output
+    assert "время: 09:00" in output
+    assert "квартира 116 кв.м., 150 тыс./мес." in output
+    for forbidden in (
+        "канал с",
+        "юмористическим",
+        "философским",
+        "развлекательным",
+        "видеоконтентом",
+    ):
+        assert forbidden not in output
+
+
+def test_channel_sanitizer_removes_only_broad_genre_wrappers() -> None:
+    for broad_label in (
+        "Канал с новостями",
+        "Канал с философским контентом",
+        "Канал с юмористическим контентом",
+        "Канал с развлекательным контентом",
+        "Канал с видеоконтентом",
+        "Канал с объявлениями недвижимости",
+    ):
+        assert sanitize_channel_summary(broad_label) == ""
+
+    summary = (
+        "Канал с объявлениями недвижимости. "
+        "Объявление недвижимости: квартира 116 кв.м., 150 тыс./мес."
+    )
+    assert sanitize_channel_summary(summary) == (
+        "Объявление недвижимости: квартира 116 кв.м., 150 тыс./мес."
+    )
+    assert sanitize_channel_summary(
+        "Канал с новостями: Опубликовано расписание на завтра."
+    ) == "Опубликовано расписание на завтра."
+
+
 def test_shallow_digest_is_marked_conservatively_for_manual_context(session) -> None:
     class ShallowLLM:
         def daily_digest(self, payload: dict) -> DailyDigest:
@@ -1552,14 +1828,20 @@ def test_shallow_digest_is_marked_conservatively_for_manual_context(session) -> 
     digest = generate_digest(session, ShallowLLM(), date(2026, 7, 7), "Europe/Moscow")
     output = render_plain_text(digest)
 
-    assert digest.direct_messages[0].should_open_telegram is True
-    assert "Нужна проверка контекста" in output
+    assert digest.direct_messages[0].should_open_telegram is None
+    assert "Открыть Telegram:" not in output
     assert "Действий нет" not in output
 
 
 def test_same_chat_title_different_chat_ids_are_not_merged(session) -> None:
-    repository.save_message(session, msg(chat_id="a", chat_title="Алексей", message_id=1))
-    repository.save_message(session, msg(chat_id="b", chat_title="Алексей", message_id=1))
+    repository.save_message(
+        session,
+        msg(chat_id="a", chat_title="Алексей", message_id=1, text="Обычное обновление"),
+    )
+    repository.save_message(
+        session,
+        msg(chat_id="b", chat_title="Алексей", message_id=1, text="Обычное сообщение"),
+    )
 
     digest = generate_digest(session, FakeLLM(), date(2026, 7, 7), "Europe/Moscow")
 
@@ -2213,7 +2495,74 @@ def test_aggregation_uses_configured_limits(session) -> None:
         max_chars_per_group=20,
     )
 
-    assert any("лимит" in item.summary.lower() for item in digest.review)
+    assert "Лимит: проанализировано 1 из 2 сообщений." in render_plain_text(digest)
+
+
+def test_chat_limit_note_is_compact_and_summary_is_preserved(session) -> None:
+    for index in range(1, 101):
+        repository.save_message(
+            session,
+            msg(
+                chat_id="limited-group",
+                chat_title="Synthetic busy group",
+                chat_type=ChatType.group,
+                message_id=index,
+                text=f"synthetic update {index}",
+            ),
+        )
+
+    digest = generate_digest(
+        session,
+        FakeLLM(),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+        max_messages_per_chat=32,
+    )
+    output = render_plain_text(digest)
+
+    assert "Synthetic busy group" in output
+    assert "Суть:" in output
+    assert "Лимит: проанализировано 32 из 100 сообщений." in output
+    assert "часть сообщений не отправлена" not in output.casefold()
+
+
+def test_urgent_large_private_and_group_chats_keep_compact_limit_notes(session) -> None:
+    for chat_id, chat_title, chat_type in (
+        ("limited-private", "Synthetic urgent private", ChatType.private),
+        ("limited-urgent-group", "Synthetic urgent group", ChatType.group),
+    ):
+        for message_id in range(1, 101):
+            repository.save_message(
+                session,
+                msg(
+                    chat_id=chat_id,
+                    chat_title=chat_title,
+                    chat_type=chat_type,
+                    message_id=message_id,
+                    text=(
+                        "@fedocc synthetic urgent request"
+                        if message_id == 1
+                        else f"synthetic update {message_id}"
+                    ),
+                ),
+            )
+
+    digest = generate_digest(
+        session,
+        FakeLLM(),
+        date(2026, 7, 7),
+        "Europe/Moscow",
+        max_messages_per_chat=32,
+        mention_usernames="fedocc",
+    )
+    output = render_plain_text(digest)
+
+    assert digest.direct_messages == []
+    assert digest.group_updates == []
+    assert len(digest.p0_alerts) == 2
+    assert all(item.message_count == 100 for item in digest.p0_alerts)
+    assert all(item.analyzed_message_count == 32 for item in digest.p0_alerts)
+    assert output.count("Лимит: проанализировано 32 из 100 сообщений.") == 2
 
 
 def test_daily_digest_uses_grouped_batch_summarization(session) -> None:

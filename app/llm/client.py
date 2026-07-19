@@ -618,7 +618,9 @@ class HaikuClient:
             "input chat and never merge chats. The summary must describe plans, questions, "
             "important context, and urgency—not a message count. Extract concrete response "
             "requests, confirmations, travel/planning context, and time phrases such as "
-            "'завтра в 10'. reason_to_open must be specific to the conversation. "
+            "'завтра в 10'. For channel chats, summarize only concrete facts from the posts; "
+            "never classify or describe the channel's genre, theme, or content category. "
+            "reason_to_open must be specific to the conversation. "
             f"Reference timestamp: {reference_timestamp}. Timezone: {self.settings.timezone}. "
             "No markdown. No explanation. No ```json fences. No prose before or after JSON."
         )
@@ -656,9 +658,9 @@ class HaikuClient:
                 for message in messages
                 if isinstance(message, dict) and isinstance(message.get("source_ref"), dict)
             ]
-            requests = "; ".join(item.requests) or "Явных запросов нет."
-            context = "; ".join(item.context) or "Дополнительный контекст не выделен."
-            actions = "; ".join(item.actions) or "Действий по переписке не указано."
+            requests = "; ".join(item.requests) or None
+            context = "; ".join(item.context) or None
+            actions = "; ".join(item.actions) or None
             deadlines = "; ".join(item.deadlines) or None
             common = {
                 "chat": str(chat.get("chat_title") or "Telegram chat"),
@@ -668,7 +670,9 @@ class HaikuClient:
                 "important_context": context,
                 "action_items": actions,
                 "should_open_telegram": item.open_telegram,
-                "open_reason": item.reason_to_open,
+                "open_reason": (
+                    None if item.reason_to_open == "Причина не указана." else item.reason_to_open
+                ),
                 "open_telegram": item.open_telegram,
                 "deadline_text": deadlines,
                 "source_refs": source_refs,
@@ -681,6 +685,8 @@ class HaikuClient:
                         **common,
                     )
                 )
+            elif normalized_chat_type(chat) == "channel":
+                digest.channel_updates.append(DigestGroupUpdate(**common))
             else:
                 digest.group_updates.append(DigestGroupUpdate(**common))
         return digest

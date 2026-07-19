@@ -18,7 +18,7 @@ from app.models.schemas import (
     P0Status,
     StoredMessage,
 )
-from app.services.digest import safe_truncate
+from app.services.text import safe_truncate
 
 SAFE_TEXT_LIMIT = 500
 DEFAULT_MAX_CONTEXT_MESSAGES = 5
@@ -342,6 +342,23 @@ def _mention_usernames(settings: Settings | None) -> set[str]:
     }
 
 
+def _mention_usernames_from_config(configured: str) -> set[str]:
+    return {
+        item.strip().removeprefix("@").casefold()
+        for item in configured.split(",")
+        if item.strip().removeprefix("@")
+    }
+
+
+def matched_mention_username_from_config(text: str, configured: str) -> str | None:
+    usernames = _mention_usernames_from_config(configured)
+    for match in re.finditer(r"(?<!\w)@([A-Za-z0-9_]+)(?![A-Za-z0-9_])", text):
+        username = match.group(1).casefold()
+        if username in usernames:
+            return username
+    return None
+
+
 def matched_mention_username(
     text: str,
     settings: Settings | None,
@@ -461,6 +478,29 @@ def _has_private_signal(raw_text: str) -> bool:
         or _has_urgency(raw_text)
         or _has_important_context(raw_text)
         or EXPLICIT_DEADLINE_RE.search(raw_text)
+    )
+
+
+def is_deterministic_p0_equivalent(
+    chat_type: ChatType,
+    text: str,
+    *,
+    mention_usernames: str = "fedocc,me,fedornikonov",
+    reply_to_me: bool = False,
+) -> bool:
+    mentioned = matched_mention_username_from_config(text, mention_usernames) is not None
+    if chat_type == ChatType.channel:
+        return mentioned
+    if chat_type == ChatType.private:
+        return bool(mentioned or _has_private_signal(text))
+    return bool(
+        mentioned
+        or reply_to_me
+        or _has_request_or_action(text)
+        or _has_urgency(text)
+        or _has_important_context(text)
+        or EXPLICIT_DEADLINE_RE.search(text)
+        or _response_may_be_expected(text)
     )
 
 
@@ -797,7 +837,7 @@ def _send_strict_decision(
         session,
         message,
         email_sender,
-        subject=f"[Telegram Detox][P0] [СРОЧНО] Telegram: {message.chat_title}",
+        subject="Telegram alert",
         body=_decision_body(session, message, policy_context),
         html=None,
         alert_type="p0",

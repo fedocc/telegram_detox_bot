@@ -22,6 +22,8 @@ from app.db.tables import (
 from app.models.schemas import P0_MIN_CONFIDENCE, DailyDigest, P0Status, StoredMessage
 
 _CANONICAL_CHAT_ID_RE = re.compile(r"-?[1-9]\d*")
+DIGEST_EMAIL_SUBJECT = "Telegram digest"
+P0_EMAIL_SUBJECT = "Telegram alert"
 
 
 def _backoff_minutes(attempts: int) -> int:
@@ -877,13 +879,13 @@ def send_claimed_digest(
     try:
         try:
             email_sender.send(
-                record.subject,
+                DIGEST_EMAIL_SUBJECT,
                 record.text_payload,
                 record.html_payload,
                 message_id=record.delivery_id,
             )
         except TypeError:
-            email_sender.send(record.subject, record.text_payload, record.html_payload)
+            email_sender.send(DIGEST_EMAIL_SUBJECT, record.text_payload, record.html_payload)
     except Exception as exc:
         mark_digest_pending(session, record, exc, now)
         return False
@@ -1066,14 +1068,14 @@ def send_claimed_alert(
         return False
     try:
         email_sender.send(
-            job.subject,
+            P0_EMAIL_SUBJECT,
             job.text_body,
             job.html_body,
             message_id=f"<telegram-digest-{job.chat_id}-{job.message_id}-{job.alert_type}@local>",
         )
     except TypeError:
         try:
-            email_sender.send(job.subject, job.text_body, job.html_body)
+            email_sender.send(P0_EMAIL_SUBJECT, job.text_body, job.html_body)
         except Exception as exc:
             _mark_alert_pending(session, job, exc, now)
             return False

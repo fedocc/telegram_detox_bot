@@ -428,10 +428,10 @@ def test_production_like_digest_json_coerces_safe_shape_drift(
 
     assert item.summary == "Просит подтвердить готовность."
     assert item.should_open_telegram is expected_open
-    assert item.requests_to_me == "Явных запросов нет."
-    assert item.important_context == "Дополнительный контекст не выделен."
-    assert item.action_items == "Действий по переписке не указано."
-    assert item.open_reason == "Причина не указана."
+    assert item.requests_to_me is None
+    assert item.important_context is None
+    assert item.action_items is None
+    assert item.open_reason is None
     assert digest.diagnostics.repair_attempted is False
     assert len(completions.calls) == 1
 

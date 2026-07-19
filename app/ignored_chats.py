@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -96,3 +98,44 @@ def load_ignored_chats(
 
 def load_ignored_chats_from_settings(settings: Settings) -> IgnoredChatsConfig:
     return load_ignored_chats(settings.ignore_chat_ids, settings.ignored_chats_path)
+
+
+def add_ignored_chat(path: Path, chat_id: str, reason: str) -> bool:
+    normalized = _normalize_chat_id(chat_id)
+    if normalized is None:
+        raise IgnoredChatsConfigError("Invalid ignored chats configuration: invalid chat_id.")
+    _file_chat_ids(path)
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise IgnoredChatsConfigError(
+                "Invalid ignored chats configuration: expected readable JSON."
+            ) from exc
+    else:
+        payload = []
+    if any(
+        isinstance(item, dict) and _normalize_chat_id(item.get("chat_id")) == normalized
+        for item in payload
+    ):
+        return False
+    payload.append({"chat_id": normalized, "reason": reason.strip()})
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, path)
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
+    return True

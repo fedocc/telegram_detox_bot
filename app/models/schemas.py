@@ -101,6 +101,7 @@ class DigestP0Alert(BaseModel):
     source_refs: list[MessageRef] = Field(default_factory=list)
     alert_sent: bool
     message_count: int | None = None
+    analyzed_message_count: int | None = None
     first_message_at: datetime | None = None
     last_message_at: datetime | None = None
 
@@ -127,6 +128,7 @@ class DigestDirectMessage(BaseModel):
     source_refs: list[MessageRef] = Field(default_factory=list)
     needs_manual_review: bool = False
     message_count: int | None = None
+    analyzed_message_count: int | None = None
     first_message_at: datetime | None = None
     last_message_at: datetime | None = None
 
@@ -152,6 +154,7 @@ class DigestGroupUpdate(BaseModel):
     source_refs: list[MessageRef] = Field(default_factory=list)
     needs_manual_review: bool = False
     message_count: int | None = None
+    analyzed_message_count: int | None = None
     first_message_at: datetime | None = None
     last_message_at: datetime | None = None
 
@@ -266,6 +269,7 @@ class DailyDigest(BaseModel):
     p0_alerts: list[DigestP0Alert] = Field(default_factory=list)
     direct_messages: list[DigestDirectMessage] = Field(default_factory=list)
     group_updates: list[DigestGroupUpdate] = Field(default_factory=list)
+    channel_updates: list[DigestGroupUpdate] = Field(default_factory=list)
     review: list[DigestReviewItem] = Field(default_factory=list)
     noise_counts: list[DigestNoiseCount] = Field(default_factory=list)
     generated_by: str = "llm"

@@ -42,6 +42,7 @@ def run(
                 now.date(),
                 settings.timezone,
                 ignored_chat_ids=ignored_chat_ids,
+                mention_usernames=settings.p0_mention_usernames,
             )
         else:
             digest = send_daily_digest_pipeline(
@@ -51,6 +52,7 @@ def run(
                 now.date(),
                 settings.timezone,
                 ignored_chat_ids=ignored_chat_ids,
+                mention_usernames=settings.p0_mention_usernames,
             )
     if dry_run:
         diagnostics = digest.diagnostics

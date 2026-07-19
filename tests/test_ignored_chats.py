@@ -12,7 +12,7 @@ from app.cli.check_ignored_chats import run as check_ignored_chats
 from app.config import Settings
 from app.db import repository
 from app.db.session import init_db
-from app.ignored_chats import IgnoredChatsConfigError, load_ignored_chats
+from app.ignored_chats import IgnoredChatsConfigError, add_ignored_chat, load_ignored_chats
 from app.models.schemas import DailyDigest
 from app.services.digest import generate_digest
 from app.services.p0 import handle_p0_candidate
@@ -46,7 +46,7 @@ def session_factory(settings):
     return init_db(settings)
 
 
-@pytest.mark.parametrize("chat_id", ["12345", "-1009999999999"])
+@pytest.mark.parametrize("chat_id", ["12345", "-1009999999999", "-1004411782139"])
 async def test_ignored_live_event_is_rejected_before_mapping_or_storage(
     settings,
     session_factory,
@@ -483,7 +483,12 @@ def test_ignored_legacy_row_is_excluded_from_digest_and_llm(session) -> None:
 
     repository.save_message(
         session,
-        msg(chat_id="ignored", chat_title="Ignored", message_id=1, text="private ignored"),
+        msg(
+            chat_id="-1004411782139",
+            chat_title="Ignored",
+            message_id=1,
+            text="synthetic ignored",
+        ),
     )
     repository.save_message(
         session,
@@ -496,13 +501,19 @@ def test_ignored_legacy_row_is_excluded_from_digest_and_llm(session) -> None:
         llm,
         date(2026, 7, 7),
         "Europe/Moscow",
-        ignored_chat_ids={"ignored"},
+        ignored_chat_ids={"-1004411782139"},
     )
 
     assert {chat["chat_id"] for chat in llm.payload["chats"]} == {"allowed"}
     assert all(
-        ref.chat_id != "ignored"
-        for item in [*digest.direct_messages, *digest.group_updates, *digest.review]
+        ref.chat_id != "-1004411782139"
+        for item in [
+            *digest.p0_alerts,
+            *digest.direct_messages,
+            *digest.group_updates,
+            *digest.channel_updates,
+            *digest.review,
+        ]
         for ref in item.source_refs
     )
 
@@ -526,6 +537,37 @@ def test_ignored_chats_json_loads(tmp_path) -> None:
 
     assert config.chat_ids == {"-100123"}
     assert config.invalid_id_count == 0
+
+
+def test_add_ignored_chat_supports_requested_group_id_without_echoing_existing_data(
+    tmp_path,
+    capsys,
+) -> None:
+    from app.cli.add_ignored_chat import main
+
+    path = tmp_path / "ignored_chats.json"
+    path.write_text(
+        json.dumps([{"chat_id": "-100123", "reason": "synthetic existing"}]),
+        encoding="utf-8",
+    )
+
+    main(
+        [
+            "--chat-id",
+            "-1004411782139",
+            "--reason",
+            "групповой флуд",
+            "--path",
+            str(path),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == "ignored_chat_added=true\n"
+    assert "synthetic existing" not in captured.out
+    assert load_ignored_chats(path=path).contains("-1004411782139")
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert add_ignored_chat(path, "-1004411782139", "duplicate") is False
 
 
 def test_environment_and_json_ignored_ids_merge_without_duplicates(tmp_path) -> None:
