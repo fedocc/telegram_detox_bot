@@ -207,6 +207,91 @@ def test_high_recall_private_reaction_signals_send_email(session, raw_text) -> N
     assert repository.get_message(session, "1", 1).p0_classification == "P0_STRICT"
 
 
+@pytest.mark.parametrize(
+    "raw_text",
+    [
+        "завтра в 10 самолет ты придешь?",
+        "завтра в 10 самолёт ты придёшь?",
+        "сегодня пойдешь гулять?",
+        "сегодня пойдёшь гулять?",
+        "ало ответь",
+        "алло ответь",
+    ],
+)
+def test_private_deterministic_recall_signals_send_p0_without_logging_text(
+    session,
+    raw_text,
+    caplog,
+) -> None:
+    message = msg(text=raw_text)
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(
+        session,
+        message,
+        FakeLLM(status=P0Status.not_p0, confidence=0.99),
+        email,
+    ) is True
+
+    assert len(email.sent) == 1
+    assert repository.get_message(session, "1", 1).p0_classification == "P0_STRICT"
+    assert raw_text not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "raw_text",
+    [
+        "завтра в 10 самолет ты придешь?",
+        "сегодня пойдешь гулять?",
+        "ало ответь",
+    ],
+)
+def test_private_deterministic_recall_signals_do_not_apply_to_outgoing(
+    session,
+    settings,
+    raw_text,
+) -> None:
+    message = msg(text=raw_text, is_outgoing=True)
+    repository.save_message(session, message)
+    llm = FakeLLM()
+    email = FakeEmail()
+
+    assert handle_p0_candidate(
+        session,
+        message,
+        llm,
+        email,
+        settings=settings,
+    ) is False
+
+    assert llm.calls == 0
+    assert email.sent == []
+    assert repository.get_message(session, "1", 1).p0_classification == "NOT_P0"
+
+
+def test_private_planning_signal_does_not_apply_to_channel(session, settings) -> None:
+    message = msg(
+        chat_id="channel-1",
+        chat_type=ChatType.channel,
+        text="сегодня пойдешь гулять?",
+    )
+    repository.save_message(session, message)
+    llm = FakeLLM()
+    email = FakeEmail()
+
+    assert handle_p0_candidate(
+        session,
+        message,
+        llm,
+        email,
+        settings=settings,
+    ) is False
+
+    assert llm.calls == 0
+    assert email.sent == []
+
+
 @pytest.mark.parametrize("status", [P0Status.not_p0, P0Status.p0_strict])
 def test_private_past_tense_watch_statement_does_not_email(session, status) -> None:
     message = msg(text="я посмотрел фильм вчера")

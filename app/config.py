@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     gmail_oauth_client_secret_path: Path = Path("secrets/google_oauth_client.json")
     gmail_oauth_token_path: Path = Path("data/gmail_oauth_token.json")
     gmail_sender_email: str = "fnikonov999@gmail.com"
+    gmail_sender_name: str = ""
     gmail_recipient_email: str = ""
 
     smtp_host: str = "smtp.gmail.com"
@@ -91,6 +92,13 @@ class Settings(BaseSettings):
         if normalized not in {"gmail_api", "smtp"}:
             raise ValueError("EMAIL_TRANSPORT must be one of: gmail_api, smtp")
         return normalized
+
+    @field_validator("gmail_sender_name")
+    @classmethod
+    def validate_gmail_sender_name(cls, value: str) -> str:
+        if "\r" in value or "\n" in value:
+            raise ValueError("GMAIL_SENDER_NAME must not contain newlines")
+        return value.strip()
 
     @field_validator("birthday_reminder_time")
     @classmethod

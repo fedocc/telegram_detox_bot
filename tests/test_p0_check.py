@@ -76,3 +76,41 @@ def test_p0_check_outgoing_message_is_never_p0(monkeypatch, capsys) -> None:
         "chat_type=private",
         "is_outgoing=true",
     ]
+
+
+@pytest.mark.parametrize(
+    ("text", "is_p0", "matched_signal"),
+    [
+        ("завтра в 10 самолет ты придешь?", "true", "private_time_sensitive"),
+        ("завтра в 10 самолёт ты придёшь?", "true", "private_time_sensitive"),
+        ("сегодня пойдешь гулять?", "true", "private_planning"),
+        ("сегодня пойдёшь гулять?", "true", "private_planning"),
+        ("ало ответь", "true", "private_ping_reply"),
+        ("алло ответь", "true", "private_ping_reply"),
+        ("привет как дела?", "false", "none"),
+        ("как дела?", "false", "none"),
+    ],
+)
+def test_p0_check_private_recall_signals(
+    monkeypatch,
+    capsys,
+    text,
+    is_p0,
+    matched_signal,
+) -> None:
+    import app.cli.p0_check as cli
+
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings(_env_file=None))
+
+    cli.main(["--chat-type", "private", "--text", text, "--outgoing", "false"])
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.splitlines() == [
+        f"is_p0={is_p0}",
+        f"reason_category={'private_signal' if is_p0 == 'true' else 'none'}",
+        f"matched_signal={matched_signal}",
+        "chat_type=private",
+        "is_outgoing=false",
+    ]
+    assert text not in captured.out

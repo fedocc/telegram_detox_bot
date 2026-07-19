@@ -75,6 +75,12 @@ def test_gmail_sender_defaults_to_dedicated_account() -> None:
     settings = Settings(_env_file=None)
 
     assert settings.gmail_sender_email == "fnikonov999@gmail.com"
+    assert settings.gmail_sender_name == ""
+
+
+def test_gmail_sender_name_rejects_header_injection() -> None:
+    with pytest.raises(ValueError, match="GMAIL_SENDER_NAME must not contain newlines"):
+        Settings(_env_file=None, gmail_sender_name="TELEGRAM\nBcc: attacker@example.com")
 
 
 def test_legacy_email_to_preserves_existing_gmail_recipient() -> None:

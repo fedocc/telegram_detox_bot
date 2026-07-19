@@ -23,6 +23,7 @@ EMAIL_FIELDS = [
 ]
 GMAIL_EMAIL_FIELDS = [
     ("GMAIL_SENDER_EMAIL", False, "fnikonov999@gmail.com"),
+    ("GMAIL_SENDER_NAME", False, "TELEGRAM"),
     ("GMAIL_RECIPIENT_EMAIL", False, ""),
 ]
 

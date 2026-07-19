@@ -8,6 +8,7 @@ import ssl
 import stat
 import tempfile
 from email.message import EmailMessage
+from email.utils import formataddr
 from pathlib import Path
 
 from app.config import Settings
@@ -123,10 +124,13 @@ def _build_message(
     html: str | None = None,
     *,
     message_id: str | None = None,
+    sender_name: str = "",
 ) -> EmailMessage:
+    if "\r" in sender_name or "\n" in sender_name:
+        raise EmailSendError("GMAIL_SENDER_NAME must not contain newlines")
     msg = EmailMessage()
     msg["Subject"] = subject
-    msg["From"] = sender_email
+    msg["From"] = formataddr((sender_name.strip(), sender_email))
     msg["To"] = recipient_email
     if message_id:
         msg["Message-ID"] = message_id
@@ -318,6 +322,7 @@ class GmailApiSender:
             text,
             html,
             message_id=message_id,
+            sender_name=self.settings.gmail_sender_name,
         )
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
         try:

@@ -13,7 +13,7 @@ from googleapiclient.errors import HttpError
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.email.sender import EmailSender, EmailSendError, GmailApiSender
+from app.email.sender import EmailSender, EmailSendError, GmailApiSender, _build_message
 
 
 class FakeSMTP:
@@ -72,6 +72,7 @@ def gmail_settings(tmp_path: Path) -> Settings:
         gmail_oauth_client_secret_path=tmp_path / "google_oauth_client.json",
         gmail_oauth_token_path=tmp_path / "gmail_oauth_token.json",
         gmail_sender_email="from@example.com",
+        gmail_sender_name="TELEGRAM",
         gmail_recipient_email="to@example.com",
     )
 
@@ -278,10 +279,58 @@ def test_gmail_api_sender_sets_from_to_subject_and_message_id(tmp_path, monkeypa
     GmailApiSender(settings).send("Subject", "plain", "<p>html</p>", message_id="<stable@test>")
 
     message = decode_sent_message(service)
-    assert message["From"] == "from@example.com"
+    assert message["From"] == "TELEGRAM <from@example.com>"
     assert message["To"] == "to@example.com"
     assert message["Subject"] == "Subject"
     assert message["Message-ID"] == "<stable@test>"
+
+
+def test_gmail_api_sender_empty_display_name_keeps_email_only_from_header(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    settings = gmail_settings(tmp_path)
+    settings.gmail_sender_name = ""
+    token_file(settings.gmail_oauth_token_path)
+    service = FakeGmailService()
+    monkeypatch.setattr("app.email.sender.Credentials", FakeCredentials)
+    monkeypatch.setattr("app.email.sender.build", lambda *args, **kwargs: service)
+
+    GmailApiSender(settings).send("Subject", "plain")
+
+    message = decode_sent_message(service)
+    assert message["From"] == "from@example.com"
+    assert message["To"] == "to@example.com"
+
+
+def test_gmail_api_sender_safely_encodes_non_ascii_display_name(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    settings = gmail_settings(tmp_path)
+    settings.gmail_sender_name = "Телеграм"
+    token_file(settings.gmail_oauth_token_path)
+    service = FakeGmailService()
+    monkeypatch.setattr("app.email.sender.Credentials", FakeCredentials)
+    monkeypatch.setattr("app.email.sender.build", lambda *args, **kwargs: service)
+
+    GmailApiSender(settings).send("Subject", "plain")
+
+    raw = base64.urlsafe_b64decode(service.calls[0][2]["raw"].encode("ascii"))
+    message = message_from_bytes(raw, policy=default)
+    assert str(message["From"]) == "Телеграм <from@example.com>"
+    assert b"=?utf-8?" in raw.lower()
+
+
+def test_message_builder_rejects_sender_name_header_injection() -> None:
+    with pytest.raises(EmailSendError, match="GMAIL_SENDER_NAME must not contain newlines"):
+        _build_message(
+            "from@example.com",
+            "to@example.com",
+            "Subject",
+            "plain",
+            sender_name="TELEGRAM\r\nBcc: attacker@example.com",
+        )
 
 
 def test_gmail_api_sender_rejects_authenticated_account_mismatch(tmp_path, monkeypatch) -> None:

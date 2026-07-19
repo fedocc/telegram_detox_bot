@@ -68,6 +68,35 @@ PLANNING_OR_AVAILABILITY_RE = re.compile(
     r")(?!\w)",
     re.IGNORECASE,
 )
+PRIVATE_DIRECT_REQUEST_RE = re.compile(
+    r"(?<!\w)(?:"
+    r"ответь|ответить|ответишь|напиши|скажи|позвони|посмотри|проверь|скинь|отправь"
+    r")(?!\w)",
+    re.IGNORECASE,
+)
+PRIVATE_PLANNING_TIME_RE = re.compile(
+    r"(?<!\w)(?:"
+    r"сегодня|завтра|сейчас|вечером|утром|"
+    r"в\s+(?:[01]?\d|2[0-3])(?::[0-5]\d)?"
+    r")(?!\w)",
+    re.IGNORECASE,
+)
+PRIVATE_PLANNING_ACTION_RE = re.compile(
+    r"(?<!\w)(?:"
+    r"пойд[её]шь|прид[её]шь|сможешь|будешь|ид[её]м|го|гулять|встретиться|встреча"
+    r")(?!\w)",
+    re.IGNORECASE,
+)
+PRIVATE_TIME_SENSITIVE_RE = re.compile(
+    r"(?<!\w)(?:самол[её]т|поезд|аэропорт|вылет|дедлайн|встреча)(?!\w)|"
+    r"(?<!\w)завтра\s+в\s+(?:[01]?\d|2[0-3])(?::[0-5]\d)?(?!\w)",
+    re.IGNORECASE,
+)
+PRIVATE_PING_RE = re.compile(r"(?<!\w)ал{1,2}о(?!\w)", re.IGNORECASE)
+PRIVATE_PING_REPLY_RE = re.compile(
+    r"(?<!\w)(?:ответь|ответишь|можешь\s+ответить)(?!\w)",
+    re.IGNORECASE,
+)
 URGENCY_RE = re.compile(r"\b(?:asap|important|urgent|важн\w*|сроч\w*)\b", re.IGNORECASE)
 IMPORTANT_CONTEXT_RE = re.compile(
     r"\b(?:авари\w*|блокиров\w*|доступ\w*|интервью|ошибк\w*|плат[её]ж\w*|"
@@ -410,9 +439,24 @@ def _private_response_may_be_expected(raw_text: str) -> bool:
     )
 
 
+def _private_deterministic_signal(raw_text: str) -> str | None:
+    if PRIVATE_PING_RE.search(raw_text) and PRIVATE_PING_REPLY_RE.search(raw_text):
+        return "private_ping_reply"
+    if PRIVATE_DIRECT_REQUEST_RE.search(raw_text):
+        return "private_direct_request"
+    if PRIVATE_TIME_SENSITIVE_RE.search(raw_text):
+        return "private_time_sensitive"
+    if PRIVATE_PLANNING_TIME_RE.search(raw_text) and PRIVATE_PLANNING_ACTION_RE.search(
+        raw_text
+    ):
+        return "private_planning"
+    return None
+
+
 def _has_private_signal(raw_text: str) -> bool:
     return bool(
-        _has_request_or_action(raw_text)
+        _private_deterministic_signal(raw_text)
+        or _has_request_or_action(raw_text)
         or _has_planning_or_availability(raw_text)
         or _has_urgency(raw_text)
         or _has_important_context(raw_text)
@@ -481,10 +525,26 @@ def _policy_context(
         direct_mention_username = _matched_mention_username(message, settings)
         direct_mention = direct_mention_username is not None
         mention_enabled = settings is None or settings.p0_classify_mentions
-        request_or_action = _has_request_or_action(raw_text)
-        planning_or_availability = _has_planning_or_availability(raw_text)
-        urgent_or_important = _has_urgency(raw_text) or _has_important_context(raw_text)
-        response_expected = _private_response_may_be_expected(raw_text)
+        private_deterministic_signal = _private_deterministic_signal(raw_text)
+        request_or_action = bool(
+            _has_request_or_action(raw_text)
+            or private_deterministic_signal
+            in {"private_direct_request", "private_ping_reply"}
+        )
+        planning_or_availability = bool(
+            _has_planning_or_availability(raw_text)
+            or private_deterministic_signal == "private_planning"
+        )
+        urgent_or_important = bool(
+            _has_urgency(raw_text)
+            or _has_important_context(raw_text)
+            or private_deterministic_signal == "private_time_sensitive"
+        )
+        response_expected = bool(
+            _private_response_may_be_expected(raw_text)
+            or request_or_action
+            or planning_or_availability
+        )
         request_or_urgency = (
             request_or_action or planning_or_availability or urgent_or_important
         )
@@ -496,6 +556,7 @@ def _policy_context(
         return {
             "small_talk": small_talk,
             "private_signal": private_signal,
+            "private_deterministic_signal": private_deterministic_signal,
             "direct_mention": direct_mention,
             "direct_mention_username": direct_mention_username,
             "reply_to_me": False,
@@ -561,8 +622,10 @@ def debug_p0_check(
             "is_outgoing": False,
         }
     if chat_type == ChatType.private:
+        private_deterministic_signal = _private_deterministic_signal(text)
         matched = _has_private_signal(text)
         reason_category = "private_signal" if matched else "none"
+        matched_signal = private_deterministic_signal or ("policy" if matched else "none")
     else:
         matched = bool(
             _has_request_or_action(text)
@@ -572,10 +635,11 @@ def debug_p0_check(
             or _response_may_be_expected(text)
         )
         reason_category = "group_signal" if matched else "none"
+        matched_signal = "policy" if matched else "none"
     return {
         "is_p0": matched,
         "reason_category": reason_category,
-        "matched_signal": "policy" if matched else "none",
+        "matched_signal": matched_signal,
         "chat_type": chat_type.value,
         "is_outgoing": False,
     }

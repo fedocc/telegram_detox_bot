@@ -33,5 +33,10 @@ def test_makefile_uses_project_virtualenv() -> None:
 def test_setup_env_uses_separate_gmail_sender_and_recipient_fields() -> None:
     names = [name for name, secret, default in GMAIL_EMAIL_FIELDS]
 
-    assert names == ["GMAIL_SENDER_EMAIL", "GMAIL_RECIPIENT_EMAIL"]
+    assert names == [
+        "GMAIL_SENDER_EMAIL",
+        "GMAIL_SENDER_NAME",
+        "GMAIL_RECIPIENT_EMAIL",
+    ]
     assert GMAIL_EMAIL_FIELDS[0][2] == "fnikonov999@gmail.com"
+    assert GMAIL_EMAIL_FIELDS[1][2] == "TELEGRAM"

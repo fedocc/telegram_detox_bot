@@ -64,8 +64,9 @@ JSON file while completing these steps.
    sudo systemctl stop telegram-detox
    ```
 
-2. In `/opt/telegram-detox/.env`, set `GMAIL_SENDER_EMAIL=fnikonov999@gmail.com` and set
-   `GMAIL_RECIPIENT_EMAIL` to the existing recipient value.
+2. In `/opt/telegram-detox/.env`, set `GMAIL_SENDER_EMAIL=fnikonov999@gmail.com`,
+   `GMAIL_SENDER_NAME=TELEGRAM`, and set `GMAIL_RECIPIENT_EMAIL` to the existing recipient
+   value.
 
 3. Back up the old token without displaying it:
 

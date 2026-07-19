@@ -136,6 +136,7 @@ python -m app.cli.telegram_login
 Default email transport is Gmail API over HTTPS:
 
 - `GMAIL_SENDER_EMAIL=fnikonov999@gmail.com`
+- `GMAIL_SENDER_NAME=TELEGRAM` (optional friendly name; the real sender address remains visible)
 - `GMAIL_RECIPIENT_EMAIL=<current main Gmail recipient>`
 - `EMAIL_TRANSPORT=gmail_api`
 - `GMAIL_OAUTH_CLIENT_SECRET_PATH=secrets/google_oauth_client.json`
