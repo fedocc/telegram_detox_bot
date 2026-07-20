@@ -974,6 +974,8 @@ def generate_digest(
     digest.diagnostics.validation_error_type = safe_validation_type
     digest.diagnostics.validation_error_paths = safe_validation_paths
     digest.diagnostics.validation_error_codes = safe_validation_codes
+    # The requested day is derived in Moscow time; do not trust a model-provided date.
+    digest.date = day.isoformat()
     logger.info(
         "Digest generation diagnostics llm_attempted=%s llm_used=%s fallback_used=%s "
         "fallback_reason=%s chats_count=%d messages_count=%d validation_error_type=%s "

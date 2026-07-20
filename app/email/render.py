@@ -4,6 +4,12 @@ from html import escape
 
 from app.models.schemas import DailyDigest
 from app.services.text import sanitize_channel_summary
+from app.services.time_format import (
+    format_user_datetime,
+    format_user_time,
+    format_user_time_range,
+    localize_embedded_utc_iso,
+)
 
 EMPTY_VALUES = {
     "нет",
@@ -24,16 +30,15 @@ def _line(text: str) -> str:
 def _deadline_value(item) -> str | None:
     deadline_at = getattr(item, "deadline_at", None)
     if deadline_at:
-        return deadline_at.isoformat()
-    return getattr(item, "deadline_text", None)
+        return format_user_datetime(deadline_at)
+    deadline_text = getattr(item, "deadline_text", None)
+    if not deadline_text:
+        return None
+    return localize_embedded_utc_iso(deadline_text)
 
 
 def _summary(text: str) -> str:
     return (text or "").replace("короткая переписка", "обсуждение").strip()
-
-
-def _time(value) -> str | None:
-    return value.strftime("%H:%M") if value else None
 
 
 def _optional(value: str | None) -> str | None:
@@ -57,11 +62,12 @@ def _metrics_line(item) -> str | None:
 
 
 def _time_line(item) -> str | None:
-    first = _time(getattr(item, "first_message_at", None))
-    last = _time(getattr(item, "last_message_at", None))
+    first = getattr(item, "first_message_at", None)
+    last = getattr(item, "last_message_at", None)
     if first and last and first != last:
-        return f"{first}–{last}"
-    return last or first
+        return format_user_time_range(first, last)
+    value = last or first
+    return f"{format_user_time(value)} MSK" if value else None
 
 
 def _important_line(item, *, channel: bool = False) -> str | None:
@@ -135,7 +141,7 @@ def render_plain_text(digest: DailyDigest) -> str:
         ("КАНАЛЫ", digest.channel_updates),
     ):
         parts.extend(["", *_plain_section(title, items, channel=title == "КАНАЛЫ")])
-    return "\n".join(parts)
+    return localize_embedded_utc_iso("\n".join(parts))
 
 
 def render_html(digest: DailyDigest) -> str:
@@ -158,7 +164,7 @@ def render_html(digest: DailyDigest) -> str:
             body = "".join(blocks)
         return f"<h2 style=\"margin-top:28px\">{_line(title)}</h2>{body}"
 
-    return f"""<!doctype html>
+    rendered = f"""<!doctype html>
 <html><body style="font-family:Arial,sans-serif;line-height:1.45;max-width:760px">
 <h1>Telegram digest</h1>
 <p>{_line(digest.date)}</p>
@@ -167,6 +173,7 @@ def render_html(digest: DailyDigest) -> str:
 {section("ГРУППЫ", digest.group_updates)}
 {section("КАНАЛЫ", digest.channel_updates, channel=True)}
 </body></html>"""
+    return localize_embedded_utc_iso(rendered)
 
 
 def digest_subject(digest: DailyDigest) -> str:

@@ -19,6 +19,11 @@ from app.models.schemas import (
     StoredMessage,
 )
 from app.services.text import safe_truncate
+from app.services.time_format import (
+    format_user_datetime,
+    format_user_time,
+    localize_embedded_utc_iso,
+)
 
 SAFE_TEXT_LIMIT = 500
 DEFAULT_MAX_CONTEXT_MESSAGES = 5
@@ -125,7 +130,8 @@ SMALL_TALK_PHRASES = (
     "пишу просто так",
 )
 ISO_TIMESTAMP_RE = re.compile(
-    r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})?\b",
+    r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?"
+    r"(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\b",
     re.IGNORECASE,
 )
 
@@ -191,7 +197,7 @@ def _deadline_label(message: StoredMessage) -> str:
     lowered = raw_text.casefold()
     iso_timestamp = ISO_TIMESTAMP_RE.search(raw_text)
     if iso_timestamp:
-        return iso_timestamp.group(0)
+        return localize_embedded_utc_iso(iso_timestamp.group(0))
     exact = re.search(r"\b(до|к)\s+(\d{1,2}(?::\d{2})?)\b", lowered)
     if exact:
         return f"{exact.group(1)} {exact.group(2)}"
@@ -237,16 +243,15 @@ def _email_context(session: Session, message: StoredMessage) -> list:
     return (recent or prior[-5:])[-EMAIL_CONTEXT_LIMIT:]
 
 
-def _context_line(row, message: StoredMessage) -> str:
-    timestamp = row.timestamp
-    if timestamp.tzinfo is None and message.timestamp.tzinfo is not None:
-        timestamp = timestamp.replace(tzinfo=UTC).astimezone(message.timestamp.tzinfo)
+def _context_line(row) -> str:
     sender = "Я" if row.is_outgoing else (row.sender_name or "Неизвестный отправитель")
     raw_text = safe_truncate(
-        row.text or row.caption or "[медиа без подписи]",
+        localize_embedded_utc_iso(
+            row.text or row.caption or "[медиа без подписи]"
+        ),
         DEFAULT_MAX_MESSAGE_CHARS,
     )
-    return f"- {timestamp.strftime('%H:%M')} — {sender}: {raw_text}"
+    return f"- {format_user_time(row.timestamp)} — {sender}: {raw_text}"
 
 
 def _russian_reason(
@@ -289,24 +294,24 @@ def _decision_body(
     message: StoredMessage,
     policy_context: PolicyContext,
 ) -> str:
-    raw_text = message.text or message.caption or ""
+    raw_text = localize_embedded_utc_iso(message.text or message.caption)
     context = _email_context(session, message)
     rendered_context = (
-        "\n".join(_context_line(row, message) for row in context)
+        "\n".join(_context_line(row) for row in context)
         if context
         else "Предыдущих сообщений нет."
     )
     parts = [
         f"Чат: {message.chat_title}",
         f"Отправитель: {message.sender_name or 'Неизвестный отправитель'}",
-        f"Время: {message.timestamp.isoformat()}",
+        f"Время: {format_user_datetime(message.timestamp)}",
         f"Почему срочно: {_russian_reason(message, policy_context)}",
         f"Что сделать: {_russian_action(message, policy_context)}",
         f"Срок: {_deadline_label(message)}",
         f"Исходный текст:\n{raw_text}",
         f"Контекст переписки:\n{rendered_context}",
     ]
-    return "\n\n".join(parts)
+    return localize_embedded_utc_iso("\n\n".join(parts))
 
 
 def _has_text(message: StoredMessage) -> bool:

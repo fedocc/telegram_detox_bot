@@ -16,6 +16,7 @@ from app.llm.client import (
     sanitize_validation_paths,
 )
 from app.services.digest import generate_digest, send_daily_digest_pipeline
+from app.services.time_format import to_user_timezone
 
 
 def run(
@@ -33,13 +34,14 @@ def run(
     ignored_chat_ids = load_ignored_chats_from_settings(settings).chat_ids
     session_factory = session_factory or init_db(settings)
     now = now or datetime.now(ZoneInfo(settings.timezone))
+    digest_day = to_user_timezone(now).date()
     llm = llm or HaikuClient(settings)
     with session_factory() as session:
         if dry_run:
             digest = generate_digest(
                 session,
                 llm,
-                now.date(),
+                digest_day,
                 settings.timezone,
                 ignored_chat_ids=ignored_chat_ids,
                 mention_usernames=settings.p0_mention_usernames,
@@ -49,7 +51,7 @@ def run(
                 session,
                 llm,
                 email_sender or EmailSender(settings),
-                now.date(),
+                digest_day,
                 settings.timezone,
                 ignored_chat_ids=ignored_chat_ids,
                 mention_usernames=settings.p0_mention_usernames,

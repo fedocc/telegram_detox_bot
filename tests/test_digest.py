@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -198,8 +199,34 @@ def test_email_prefers_deadline_at_when_present() -> None:
     text = render_plain_text(digest)
     html = render_html(digest)
 
-    assert "2026-07-07T19:00:00+03:00" in text
-    assert "2026-07-07T19:00:00+03:00" in html
+    assert "2026-07-07 19:00 MSK" in text
+    assert "2026-07-07 19:00 MSK" in html
+
+
+def test_digest_localizes_embedded_utc_iso_in_all_rendered_text() -> None:
+    digest = DailyDigest(
+        date="2026-07-20",
+        direct_messages=[
+            {
+                "chat": "Synthetic private chat",
+                "summary": "deadline: 2026-07-19T22:30:00Z",
+                "needs_reply": True,
+                "important_context": "context 2026-07-20T09:26:04+00:00",
+                "action": "act after 2026-07-20T09:26:04.500+00:00",
+                "deadline_text": "до 2026-07-20T09:26:04+00:00",
+            }
+        ],
+    )
+
+    rendered = render_plain_text(digest) + render_html(digest)
+
+    assert "deadline: 2026-07-20 01:30 MSK" in rendered
+    assert "context 2026-07-20 12:26 MSK" in rendered
+    assert "act after 2026-07-20 12:26 MSK" in rendered
+    assert "до 2026-07-20 12:26 MSK" in rendered
+    assert "+00:00" not in rendered
+    assert "2026-07-19T22:30:00Z" not in rendered
+    assert not re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:\+00:00|Z)", rendered)
 
 
 def test_multiple_private_messages_from_same_sender_render_as_one_line(now) -> None:
@@ -223,7 +250,7 @@ def test_multiple_private_messages_from_same_sender_render_as_one_line(now) -> N
 
     assert output.count("\nМаша\n") == 1
     assert "Сообщений: 2" in output
-    assert "Время: 18:42–19:10" in output
+    assert "Время: 18:42–19:10 MSK" in output
     assert "Ответ нужен" not in output
 
 
@@ -254,7 +281,7 @@ def test_grouped_line_includes_count_first_last_time() -> None:
 
     assert "\nЛаба\n" in output
     assert "Сообщений: 2" in output
-    assert "Время: 20:05–21:17" in output
+    assert "Время: 20:05–21:17 MSK" in output
 
 
 def test_digest_output_does_not_contain_bad_phrases() -> None:
@@ -1379,6 +1406,28 @@ def test_digest_now_dry_run_does_not_send_email(settings, monkeypatch) -> None:
         assert repository.pending_digests(session) == []
 
 
+def test_digest_now_uses_moscow_date_for_late_utc_timestamp(settings, monkeypatch) -> None:
+    from app.cli import digest_now
+
+    session_factory = init_db(settings)
+    monkeypatch.setattr(
+        digest_now,
+        "load_ignored_chats_from_settings",
+        lambda _settings: type("Ignored", (), {"chat_ids": set()})(),
+    )
+
+    digest = digest_now.run(
+        dry_run=True,
+        settings=settings,
+        session_factory=session_factory,
+        llm=FakeLLM(),
+        now=datetime.fromisoformat("2026-07-19T22:30:00+00:00"),
+        output=lambda _line: None,
+    )
+
+    assert digest.date == "2026-07-20"
+
+
 def test_digest_now_dry_run_reports_fallback_reason(settings, monkeypatch) -> None:
     from app.cli import digest_now
 
@@ -1774,7 +1823,7 @@ def test_channel_rendering_keeps_facts_and_removes_genre_labels(session, now) ->
     assert "synthetic channel" in output
     assert "сообщений: 1" in output
     assert "1 фото" in output
-    assert "время: 09:00" in output
+    assert "время: 12:00 msk" in output
     assert "квартира 116 кв.м., 150 тыс./мес." in output
     for forbidden in (
         "канал с",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta
 
 import pytest
@@ -822,7 +823,7 @@ def test_contract_file_deadline_sends_strict_email_with_raw_text(session) -> Non
     assert raw_text in body
     assert "Чат: Маша" in body
     assert "Отправитель: Sender" in body
-    assert "Время: 2026-07-07T12:00:00+03:00" in body
+    assert "Время: 2026-07-07 12:00 MSK" in body
     assert "Почему срочно: похоже, от тебя ждут ответа или действия." in body
     assert "Что сделать: ответить в Telegram." in body
     assert "Срок: до 18:00" in body
@@ -877,6 +878,36 @@ def test_p0_email_includes_recent_conversation_context(session) -> None:
     assert "Первое сообщение из контекста" in body
     assert "Второе сообщение из контекста" in body
     assert "— Я: Второе сообщение из контекста" in body
+
+
+def test_p0_email_renders_main_and_context_timestamps_in_moscow(session) -> None:
+    repository.save_message(
+        session,
+        msg(
+            message_id=1,
+            text="Synthetic context 2026-07-20T02:57:00+00:00",
+            timestamp=datetime.fromisoformat("2026-07-20T02:57:00+00:00"),
+        ),
+    )
+    message = msg(
+        message_id=2,
+        text="Ответь срочно до 2026-07-20T09:26:04+00:00",
+        timestamp=datetime.fromisoformat("2026-07-20T09:26:04+00:00"),
+    )
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(session, message, FakeLLM(), email) is True
+    subject, body, _ = email.sent[0]
+
+    assert subject == "Telegram alert"
+    assert "Время: 2026-07-20 12:26 MSK" in body
+    assert "Исходный текст:\nОтветь срочно до 2026-07-20 12:26 MSK" in body
+    assert "05:57 — Sender: Synthetic context 2026-07-20 05:57 MSK" in body
+    assert "+00:00" not in body
+    assert "2026-07-20T09:26:04+00:00" not in body
+    assert "2026-07-20T02:57:00+00:00" not in body
+    assert not re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:\+00:00|Z)", body)
 
 
 def test_p0_email_does_not_use_message_timestamp_as_deadline(session) -> None:
@@ -936,6 +967,37 @@ def test_p0_email_renders_iso_deadline_only_when_iso_is_in_raw_text(session) -> 
 
     assert handle_p0_candidate(session, message, FakeLLM(), email) is True
     assert f"Срок: {raw_deadline}" in email.sent[0][1]
+    assert f"Исходный текст:\nответь до {raw_deadline}" in email.sent[0][1]
+
+
+@pytest.mark.parametrize(
+    ("raw_deadline", "expected_deadline"),
+    [
+        ("2026-07-20T09:26:04", "2026-07-20T09:26:04"),
+        ("2026-07-20T09:26:04+00:00", "2026-07-20 12:26 MSK"),
+        ("2026-07-20T09:26:04Z", "2026-07-20 12:26 MSK"),
+        ("2026-07-20T09:26:04.123456+00:00", "2026-07-20 12:26 MSK"),
+    ],
+)
+def test_p0_free_text_deadline_localizes_only_explicit_utc(
+    session,
+    raw_deadline,
+    expected_deadline,
+) -> None:
+    message = msg(text=f"ответь до {raw_deadline}")
+    repository.save_message(session, message)
+    email = FakeEmail()
+
+    assert handle_p0_candidate(session, message, FakeLLM(), email) is True
+    subject, body, _ = email.sent[0]
+
+    assert subject == "Telegram alert"
+    assert f"Срок: {expected_deadline}" in body
+    if raw_deadline == "2026-07-20T09:26:04":
+        assert "2026-07-20 12:26 MSK" not in body
+        assert raw_deadline in body
+    else:
+        assert raw_deadline not in body
 
 
 def test_p0_processing_does_not_log_private_text(session, caplog) -> None:

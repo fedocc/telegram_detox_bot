@@ -676,6 +676,6 @@ async def test_list_chats_outputs_requested_metadata_and_ignored_flag(
         "type": "channel",
         "title": "Project Chat",
         "username": "project_chat",
-        "last_seen": "2026-07-07T12:00:00+03:00",
+        "last_seen": "2026-07-07 12:00 MSK",
         "ignored": True,
     }

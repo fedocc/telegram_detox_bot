@@ -7,6 +7,7 @@ from collections.abc import Callable
 
 from app.config import Settings, get_settings
 from app.ignored_chats import load_ignored_chats_from_settings
+from app.services.time_format import format_user_datetime
 from app.telegram.client import make_client
 from app.telegram.mapper import display_name
 
@@ -58,7 +59,7 @@ async def run(
                         "type": _dialog_type(dialog),
                         "title": title,
                         "username": username,
-                        "last_seen": last_seen.isoformat() if last_seen else None,
+                        "last_seen": format_user_datetime(last_seen) if last_seen else None,
                         "ignored": ignored.contains(dialog.id),
                     },
                     ensure_ascii=False,
