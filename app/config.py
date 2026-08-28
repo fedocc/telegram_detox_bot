@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     tg_api_hash: str | None = None
     tg_phone: str | None = None
     tg_session_path: Path = Path("data/telegram_digest.session")
+    telegram_use_ipv6: bool = False
 
     database_url: str = "sqlite:///data/telegram_digest.db"
     timezone: str = "Europe/Moscow"

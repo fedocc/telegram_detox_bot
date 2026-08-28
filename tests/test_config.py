@@ -14,6 +14,34 @@ def test_empty_tg_api_id_is_treated_as_none() -> None:
     assert settings.tg_phone is None
 
 
+def test_telegram_use_ipv6_defaults_to_false() -> None:
+    assert Settings(_env_file=None).telegram_use_ipv6 is False
+
+
+def test_make_client_passes_telegram_ipv6_setting(monkeypatch, tmp_path) -> None:
+    captured = {}
+
+    class FakeClient:
+        pass
+
+    def fake_client(session, api_id, api_hash, *, use_ipv6):
+        captured["use_ipv6"] = use_ipv6
+        return FakeClient()
+
+    settings = Settings(
+        _env_file=None,
+        tg_api_id=1,
+        tg_api_hash="not-a-real-secret",
+        tg_phone="+10000000000",
+        tg_session_path=tmp_path / "telegram.session",
+        telegram_use_ipv6=True,
+    )
+    monkeypatch.setattr("app.telegram.client.TelegramClient", fake_client)
+
+    assert isinstance(make_client(settings), FakeClient)
+    assert captured["use_ipv6"] is True
+
+
 def test_missing_telegram_fields_allow_test_llm_config_load() -> None:
     settings = Settings(
         _env_file=None,

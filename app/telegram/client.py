@@ -20,7 +20,12 @@ from app.telegram.mapper import event_to_stored_message
 def make_client(settings: Settings) -> TelegramClient:
     settings.require_telegram_credentials()
     Path(settings.tg_session_path).parent.mkdir(mode=0o700, exist_ok=True)
-    return TelegramClient(str(settings.tg_session_path), settings.tg_api_id, settings.tg_api_hash)
+    return TelegramClient(
+        str(settings.tg_session_path),
+        settings.tg_api_id,
+        settings.tg_api_hash,
+        use_ipv6=settings.telegram_use_ipv6,
+    )
 
 
 async def interactive_login(settings: Settings) -> None:
