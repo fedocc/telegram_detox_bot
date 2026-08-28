@@ -364,6 +364,14 @@ def matched_mention_username_from_config(text: str, configured: str) -> str | No
     return None
 
 
+def has_exact_fedocc_mention(text: str | None) -> bool:
+    """Match only the standalone Telegram username required by mention-only mode."""
+    return bool(
+        text
+        and re.search(r"(?<![A-Za-z0-9_])@fedocc(?![A-Za-z0-9_])", text, re.IGNORECASE)
+    )
+
+
 def matched_mention_username(
     text: str,
     settings: Settings | None,
@@ -829,6 +837,8 @@ def _send_strict_decision(
     decision: P0Decision,
     email_sender: EmailSender,
     policy_context: PolicyContext,
+    *,
+    alert_type: str = "p0",
 ) -> bool:
     repository.mark_p0_classified(
         session,
@@ -845,14 +855,14 @@ def _send_strict_decision(
         subject="Telegram alert",
         body=_decision_body(session, message, policy_context),
         html=None,
-        alert_type="p0",
+        alert_type=alert_type,
     )
 
 
 def handle_p0_candidate(
     session: Session,
     message: StoredMessage,
-    llm: HaikuClient,
+    llm: HaikuClient | None,
     email_sender: EmailSender,
     settings: Settings | None = None,
     ignored_chat_ids: frozenset[str] | set[str] | None = None,
@@ -871,6 +881,23 @@ def handle_p0_candidate(
 
     if _is_non_text_media(message):
         return _mark_not_p0(session, message)
+
+    if settings is not None and settings.mention_only_mode:
+        if not has_exact_fedocc_mention(message.text or message.caption):
+            return _mark_not_p0(session, message)
+        policy_context: PolicyContext = {
+            "direct_mention": True,
+            "direct_mention_username": "fedocc",
+            "deterministic_strict": True,
+        }
+        return _send_strict_decision(
+            session,
+            message,
+            _promote_to_strict(message, policy_context),
+            email_sender,
+            policy_context,
+            alert_type="mention_only",
+        )
 
     policy_context = _policy_context(session, message, settings)
     if not _should_classify_immediately(session, message, settings, policy_context):
@@ -898,6 +925,8 @@ def handle_p0_candidate(
             message.message_id,
             message.timestamp,
         )
+        if llm is None:
+            raise RuntimeError("LLM is required when MENTION_ONLY_MODE is disabled")
         decision = llm.classify_p0(
             _message_payload(
                 message,

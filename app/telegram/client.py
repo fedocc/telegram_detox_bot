@@ -12,7 +12,7 @@ from app.db import repository
 from app.email.sender import EmailSender
 from app.ignored_chats import load_ignored_chats_from_settings
 from app.llm.client import HaikuClient
-from app.services.p0 import handle_p0_candidate
+from app.services.p0 import handle_p0_candidate, has_exact_fedocc_mention
 from app.telegram.backfill import run_startup_backfill
 from app.telegram.mapper import event_to_stored_message
 
@@ -46,13 +46,17 @@ async def ingest_event(
     *,
     settings: Settings,
     session_factory,
-    llm: HaikuClient,
+    llm: HaikuClient | None,
     email: EmailSender,
     ignored_chat_ids: frozenset[str] | set[str],
 ) -> bool:
     if str(event.chat_id) in ignored_chat_ids:
         return False
     stored = await event_to_stored_message(event)
+    if settings.mention_only_mode and (
+        stored.is_outgoing or not has_exact_fedocc_mention(stored.text or stored.caption)
+    ):
+        return False
     with session_factory() as session:
         repository.save_message(session, stored)
         if not stored.is_outgoing:
@@ -82,7 +86,7 @@ async def run_listener(
         await client.disconnect()
         raise RuntimeError("Telegram session is unauthorized. Run telegram_login.")
 
-    llm = HaikuClient(settings)
+    llm = None if settings.mention_only_mode else HaikuClient(settings)
     email = EmailSender(settings)
     if on_connected is not None:
         on_connected(client)

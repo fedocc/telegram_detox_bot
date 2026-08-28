@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     birthday_manual_path: Path = Path("data/birthdays.json")
     ignore_chat_ids: str = ""
     ignored_chats_path: Path = Path("data/ignored_chats.json")
+    mention_only_mode: bool = False
     p0_classify_private_text: bool = True
     p0_classify_all_groups: bool = False
     p0_classify_mentions: bool = True

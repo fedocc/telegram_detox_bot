@@ -65,6 +65,7 @@ async def main() -> None:
                 EmailSender(settings),
                 now,
                 excluded_chat_ids=current_ignored_chat_ids,
+                allowed_alert_types={"mention_only"} if settings.mention_only_mode else None,
             )
 
     def retry_digests_job() -> None:
@@ -116,11 +117,13 @@ async def main() -> None:
             replace_existing=True,
         )
 
-    scheduler.add_job(daily_job, "cron", hour=hour, minute=minute)
+    if not settings.mention_only_mode:
+        scheduler.add_job(daily_job, "cron", hour=hour, minute=minute)
     scheduler.add_job(cleanup_job, "cron", hour=3, minute=10)
     scheduler.add_job(retry_alerts_job, "interval", minutes=1)
-    scheduler.add_job(retry_digests_job, "interval", minutes=5)
-    if settings.birthday_reminders_enabled:
+    if not settings.mention_only_mode:
+        scheduler.add_job(retry_digests_job, "interval", minutes=5)
+    if settings.birthday_reminders_enabled and not settings.mention_only_mode:
         birthday_hour, birthday_minute = [
             int(part) for part in settings.birthday_reminder_time.split(":", 1)
         ]
@@ -136,7 +139,11 @@ async def main() -> None:
     await run_listener(
         settings,
         session_factory,
-        on_connected=register_birthday_poll if settings.birthday_reminders_enabled else None,
+        on_connected=(
+            register_birthday_poll
+            if settings.birthday_reminders_enabled and not settings.mention_only_mode
+            else None
+        ),
         ignored_chat_ids=ignored_chat_ids,
     )
 
