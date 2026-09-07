@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import Session
 
 from app.db import repository
 from app.email.sender import EmailSender
-from app.llm.client import HaikuClient
-from app.services.digest import send_daily_digest_pipeline
+
+if TYPE_CHECKING:
+    from app.llm.client import HaikuClient
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,8 @@ def run_daily_job(
     ignored_chat_ids: frozenset[str] | set[str] | None = None,
     mention_usernames: str = "fedocc,me,fedornikonov",
 ) -> None:
+    from app.services.digest import send_daily_digest_pipeline
+
     try:
         send_daily_digest_pipeline(
             session,

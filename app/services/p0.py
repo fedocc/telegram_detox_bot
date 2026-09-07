@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import Session
 
@@ -9,7 +10,6 @@ from app.config import Settings
 from app.db import repository
 from app.email.sender import EmailSender
 from app.ignored_chats import load_ignored_chats_from_settings
-from app.llm.client import HaikuClient, LLMError
 from app.models.schemas import (
     P0_MIN_CONFIDENCE,
     ChatType,
@@ -18,12 +18,16 @@ from app.models.schemas import (
     P0Status,
     StoredMessage,
 )
+from app.services.mentions import has_exact_fedocc_mention
 from app.services.text import safe_truncate
 from app.services.time_format import (
     format_user_datetime,
     format_user_time,
     localize_embedded_utc_iso,
 )
+
+if TYPE_CHECKING:
+    from app.llm.client import HaikuClient
 
 SAFE_TEXT_LIMIT = 500
 DEFAULT_MAX_CONTEXT_MESSAGES = 5
@@ -362,14 +366,6 @@ def matched_mention_username_from_config(text: str, configured: str) -> str | No
         if username in usernames:
             return username
     return None
-
-
-def has_exact_fedocc_mention(text: str | None) -> bool:
-    """Match only the standalone Telegram username required by mention-only mode."""
-    return bool(
-        text
-        and re.search(r"(?<![A-Za-z0-9_])@fedocc(?![A-Za-z0-9_])", text, re.IGNORECASE)
-    )
 
 
 def matched_mention_username(
@@ -885,19 +881,24 @@ def handle_p0_candidate(
     if settings is not None and settings.mention_only_mode:
         if not has_exact_fedocc_mention(message.text or message.caption):
             return _mark_not_p0(session, message)
-        policy_context: PolicyContext = {
-            "direct_mention": True,
-            "direct_mention_username": "fedocc",
-            "deterministic_strict": True,
-        }
-        return _send_strict_decision(
+        job = repository.create_alert_job(
             session,
-            message,
-            _promote_to_strict(message, policy_context),
-            email_sender,
-            policy_context,
+            chat_id=message.chat_id,
+            message_id=message.message_id,
             alert_type="mention_only",
+            subject=repository.P0_EMAIL_SUBJECT,
+            text_body=(
+                f"Чат: {message.chat_title}\n"
+                f"Отправитель: {message.sender_name or 'Неизвестный отправитель'}\n"
+                f"Время: {format_user_datetime(message.timestamp)}\n\n"
+                f"{message.text or message.caption}"
+            ),
+            html_body="",
+            now=datetime.now(UTC),
         )
+        return repository.send_alert_job(session, job, email_sender, datetime.now(UTC))
+
+    from app.llm.client import LLMError
 
     policy_context = _policy_context(session, message, settings)
     if not _should_classify_immediately(session, message, settings, policy_context):

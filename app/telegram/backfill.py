@@ -3,12 +3,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from app.config import Settings
 from app.db import repository
 from app.email.sender import EmailSender
 from app.ignored_chats import load_ignored_chats_from_settings
-from app.llm.client import HaikuClient
 from app.models.schemas import ChatType, MediaType, P0Status, StoredMessage
 from app.services.p0 import handle_p0_candidate
 from app.services.prefilter import is_p0_candidate, is_urgent_call_candidate
@@ -18,6 +18,9 @@ from app.telegram.mapper import (
     resolve_reply_to_is_mine,
     telegram_message_to_stored_message,
 )
+
+if TYPE_CHECKING:
+    from app.llm.client import HaikuClient
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +85,7 @@ async def run_startup_backfill(
     ignored_chat_ids: frozenset[str] | set[str] | None = None,
 ) -> BackfillStats:
     stats = BackfillStats()
-    if not settings.backfill_enabled:
+    if settings.mention_only_mode or not settings.backfill_enabled:
         return stats
     if ignored_chat_ids is None:
         ignored_chat_ids = load_ignored_chats_from_settings(settings).chat_ids

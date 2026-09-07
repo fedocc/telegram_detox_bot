@@ -20,6 +20,7 @@ from app.db.tables import (
     MessageRecord,
 )
 from app.models.schemas import P0_MIN_CONFIDENCE, DailyDigest, P0Status, StoredMessage
+from app.services.mentions import has_exact_fedocc_mention
 
 _CANONICAL_CHAT_ID_RE = re.compile(r"-?[1-9]\d*")
 DIGEST_EMAIL_SUBJECT = "Telegram digest"
@@ -985,7 +986,7 @@ def _mark_alert_pending(
     error: Exception | str,
     now: datetime,
 ) -> None:
-    now = _db_time(now)
+    now = _utc_db_time(now) if job.alert_type == "mention_only" else _db_time(now)
     job.status = "pending"
     job.attempts += 1
     job.last_error_safe = safe_error(error)
@@ -1005,10 +1006,16 @@ def _mark_alert_sent(session: Session, job: AlertJob, now: datetime) -> None:
     session.commit()
 
 
-def _is_retry_safe_p0_alert(session: Session, job: AlertJob) -> bool:
-    if job.alert_type != "p0":
+def _is_retry_safe_alert(session: Session, job: AlertJob) -> bool:
+    if job.alert_type not in {"p0", "mention_only"}:
         return False
     message = get_message(session, job.chat_id, job.message_id)
+    if job.alert_type == "mention_only":
+        return bool(
+            message
+            and message.is_outgoing is False
+            and has_exact_fedocc_mention(message.text or message.caption)
+        )
     return bool(
         message
         and message.is_outgoing is False
@@ -1037,11 +1044,12 @@ def _cancel_unsafe_alert(session: Session, job: AlertJob, reason: str) -> None:
 def send_alert_job(session: Session, job: AlertJob, email_sender, now: datetime) -> bool:
     if job.status == "sent":
         return False
-    if not _is_retry_safe_p0_alert(session, job):
+    if not _is_retry_safe_alert(session, job):
         _cancel_unsafe_alert(session, job, "unsafe_p0_retry_source")
         return False
     token = uuid4().hex
-    claimed = claim_pending_alert(session, job.id, job.next_attempt_at or now, token)
+    claim_at = now if job.alert_type == "mention_only" else (job.next_attempt_at or now)
+    claimed = claim_pending_alert(session, job.id, claim_at, token)
     if not claimed:
         return False
     return send_claimed_alert(session, claimed.id, token, email_sender, now)
@@ -1063,7 +1071,7 @@ def send_claimed_alert(
     )
     if not job:
         return False
-    if not _is_retry_safe_p0_alert(session, job):
+    if not _is_retry_safe_alert(session, job):
         _cancel_unsafe_alert(session, job, "unsafe_p0_retry_source")
         return False
     try:
@@ -1092,10 +1100,11 @@ def retry_pending_alerts(
     now: datetime,
     *,
     excluded_chat_ids: frozenset[str] | set[str] | None = None,
+    allowed_alert_types: frozenset[str] | set[str] | None = None,
 ) -> int:
     now = _utc_db_time(now)
-    release_stale_alert_claims(session, now)
-    cancel_legacy_alerts(session)
+    release_stale_alert_claims(session, now, allowed_alert_types=allowed_alert_types)
+    cancel_legacy_alerts(session, allowed_alert_types=allowed_alert_types)
     stmt = (
         select(AlertJob.id)
         .join(
@@ -1105,12 +1114,13 @@ def retry_pending_alerts(
         )
         .where(AlertJob.status == "pending")
         .where(AlertJob.next_attempt_at <= now)
-        .where(AlertJob.alert_type == "p0")
         .where(MessageRecord.is_outgoing.is_(False))
-        .where(MessageRecord.p0_classification == P0Status.p0_strict.value)
-        .where(MessageRecord.p0_confidence >= P0_MIN_CONFIDENCE)
         .order_by(AlertJob.created_at, AlertJob.id)
     )
+    if allowed_alert_types is None:
+        stmt = stmt.where(AlertJob.alert_type == "p0")
+    else:
+        stmt = stmt.where(AlertJob.alert_type.in_(allowed_alert_types))
     if excluded_chat_ids:
         stmt = stmt.where(AlertJob.chat_id.not_in(excluded_chat_ids))
     job_ids = list(session.scalars(stmt))
@@ -1123,7 +1133,9 @@ def retry_pending_alerts(
     return sent
 
 
-def cancel_legacy_alerts(session: Session) -> int:
+def cancel_legacy_alerts(
+    session: Session, *, allowed_alert_types: frozenset[str] | set[str] | None = None,
+) -> int:
     """Cancel pending/sending alert jobs that cannot be proven to be current P0 alerts."""
     jobs = list(
         session.scalars(
@@ -1132,7 +1144,9 @@ def cancel_legacy_alerts(session: Session) -> int:
     )
     cancelled = 0
     for job in jobs:
-        if _is_retry_safe_p0_alert(session, job):
+        if allowed_alert_types is not None and job.alert_type not in allowed_alert_types:
+            continue
+        if _is_retry_safe_alert(session, job):
             continue
         _set_alert_cancelled(job, "legacy_alert_cancelled")
         cancelled += 1
@@ -1140,10 +1154,16 @@ def cancel_legacy_alerts(session: Session) -> int:
     return cancelled
 
 
-def release_stale_alert_claims(session: Session, now: datetime, stale_minutes: int = 10) -> int:
+def release_stale_alert_claims(
+    session: Session, now: datetime, stale_minutes: int = 10,
+    *, allowed_alert_types: frozenset[str] | set[str] | None = None,
+) -> int:
     cutoff = _utc_db_time(now) - timedelta(minutes=stale_minutes)
+    stmt = update(AlertJob)
+    if allowed_alert_types is not None:
+        stmt = stmt.where(AlertJob.alert_type.in_(allowed_alert_types))
     result = session.execute(
-        update(AlertJob)
+        stmt
         .where(AlertJob.status == "sending")
         .where(AlertJob.claimed_at <= cutoff)
         .values(status="pending", claimed_at=None, claim_token=None)

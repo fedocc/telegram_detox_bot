@@ -14,7 +14,6 @@ from app.db import repository
 from app.db.session import init_db
 from app.email.sender import EmailSender
 from app.ignored_chats import load_ignored_chats_from_settings
-from app.llm.client import HaikuClient
 from app.logging_config import configure_logging
 from app.services.maintenance import run_cleanup, run_daily_job
 from app.telegram.client import run_listener
@@ -31,6 +30,8 @@ async def main() -> None:
     hour, minute = [int(part) for part in settings.digest_time.split(":", 1)]
 
     def daily_job() -> None:
+        from app.llm.client import HaikuClient
+
         now = datetime.now(ZoneInfo(settings.timezone))
         with session_factory() as session:
             run_daily_job(

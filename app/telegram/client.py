@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import getpass
+import logging
 import os
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError
@@ -11,10 +14,14 @@ from app.config import Settings
 from app.db import repository
 from app.email.sender import EmailSender
 from app.ignored_chats import load_ignored_chats_from_settings
-from app.llm.client import HaikuClient
 from app.services.p0 import handle_p0_candidate, has_exact_fedocc_mention
 from app.telegram.backfill import run_startup_backfill
 from app.telegram.mapper import event_to_stored_message
+
+if TYPE_CHECKING:
+    from app.llm.client import HaikuClient
+
+logger = logging.getLogger(__name__)
 
 
 def make_client(settings: Settings) -> TelegramClient:
@@ -57,7 +64,10 @@ async def ingest_event(
 ) -> bool:
     if str(event.chat_id) in ignored_chat_ids:
         return False
-    stored = await event_to_stored_message(event)
+    if settings.mention_only_mode:
+        stored = await event_to_stored_message(event, resolve_reply=False)
+    else:
+        stored = await event_to_stored_message(event)
     if settings.mention_only_mode and (
         stored.is_outgoing or not has_exact_fedocc_mention(stored.text or stored.caption)
     ):
@@ -85,19 +95,32 @@ async def run_listener(
 ) -> None:
     if ignored_chat_ids is None:
         ignored_chat_ids = load_ignored_chats_from_settings(settings).chat_ids
+    started_at = datetime.now(UTC)
     client = make_client(settings)
     await client.connect()
     if not await client.is_user_authorized():
         await client.disconnect()
         raise RuntimeError("Telegram session is unauthorized. Run telegram_login.")
 
-    llm = None if settings.mention_only_mode else HaikuClient(settings)
+    me = await client.get_me() if settings.mention_only_mode else None
+    logger.info("Telegram connection established; mention_only=%s", settings.mention_only_mode)
+    llm = None
+    if not settings.mention_only_mode:
+        from app.llm.client import HaikuClient
+
+        llm = HaikuClient(settings)
+    else:
+        logger.info("Mention-only runtime: LLM disabled; startup backfill disabled")
     email = EmailSender(settings)
     if on_connected is not None:
         on_connected(client)
 
     @client.on(events.NewMessage(incoming=None, outgoing=None))
     async def handler(event) -> None:
+        if settings.mention_only_mode and (
+            event.out or event.sender_id == me.id or event.date < started_at
+        ):
+            return
         await ingest_event(
             event,
             settings=settings,
@@ -107,12 +130,13 @@ async def run_listener(
             ignored_chat_ids=ignored_chat_ids,
         )
 
-    await run_startup_backfill(
-        client=client,
-        settings=settings,
-        session_factory=session_factory,
-        llm=llm,
-        email_sender=email,
-        ignored_chat_ids=ignored_chat_ids,
-    )
+    if not settings.mention_only_mode:
+        await run_startup_backfill(
+            client=client,
+            settings=settings,
+            session_factory=session_factory,
+            llm=llm,
+            email_sender=email,
+            ignored_chat_ids=ignored_chat_ids,
+        )
     await client.run_until_disconnected()

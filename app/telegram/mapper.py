@@ -79,11 +79,11 @@ def telegram_message_to_stored_message(
     )
 
 
-async def event_to_stored_message(event) -> StoredMessage:
+async def event_to_stored_message(event, *, resolve_reply: bool = True) -> StoredMessage:
     msg = event.message
     chat = await event.get_chat()
     sender = await event.get_sender()
-    reply_is_mine = await resolve_reply_to_is_mine(msg)
+    reply_is_mine = await resolve_reply_to_is_mine(msg) if resolve_reply else None
     return telegram_message_to_stored_message(
         msg,
         chat=chat,

@@ -33,7 +33,7 @@ def check_health(settings: Settings) -> list[str]:
         except Exception:
             errors.append("SQLite database is not reachable.")
 
-    if not settings.aitunnel_api_key:
+    if not settings.mention_only_mode and not settings.aitunnel_api_key:
         errors.append("AITunnel API key is not configured.")
     if not settings.tg_session_path.is_file():
         errors.append("Telegram session file is missing.")

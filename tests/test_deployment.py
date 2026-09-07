@@ -78,3 +78,17 @@ def test_backup_script_exists_and_is_executable() -> None:
 
     assert script.is_file()
     assert stat.S_IMODE(script.stat().st_mode) & stat.S_IXUSR
+
+
+def test_healthcheck_requires_ai_key_only_in_legacy(settings, tmp_path):
+    from app.cli.healthcheck import check_health
+
+    deployment_settings = _deployment_paths(settings, tmp_path)
+    _create_runtime_files(deployment_settings, tmp_path / ".env")
+    init_db(deployment_settings)
+    for mention_only in (True, False):
+        configured = deployment_settings.model_copy(update={
+            "mention_only_mode": mention_only, "aitunnel_api_key": "",
+        })
+        errors = check_health(configured)
+        assert errors == ([] if mention_only else ["AITunnel API key is not configured."])
