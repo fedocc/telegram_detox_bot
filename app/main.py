@@ -146,6 +146,7 @@ async def main() -> None:
             else None
         ),
         ignored_chat_ids=ignored_chat_ids,
+        enable_inbox=settings.inbox_enabled and settings.mention_only_mode,
     )
 
 

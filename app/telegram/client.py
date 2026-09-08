@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import getpass
 import logging
 import os
@@ -61,6 +62,7 @@ async def ingest_event(
     llm: HaikuClient | None,
     email: EmailSender,
     ignored_chat_ids: frozenset[str] | set[str],
+    inbox=None,
 ) -> bool:
     if str(event.chat_id) in ignored_chat_ids:
         return False
@@ -72,17 +74,22 @@ async def ingest_event(
         stored.is_outgoing or not has_exact_fedocc_mention(stored.text or stored.caption)
     ):
         return False
-    with session_factory() as session:
-        repository.save_message(session, stored)
-        if not stored.is_outgoing:
-            handle_p0_candidate(
-                session,
-                stored,
-                llm,
-                email,
-                settings=settings,
-                ignored_chat_ids=ignored_chat_ids,
-            )
+    if inbox is not None:
+        try:
+            await inbox.observe(event)
+        except Exception as exc:
+            logger.warning("Inbox activation failed (%s)", type(exc).__name__)
+
+    def persist_and_alert():
+        with session_factory() as session:
+            repository.save_message(session, stored)
+            if not stored.is_outgoing:
+                handle_p0_candidate(
+                    session, stored, llm, email, settings=settings,
+                    ignored_chat_ids=ignored_chat_ids,
+                )
+
+    await asyncio.to_thread(persist_and_alert)
     return True
 
 
@@ -92,6 +99,7 @@ async def run_listener(
     on_connected=None,
     *,
     ignored_chat_ids: frozenset[str] | set[str] | None = None,
+    enable_inbox: bool = False,
 ) -> None:
     if ignored_chat_ids is None:
         ignored_chat_ids = load_ignored_chats_from_settings(settings).chat_ids
@@ -115,20 +123,40 @@ async def run_listener(
     if on_connected is not None:
         on_connected(client)
 
+    inbox = None
+    if enable_inbox:
+        from app.inbox.service import InboxService
+
+        inbox = InboxService(
+            client, session_factory,
+            lambda: load_ignored_chats_from_settings(settings).chat_ids,
+            Path("data/media_cache"), me.id,
+        )
+
+    ingestion_lock = asyncio.Lock()
+
     @client.on(events.NewMessage(incoming=None, outgoing=None))
     async def handler(event) -> None:
         if settings.mention_only_mode and (
             event.out or event.sender_id == me.id or event.date < started_at
         ):
             return
-        await ingest_event(
-            event,
-            settings=settings,
-            session_factory=session_factory,
-            llm=llm,
-            email=email,
-            ignored_chat_ids=ignored_chat_ids,
-        )
+        if inbox is not None:
+            try:
+                await inbox.observe(event)
+            except Exception as exc:
+                logger.warning("Inbox activation failed (%s)", type(exc).__name__)
+        async with ingestion_lock:
+            await ingest_event(
+                event,
+                settings=settings,
+                session_factory=session_factory,
+                llm=llm,
+                email=email,
+                ignored_chat_ids=(load_ignored_chats_from_settings(settings).chat_ids
+                                  if inbox else ignored_chat_ids),
+                inbox=None,  # Already activated, without waiting for preceding email delivery.
+            )
 
     if not settings.mention_only_mode:
         await run_startup_backfill(
@@ -139,4 +167,13 @@ async def run_listener(
             email_sender=email,
             ignored_chat_ids=ignored_chat_ids,
         )
-    await client.run_until_disconnected()
+    if inbox is None:
+        await client.run_until_disconnected()
+    else:
+        from app.inbox.web import serve_inbox
+
+        try:
+            async with serve_inbox(inbox):
+                await client.run_until_disconnected()
+        finally:
+            await client.disconnect()

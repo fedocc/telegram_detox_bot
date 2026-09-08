@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Telegram · Упоминания</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="titlebar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>Telegram Mention Inbox</span><span class="window-title">Упоминания</span><span id="connection" role="status">Подключение…</span></div>
+  <div class="shell">
+    <aside>
+      <header class="list-header"><strong>Упоминания <span id="count" class="count">0</span></strong><span>активные</span></header>
+      <nav id="conversations" aria-label="Активные упоминания"></nav>
+    </aside>
+    <main>
+      <section id="empty" class="empty"><h1>Нет активных упоминаний</h1><p>Чаты появляются здесь после @fedocc и исчезают через час.</p></section>
+      <section id="conversation" hidden>
+        <header class="chat-header"><span id="chat-avatar" class="avatar"></span><h1 id="chat-title"></h1><span id="remaining" class="remaining"></span><button id="close" type="button">Закрыть</button></header>
+        <div id="load-error" class="error" role="status" hidden></div>
+        <div id="messages" tabindex="0" aria-label="Сообщения"></div>
+        <footer>
+          <div id="send-error" class="error" role="alert" hidden></div>
+          <div id="attachment" hidden><img id="attachment-preview" alt="Выбранное изображение"><span id="attachment-name"></span><button id="remove-image" type="button" aria-label="Удалить изображение">×</button></div>
+          <form id="composer">
+            <input id="image-input" type="file" accept="image/jpeg,image/png,image/webp" hidden>
+            <button id="attach" class="icon-button" type="button" title="Прикрепить изображение" aria-label="Прикрепить изображение"><svg viewBox="0 0 24 24"><path d="m8 12 6-6a3 3 0 0 1 4 4l-8 8a5 5 0 0 1-7-7l9-9a2 2 0 0 1 3 3l-9 9a1 1 0 0 0 2 2l8-8"/></svg></button>
+            <div class="input-wrap"><textarea id="text" rows="1" placeholder="Сообщение..." aria-label="Сообщение"></textarea><span class="shortcut">⌘Enter</span></div>
+            <button id="send" type="submit" class="send-button" title="Отправить · ⌘Enter" aria-label="Отправить сообщение"><svg viewBox="0 0 24 24"><path d="m3 4 19 8-19 8 3-8-3-8Zm3 8h16"/></svg></button>
+          </form>
+        </footer>
+      </section>
+    </main>
+  </div>
+  <dialog id="photo-dialog"><button id="dismiss-photo" aria-label="Закрыть фотографию">×</button><img id="large-photo" alt="Фотография из разговора"></dialog>
+</body>
+</html>

@@ -1,5 +1,12 @@
 # telegram-digest
 
+Production работает в `MENTION_ONLY_MODE=true`: точное входящее `@fedocc` вызывает
+email alert и открывает разговор в приватном [Telegram Mention Inbox](docs/mention_inbox.md).
+Доступ — через SSH-туннель. Текст и фото отправляются только вручную, от существующего
+Telegram user account. В этом режиме LLM, digest, birthdays и startup backfill отключены.
+
+Описание legacy digest-режима и его настроек ниже относится к `MENTION_ONLY_MODE=false`.
+
 MVP-сервис, который читает новые сообщения Telegram через личный MTProto-аккаунт Telethon, сохраняет контекст локально, отправляет немедленные email для P0-событий и один вечерний HTML digest в 20:30 Europe/Moscow.
 
 Codex не является частью runtime-пайплайна. В runtime LLM-вызовы идут через Claude Haiku 4.5 в AITunnel с OpenAI Python SDK.
@@ -9,9 +16,9 @@ Codex не является частью runtime-пайплайна. В runtime 
 - Используется Telethon / MTProto под личным аккаунтом.
 - Telegram Bot API и Chat Automation не используются.
 - Secret Chats не поддерживаются: Telegram не отдаёт их через обычный MTProto client session.
-- Сервис read-only: не отправляет сообщения, не удаляет сообщения, не ставит реакции, не меняет настройки, не вызывает mark-read намеренно и не выполняет действий от имени аккаунта.
+- Фоновый listener не отправляет Telegram-сообщения, не удаляет их, не ставит реакции и не меняет настройки. Единственное исключение для отправки — ручные текст/фото из приватного inbox.
 - Анализируются только текст, подписи к медиа и metadata о типе медиа.
-- Фото, voice, видео, документы, стикеры не скачиваются и не отправляются в LLM.
+- Inbox загружает media для просмотра по запросу; media не передаются в LLM.
 
 ## Safety guarantees and limits
 
@@ -24,7 +31,7 @@ Codex не является частью runtime-пайплайна. В runtime 
 - Every non-P0 conversation gets a concise semantic digest summary. Quiet chats are summarized instead of being reduced to message counts whenever text is available.
 - AITunnel/LLM outage triggers a deterministic fallback digest. The fallback includes incoming private messages, group counts, P0 review candidates, and unprocessed media notices.
 - Runtime never performs Telegram login. `python -m app.cli.telegram_login` is the only interactive authentication command. The 24/7 listener only connects with an existing session and exits closed if the session is missing or unauthorized.
-- The service is read-only by design. Static tests fail if runtime code uses Telegram write/action methods such as send, delete, reaction, pin, mute, join, leave, or mark-read calls.
+- Static tests reject Telegram write/action methods outside the manual inbox send boundary. Delete, reaction, pin, mute, join, leave and mark-read calls remain prohibited.
 
 ## How to make sure I see your message
 

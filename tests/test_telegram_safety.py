@@ -9,6 +9,7 @@ from app.telegram import client as telegram_client
 
 BANNED_WRITES = {
     "send_message",
+    "send_file",
     "forward_messages",
     "delete_messages",
     "edit_message",
@@ -27,7 +28,24 @@ BANNED_WRITES = {
 def scan_telegram_safety_source(source: str, path: str = "snippet.py") -> list[tuple[str, str]]:
     tree = ast.parse(source)
     offenders: list[tuple[str, str]] = []
+    allowed = set()
+    # Only the explicit manual-send boundary may send text/photos. All other
+    # writes and all dynamic dispatch remain prohibited across the full app.
+    if Path(path).as_posix().endswith("/app/inbox/service.py"):
+        for cls in tree.body:
+            if isinstance(cls, ast.ClassDef) and cls.name == "InboxService":
+                for method in cls.body:
+                    if isinstance(method, ast.AsyncFunctionDef) and method.name == "send":
+                        allowed.update(id(n) for n in ast.walk(method)
+                            if isinstance(n, ast.Attribute)
+                            and n.attr in {"send_message", "send_file"}
+                            and isinstance(n.value, ast.Attribute)
+                            and n.value.attr == "client"
+                            and isinstance(n.value.value, ast.Name)
+                            and n.value.value.id == "self")
     for node in ast.walk(tree):
+        if id(node) in allowed:
+            continue
         if isinstance(node, ast.Attribute) and node.attr in BANNED_WRITES:
             offenders.append((path, node.attr))
         if isinstance(node, ast.Call):
@@ -118,6 +136,9 @@ def test_only_telegram_login_cli_can_call_start() -> None:
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr == "start":
+                if (path.relative_to(root).as_posix() == "app/inbox/web.py"
+                        and isinstance(node.value, ast.Name) and node.value.id == "site"):
+                    continue  # aiohttp TCPSite, never TelegramClient.start.
                 offenders.append(path.relative_to(root).as_posix())
 
     assert offenders == []

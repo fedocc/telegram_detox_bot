@@ -156,3 +156,30 @@ class AlertJob(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class InboxConversation(Base):
+    __tablename__ = "inbox_conversations"
+    __table_args__ = (UniqueConstraint("peer_id", "thread_id", name="uq_inbox_peer_thread"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    peer_id: Mapped[str] = mapped_column(String(128))
+    thread_id: Mapped[int] = mapped_column(Integer, default=0)
+    is_forum: Mapped[bool] = mapped_column(Boolean, default=False)
+    title: Mapped[str] = mapped_column(String(512))
+    topic_title: Mapped[str] = mapped_column(String(512), default="")
+    preview: Mapped[str] = mapped_column(String(256), default="")
+    trigger_id: Mapped[int] = mapped_column(Integer)
+    activated_at: Mapped[float] = mapped_column(Float)
+    expires_at: Mapped[float] = mapped_column(Float, index=True)
+    manually_closed: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class InboxSend(Base):
+    __tablename__ = "inbox_sends"
+
+    request_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[float] = mapped_column(Float)
