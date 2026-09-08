@@ -20,6 +20,7 @@ from app.db.tables import (
     MessageRecord,
 )
 from app.models.schemas import P0_MIN_CONFIDENCE, DailyDigest, P0Status, StoredMessage
+from app.services.attention import DETERMINISTIC_ALERT_TYPES
 from app.services.mentions import has_exact_fedocc_mention
 
 _CANONICAL_CHAT_ID_RE = re.compile(r"-?[1-9]\d*")
@@ -986,7 +987,7 @@ def _mark_alert_pending(
     error: Exception | str,
     now: datetime,
 ) -> None:
-    now = _utc_db_time(now) if job.alert_type == "mention_only" else _db_time(now)
+    now = _utc_db_time(now) if job.alert_type in DETERMINISTIC_ALERT_TYPES else _db_time(now)
     job.status = "pending"
     job.attempts += 1
     job.last_error_safe = safe_error(error)
@@ -1007,9 +1008,12 @@ def _mark_alert_sent(session: Session, job: AlertJob, now: datetime) -> None:
 
 
 def _is_retry_safe_alert(session: Session, job: AlertJob) -> bool:
-    if job.alert_type not in {"p0", "mention_only"}:
+    if job.alert_type not in {"p0", *DETERMINISTIC_ALERT_TYPES}:
         return False
     message = get_message(session, job.chat_id, job.message_id)
+    if job.alert_type == "direct_reply":
+        return bool(message and message.is_outgoing is False
+                    and message.reply_to_is_mine is True and message.reply_to_message_id)
     if job.alert_type == "mention_only":
         return bool(
             message
@@ -1048,7 +1052,8 @@ def send_alert_job(session: Session, job: AlertJob, email_sender, now: datetime)
         _cancel_unsafe_alert(session, job, "unsafe_p0_retry_source")
         return False
     token = uuid4().hex
-    claim_at = now if job.alert_type == "mention_only" else (job.next_attempt_at or now)
+    claim_at = (now if job.alert_type in DETERMINISTIC_ALERT_TYPES
+                else (job.next_attempt_at or now))
     claimed = claim_pending_alert(session, job.id, claim_at, token)
     if not claimed:
         return False

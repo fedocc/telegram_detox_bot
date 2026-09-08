@@ -3,7 +3,8 @@
 Production работает в `MENTION_ONLY_MODE=true`: точное входящее `@fedocc` вызывает
 email alert и открывает разговор в приватном [Telegram Mention Inbox](docs/mention_inbox.md).
 Доступ — через SSH-туннель. Текст и фото отправляются только вручную, от существующего
-Telegram user account. В этом режиме LLM, digest, birthdays и startup backfill отключены.
+Telegram user account. В этом режиме LLM, digest и startup backfill отключены. Direct replies к вашим сообщениям
+также вызывают alert; birthday reminders работают независимо по своему config.
 
 Описание legacy digest-режима и его настроек ниже относится к `MENTION_ONLY_MODE=false`.
 

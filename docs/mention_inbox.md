@@ -4,7 +4,8 @@ The inbox runs inside `telegram-detox.service`. The existing listener owns the
 only Telethon user session; aiohttp shares its client and asyncio event loop.
 It is enabled by default in mention-only mode (`INBOX_ENABLED=false` disables
 only the web interface). The email alert and retry path stays enabled. The
-runtime does not construct an LLM client or schedule digests/birthdays in this mode.
+runtime does not construct an LLM client or schedule digests in this mode. Birthday
+daily reminders and polling run independently when BIRTHDAY_REMINDERS_ENABLED is true.
 
 ## Access
 
@@ -23,12 +24,16 @@ The backend binds only `127.0.0.1:8787`; no firewall or nginx changes are needed
 ## Conversation lifecycle
 
 Only incoming, non-self messages matching the existing case-insensitive exact
-`@fedocc` matcher activate a conversation. Ignored chats are excluded at ingestion
+`@fedocc` matcher, or directly replying to a message authored by your account,
+activate a conversation. Reply parents are resolved only with real reply metadata;
+parent.out or parent.sender_id matching the connected account establishes authorship.
+A mention plus reply produces one alert, with mention taking precedence. Both
+trigger types use durable email delivery; legacy alerts remain excluded from retry. Ignored chats are excluded at ingestion
 and again on every API operation. Ordinary messages never activate a conversation.
 
-A `(peer, topic/thread)` conversation lasts 60 minutes from its latest mention.
+A `(peer, topic/thread)` conversation lasts 5 minutes from its latest trigger.
 Close hides it immediately. A successful manual reply extends it for another
-60 minutes. A new mention can reopen a closed conversation; a duplicate update
+5 minutes. A new trigger can reopen a closed conversation; a duplicate update
 cannot. Reading and ordinary follow-up messages do not extend the deadline.
 
 SQLite adds `inbox_conversations` (routing, timestamps, title, short preview) and
@@ -126,3 +131,10 @@ Local browser QA at 1280×1024 covered active rows, context, photo enlargement,
 audio playback/progress, video/file layout, attachment preview/removal, retained
 text after a simulated send failure, manual close and the zero-conversation state.
 No real Telegram message was sent during validation.
+
+The active window is defined once by `app.inbox.store.ACTIVE_MINUTES`. Existing
+longer windows are capped at startup. Voice, audio, round video notes, ordinary
+video, photos and files are distinct. Starting playback pauses other media;
+removing or switching conversations stops their playback. Nothing autoplays.
+
+Playback regression checks: `node --test tests/inbox_playback.test.mjs`.

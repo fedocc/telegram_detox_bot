@@ -15,7 +15,8 @@ from app.config import Settings
 from app.db import repository
 from app.email.sender import EmailSender
 from app.ignored_chats import load_ignored_chats_from_settings
-from app.services.p0 import handle_p0_candidate, has_exact_fedocc_mention
+from app.services.attention import classify_incoming
+from app.services.p0 import handle_p0_candidate
 from app.telegram.backfill import run_startup_backfill
 from app.telegram.mapper import event_to_stored_message
 
@@ -63,6 +64,8 @@ async def ingest_event(
     email: EmailSender,
     ignored_chat_ids: frozenset[str] | set[str],
     inbox=None,
+    self_id=None,
+    alert_lock=None,
 ) -> bool:
     if str(event.chat_id) in ignored_chat_ids:
         return False
@@ -70,13 +73,20 @@ async def ingest_event(
         stored = await event_to_stored_message(event, resolve_reply=False)
     else:
         stored = await event_to_stored_message(event)
-    if settings.mention_only_mode and (
-        stored.is_outgoing or not has_exact_fedocc_mention(stored.text or stored.caption)
-    ):
-        return False
+    trigger = None
+    if settings.mention_only_mode:
+        trigger = await classify_incoming(
+            getattr(event, "message", None), self_id=self_id,
+            text=stored.text or stored.caption, outgoing=stored.is_outgoing,
+            sender_id=getattr(event, "sender_id", None),
+        )
+        if trigger is None:
+            return False
+        if trigger == "direct_reply":
+            stored = stored.model_copy(update={"reply_to_is_mine": True})
     if inbox is not None:
         try:
-            await inbox.observe(event)
+            await inbox.observe(event, trigger=trigger)
         except Exception as exc:
             logger.warning("Inbox activation failed (%s)", type(exc).__name__)
 
@@ -89,7 +99,11 @@ async def ingest_event(
                     ignored_chat_ids=ignored_chat_ids,
                 )
 
-    await asyncio.to_thread(persist_and_alert)
+    if alert_lock is None:
+        await asyncio.to_thread(persist_and_alert)
+    else:
+        async with alert_lock:
+            await asyncio.to_thread(persist_and_alert)
     return True
 
 
@@ -141,22 +155,12 @@ async def run_listener(
             event.out or event.sender_id == me.id or event.date < started_at
         ):
             return
-        if inbox is not None:
-            try:
-                await inbox.observe(event)
-            except Exception as exc:
-                logger.warning("Inbox activation failed (%s)", type(exc).__name__)
-        async with ingestion_lock:
-            await ingest_event(
-                event,
-                settings=settings,
-                session_factory=session_factory,
-                llm=llm,
-                email=email,
-                ignored_chat_ids=(load_ignored_chats_from_settings(settings).chat_ids
-                                  if inbox else ignored_chat_ids),
-                inbox=None,  # Already activated, without waiting for preceding email delivery.
-            )
+        await ingest_event(
+            event, settings=settings, session_factory=session_factory, llm=llm, email=email,
+            ignored_chat_ids=(load_ignored_chats_from_settings(settings).chat_ids
+                              if inbox else ignored_chat_ids),
+            inbox=inbox, self_id=me.id if me else None, alert_lock=ingestion_lock,
+        )
 
     if not settings.mention_only_mode:
         await run_startup_backfill(

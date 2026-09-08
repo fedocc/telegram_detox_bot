@@ -213,8 +213,9 @@ async def test_mention_alerts_in_every_chat_type(
     assert len(email.sent) == 1
 
 
-def test_mention_only_mode_does_not_register_digest_or_birthday_jobs(
-    mention_settings, monkeypatch
+@pytest.mark.parametrize("enabled", [True, False])
+def test_mention_only_birthday_registration(
+    mention_settings, monkeypatch, enabled
 ) -> None:
     jobs = []
 
@@ -229,10 +230,13 @@ def test_mention_only_mode_does_not_register_digest_or_birthday_jobs(
             pass
 
     async def fake_listener(*args, **kwargs) -> None:
-        assert kwargs["on_connected"] is None
+        if enabled:
+            kwargs["on_connected"](SimpleNamespace())
+        else:
+            assert kwargs["on_connected"] is None
 
     monkeypatch.setattr(app_main, "get_settings", lambda: mention_settings.model_copy(
-        update={"birthday_reminders_enabled": True}
+        update={"birthday_reminders_enabled": enabled}
     ))
     monkeypatch.setattr(app_main, "configure_logging", lambda settings: None)
     monkeypatch.setattr(
@@ -250,8 +254,8 @@ def test_mention_only_mode_does_not_register_digest_or_birthday_jobs(
     ids = {job_id for _, job_id in jobs}
     assert "daily_job" not in names
     assert "retry_digests_job" not in names
-    assert "birthday_daily_job" not in names
-    assert "birthday_poll" not in ids
+    assert ("birthday_daily_job" in names) is enabled
+    assert ("birthday_poll" in ids) is enabled
 
 
 @pytest.mark.asyncio
@@ -279,13 +283,15 @@ async def test_duplicate_mention_sends_once(mention_settings, session_factory, m
 
 @pytest.mark.parametrize(
     "allowed,expected",
-    [(None, ["p0"]), ({"mention_only"}, ["mention_only"]), (set(), [])],
+    [(None, ["p0"]), ({"mention_only"}, ["mention_only"]), (set(), []),
+     ({"mention_only", "direct_reply"}, ["mention_only", "direct_reply"])],
 )
 def test_retry_type_filter(session, now, allowed, expected):
     from app.models.schemas import P0Status
 
-    for index, alert_type in enumerate(["p0", "mention_only"], 1):
-        message = msg(message_id=index, text="@fedocc")
+    for index, alert_type in enumerate(["p0", "mention_only", "direct_reply"], 1):
+        message = msg(message_id=index, text="@fedocc",
+                      reply_to_message_id=42, reply_to_is_mine=True)
         repository.save_message(session, message)
         if alert_type == "p0":
             repository.mark_p0_classified(
@@ -355,31 +361,33 @@ import app.main
     assert result.returncode == 0, result.stderr
 
 
-def test_failed_mention_waits_then_retries_once(session, now):
+@pytest.mark.parametrize("alert_type", ["mention_only", "direct_reply"])
+def test_failed_deterministic_alert_waits_then_retries_once(session, now, alert_type):
     from datetime import timedelta
 
     class FailingEmail:
         def send(self, *args, **kwargs):
             raise RuntimeError("synthetic delivery failure")
 
-    message = msg(text="@FEDOCC")
+    message = msg(text="@FEDOCC" if alert_type == "mention_only" else "reply",
+                  reply_to_message_id=42, reply_to_is_mine=True)
     repository.save_message(session, message)
     job = repository.create_alert_job(
         session, chat_id=message.chat_id, message_id=message.message_id,
-        alert_type="mention_only", subject="Telegram alert", text_body=message.text,
+        alert_type=alert_type, subject="Telegram alert", text_body=message.text,
         html_body="", now=now,
     )
     assert not repository.send_alert_job(session, job, FailingEmail(), now)
     email = FakeEmail()
     assert not repository.send_alert_job(session, job, email, now)
     assert repository.retry_pending_alerts(
-        session, email, now, allowed_alert_types={"mention_only"},
+        session, email, now, allowed_alert_types={alert_type},
     ) == 0
     assert repository.retry_pending_alerts(
-        session, email, now + timedelta(minutes=1), allowed_alert_types={"mention_only"},
+        session, email, now + timedelta(minutes=1), allowed_alert_types={alert_type},
     ) == 1
     assert repository.retry_pending_alerts(
-        session, email, now + timedelta(minutes=2), allowed_alert_types={"mention_only"},
+        session, email, now + timedelta(minutes=2), allowed_alert_types={alert_type},
     ) == 0
     assert len(email.sent) == 1
 
@@ -440,3 +448,24 @@ async def test_listener_filters_self_and_pre_start_messages(
     await telegram_client.run_listener(mention_settings, session_factory, ignored_chat_ids=set())
     assert len(seen) == 1
     assert seen[0].sender_id == 456
+
+
+@pytest.mark.parametrize("mine,reply_id,outgoing,ignored", [
+    (False, 42, False, False), (None, 42, False, False),
+    (True, None, False, False), (True, 42, True, False), (True, 42, False, True),
+])
+def test_direct_reply_retry_rejects_unsafe_sources(session, now, mine, reply_id, outgoing, ignored):
+    message = msg(text="reply", reply_to_is_mine=mine,
+                  reply_to_message_id=reply_id, is_outgoing=outgoing)
+    repository.save_message(session, message)
+    repository.create_alert_job(
+        session, chat_id=message.chat_id, message_id=message.message_id,
+        alert_type="direct_reply", subject="Telegram alert", text_body="reply",
+        html_body="", now=now,
+    )
+    email = FakeEmail()
+    assert repository.retry_pending_alerts(
+        session, email, now, allowed_alert_types={"mention_only", "direct_reply"},
+        excluded_chat_ids={message.chat_id} if ignored else set(),
+    ) == 0
+    assert email.sent == []

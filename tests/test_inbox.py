@@ -17,6 +17,7 @@ from telethon.tl.types import PeerChannel
 
 from app.db.session import init_db
 from app.inbox.service import MAX_CACHE, MAX_MEDIA, InboxError, InboxService, normalize_image
+from app.inbox.store import LIFETIME
 from app.inbox.web import HOST, PORT, create_app, serve_inbox
 
 
@@ -27,7 +28,8 @@ class Message(SimpleNamespace):
             date=datetime.now(UTC), reply_to=SimpleNamespace(
                 reply_to_top_id=thread or None, reply_to_msg_id=thread or None,
                 forum_topic=bool(thread)), reply_to_msg_id=thread or None,
-            file=None, photo=None, voice=None, audio=None, video=None, fwd_from=None,
+            file=None, photo=None, voice=None, audio=None, video=None, video_note=None,
+            fwd_from=None,
             action=None)
         self.__dict__.update(kwargs)
 
@@ -110,7 +112,7 @@ async def test_activation(service, text, outgoing, sender, ignored, expected):
 
 async def test_expiry_close_new_mention_and_duplicate(service):
     row = activate(service)
-    service.test_clock[0] += 3599
+    service.test_clock[0] += LIFETIME - 1
     assert service.store.get(row.id)
     service.test_clock[0] += 1
     assert service.store.active() == []
@@ -121,7 +123,7 @@ async def test_expiry_close_new_mention_and_duplicate(service):
     assert service.store.active() == []
     assert activate(service, trigger=102).id == row.id
     assert service.store.get(row.id)
-    service.test_clock[0] += 3600
+    service.test_clock[0] += LIFETIME
     await service.cleanup()
     assert service.store.active() == []
 
@@ -130,7 +132,7 @@ async def test_expiry_close_new_mention_and_duplicate(service):
 @pytest.mark.parametrize("photo", [False, True])
 async def test_manual_send_routes_and_extends(service, thread, photo):
     row = activate(service, thread=thread, forum=thread > 0)
-    service.test_clock[0] += 3500
+    service.test_clock[0] += LIFETIME - 100
     rid = str(uuid4())
     result = await service.send(row.id, rid, "текст **без форматирования**",
                                 image_bytes() if photo else None)
@@ -143,7 +145,7 @@ async def test_manual_send_routes_and_extends(service, thread, photo):
     if photo:
         assert args[1].name == "image.jpg"
         assert kwargs["force_document"] is False
-    assert service.store.get(row.id).expires_at == service.clock() + 3600
+    assert service.store.get(row.id).expires_at == service.clock() + LIFETIME
     assert await service.send(row.id, rid, "same retry") == result
     assert method.await_count == 1
 
@@ -170,7 +172,7 @@ async def test_closed_expired_ignored_cannot_send(service):
     with pytest.raises(InboxError):
         await service.send(row.id, str(uuid4()), "reply")
     service.test_ignored.clear()
-    service.test_clock[0] += 3600
+    service.test_clock[0] += LIFETIME
     with pytest.raises(InboxError):
         await service.send(row.id, str(uuid4()), "reply")
     service.client.send_message.assert_not_called()
@@ -272,11 +274,18 @@ async def test_api_security_and_active_only(service):
     server = TestServer(create_app(service))
     async with TestClient(server, headers={"Host": "127.0.0.1:8787"}) as client:
         response = await client.get("/api/session")
-        token = (await response.json())["csrf"]
+        metadata = await response.json()
+        assert metadata["active_minutes"] == 5
+        token = metadata["csrf"]
         headers = {"Origin": "http://127.0.0.1:8787", "X-Inbox-CSRF": token}
         response = await client.get("/")
         assert response.status == 200
-        assert "Нет активных упоминаний" in await response.text()
+        page = await response.text()
+        assert "Нет активных упоминаний" in page
+        assert 'class="titlebar"' not in page
+        module = await client.get("/static/playback.mjs")
+        assert module.status == 200
+        assert "javascript" in module.content_type
         assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
         assert "Access-Control-Allow-Origin" not in response.headers
         for bad in [{"Origin": "https://evil.test"}, {"Origin": "null"},
@@ -410,7 +419,7 @@ async def test_api_excludes_expired_and_newly_ignored(service):
     first = activate(service)
     second = activate(service, peer="-100456")
     service.test_ignored.add(first.peer_id)
-    service.test_clock[0] += 3601
+    service.test_clock[0] += LIFETIME + 1
     activate(service, peer=first.peer_id, trigger=101)
     async with TestClient(TestServer(create_app(service)),
                           headers={"Host": "127.0.0.1:8787"}) as client:
@@ -476,3 +485,132 @@ async def test_failed_media_download_never_leaves_a_partial_cache(service):
     partial.write_bytes(b"partial")
     await service.cleanup()
     assert not partial.exists()
+
+
+@pytest.mark.parametrize('kind', ['voice', 'audio', 'video_note', 'video', 'photo', 'file'])
+async def test_native_telethon_media_classification(service, kind):
+    from telethon.tl import types
+
+    row = activate(service)
+    attributes = [types.DocumentAttributeFilename('sample.bin')]
+    mime = 'application/octet-stream'
+    if kind in {'voice', 'audio'}:
+        attributes.append(types.DocumentAttributeAudio(42, voice=kind == 'voice'))
+        mime = 'audio/ogg'
+    elif kind in {'video', 'video_note'}:
+        attributes.append(types.DocumentAttributeVideo(42, 320, 320,
+                                                       round_message=kind == 'video_note'))
+        mime = 'video/mp4'
+    media = types.MessageMediaDocument(document=types.Document(
+        id=1, access_hash=0, file_reference=b'', date=datetime.now(UTC),
+        mime_type=mime, size=100, dc_id=1, attributes=attributes))
+    if kind == 'photo':
+        media = types.MessageMediaPhoto(photo=types.Photo(
+            id=1, access_hash=0, file_reference=b'', date=datetime.now(UTC),
+            sizes=[types.PhotoSize('x', 320, 320, 100)], dc_id=1))
+    message = types.Message(id=100, peer_id=types.PeerUser(2), from_id=types.PeerUser(2),
+                            date=datetime.now(UTC), message='', media=media)
+    result = await service.serialize(message, row, {})
+    assert result['media']['kind'] == kind
+    if kind == 'video_note':
+        assert message.video and message.video_note  # Telethon overlaps these properties.
+
+
+async def test_meaningful_triggers_reset_window_only(service):
+    row = activate(service)
+    assert row.expires_at - service.clock() == LIFETIME == 300
+    for mid, text, parent, expected_reset in [
+        (101, 'ordinary', None, False),
+        (102, '@fedocc', None, True),
+        (103, 'reply', Message(50, out=True, sender_id=1), True),
+    ]:
+        previous = service.store.get(row.id).expires_at
+        service.test_clock[0] += 30
+        event = SimpleNamespace(chat_id=-100123, out=False, sender_id=2, raw_text=text,
+            id=mid, message=Message(mid, text, parent=parent,
+                                   reply_to_msg_id=50 if parent else None),
+            get_chat=AsyncMock(return_value=SimpleNamespace(title='Flare Team', forum=False)))
+        await service.observe(event)
+        assert service.store.get(row.id).expires_at == (
+            service.clock() + LIFETIME if expected_reset else previous)
+
+
+async def test_upgrade_caps_old_windows_without_extending_new_ones(service):
+    from app.db.tables import InboxConversation
+
+    row = activate(service)
+    other = activate(service, peer='-100456')
+    with service.store.factory() as session:
+        session.get(InboxConversation, row.id).expires_at = service.clock() + 3600
+        session.get(InboxConversation, other.id).expires_at = service.clock() + 40
+        session.commit()
+    service.store.clamp_existing_lifetimes()
+    assert service.store.get(row.id).expires_at == service.clock() + LIFETIME
+    assert service.store.get(other.id).expires_at == service.clock() + 40
+
+
+@pytest.mark.parametrize('text,parent_out,parent_sender,reply,outgoing,sender,ignored,expected', [
+    ('@fedocc', False, 9, False, False, 2, False, 'mention_only'),
+    ('@FEDOCC', False, 9, False, False, 2, False, 'mention_only'),
+    ('@fedocc_bot', False, 9, False, False, 2, False, None),
+    ('reply', True, 1, True, False, 2, False, 'direct_reply'),
+    ('reply', False, 1, True, False, 2, False, 'direct_reply'),
+    ('reply', False, 9, True, False, 2, False, None),
+    ('reply', True, 1, True, True, 1, False, None),
+    ('reply', True, 1, True, False, 1, False, None),
+    ('@fedocc', True, 1, True, False, 2, True, None),
+    ('reply', True, 1, True, False, 2, True, None),
+    ('@fedocc', True, 1, True, False, 2, False, 'mention_only'),
+    ('', True, 1, True, False, 2, False, 'direct_reply'),
+])
+@pytest.mark.parametrize('thread', [0, 42])
+async def test_attention_email_and_inbox_integration(
+    service, settings, text, parent_out, parent_sender, reply, outgoing, sender,
+    ignored, expected, thread,
+):
+    from sqlalchemy import select
+
+    from app.db.tables import AlertJob
+    from app.db.tables import MessageRecord as StoredRow
+    from app.telegram.client import ingest_event
+    from tests.test_mention_only import FakeEmail, NeverCalledLLM
+
+    if ignored:
+        service.test_ignored.add('-100123')
+    message = Message(100, text, thread, out=outgoing, sender_id=sender,
+                      reply_to_msg_id=50 if reply else None)
+    message.get_reply_message = AsyncMock(return_value=Message(
+        50, out=parent_out, sender_id=parent_sender))
+    event = SimpleNamespace(chat_id=-100123, id=100, message=message, out=outgoing,
+        sender_id=sender, raw_text=text,
+        get_chat=AsyncMock(return_value=SimpleNamespace(title='Flare Team', forum=bool(thread))),
+        get_sender=AsyncMock(return_value=SimpleNamespace(id=sender, first_name='Test')))
+    email = FakeEmail()
+    for _ in range(2):
+        processed = await ingest_event(event,
+            settings=settings.model_copy(update={'mention_only_mode': True}),
+            session_factory=service.store.factory, llm=NeverCalledLLM(), email=email,
+            ignored_chat_ids=service.test_ignored, inbox=service, self_id=1)
+        assert processed is bool(expected)
+    assert len(email.sent) == int(bool(expected))
+    assert len(service.store.active()) == int(bool(expected))
+    with service.store.factory() as session:
+        jobs = list(session.scalars(select(AlertJob)))
+        assert [job.alert_type for job in jobs] == ([expected] if expected else [])
+        assert len(list(session.scalars(select(StoredRow)))) == int(bool(expected))
+    if expected:
+        assert email.sent[0][0] == 'Telegram alert'
+        assert ('Ответ на ваше сообщение' if expected == 'direct_reply'
+                else 'Упоминание @fedocc') in email.sent[0][1]
+    if ignored or outgoing or sender == 1 or (not reply and not thread):
+        message.get_reply_message.assert_not_called()
+
+
+@pytest.mark.parametrize('parent', [None, RuntimeError('unavailable')])
+async def test_unavailable_reply_parent_is_not_a_trigger(parent):
+    from app.services.attention import classify_incoming
+
+    message = Message(100, reply_to_msg_id=50)
+    message.get_reply_message = AsyncMock(
+        side_effect=parent if isinstance(parent, Exception) else None, return_value=parent)
+    assert await classify_incoming(message, self_id=1) is None

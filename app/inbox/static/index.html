@@ -5,17 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Telegram · Упоминания</title>
   <link rel="stylesheet" href="/static/style.css">
-  <script src="/static/app.js" defer></script>
+  <script type="module" src="/static/app.js"></script>
 </head>
 <body>
-  <div class="titlebar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>Telegram Mention Inbox</span><span class="window-title">Упоминания</span><span id="connection" role="status">Подключение…</span></div>
   <div class="shell">
     <aside>
       <header class="list-header"><strong>Упоминания <span id="count" class="count">0</span></strong><span>активные</span></header>
       <nav id="conversations" aria-label="Активные упоминания"></nav>
     </aside>
     <main>
-      <section id="empty" class="empty"><h1>Нет активных упоминаний</h1><p>Чаты появляются здесь после @fedocc и исчезают через час.</p></section>
+      <section id="empty" class="empty"><h1>Нет активных упоминаний</h1><p id="empty-description">Чаты появляются после @fedocc или ответа на ваше сообщение.</p></section>
       <section id="conversation" hidden>
         <header class="chat-header"><span id="chat-avatar" class="avatar"></span><h1 id="chat-title"></h1><span id="remaining" class="remaining"></span><button id="close" type="button">Закрыть</button></header>
         <div id="load-error" class="error" role="status" hidden></div>

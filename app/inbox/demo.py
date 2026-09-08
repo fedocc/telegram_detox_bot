@@ -15,6 +15,7 @@ from PIL import Image, ImageDraw
 from app.config import Settings
 from app.db.session import init_db
 from app.inbox.service import InboxService
+from app.inbox.store import ACTIVE_MINUTES
 from app.inbox.web import serve_inbox
 
 
@@ -32,9 +33,9 @@ async def main():
         if "--empty" not in sys.argv:
             rows = []
             for index, (title, preview, age) in enumerate([
-                ("Flare Team", "Никита: @fedocc глянь логи…", 12),
-                ("Core Backend", "Елена: @fedocc нужен апрув на релиз", 24),
-                ("Design System", "Павел: @fedocc обнови токен темы", 41),
+                ("Flare Team", "Никита: @fedocc глянь логи…", 0),
+                ("Core Backend", "Елена: @fedocc нужен апрув на релиз", 1),
+                ("Design System", "Павел: @fedocc обнови токен темы", 2),
             ]):
                 row = service.store.activate(peer_id=str(-100123-index), thread_id=42,
                     is_forum=True, title=title, trigger_id=3, preview=preview)
@@ -43,7 +44,7 @@ async def main():
 
                     record = session.get(InboxConversation, row.id)
                     record.activated_at = now - age * 60
-                    record.expires_at = now + (60-age) * 60
+                    record.expires_at = now + (ACTIVE_MINUTES-age) * 60
                     record.topic_title = "#backend-infra" if index == 0 else "Обсуждение"
                     session.commit()
                 rows.append(service.store.get(row.id))
@@ -58,11 +59,12 @@ async def main():
             messages = []
             texts = ["Пулл-реквест готов к деплою", "", "@fedocc что с интеграцией? API возвращает "
                 "401 на вебхуках авторизации, проверь конфиг в волте.", "", "",
-                "Понял, сейчас перезалью сертификаты и отпишусь.", ""]
+                "Понял, сейчас перезалью сертификаты и отпишусь.", "", "", "", ""]
             for index, text in enumerate(texts, 1):
                 media = None
-                if index in {2, 4, 5, 7}:
-                    kind = {2:"voice", 4:"photo", 5:"file", 7:"video"}[index]
+                if index in {2, 4, 5, 7, 8, 9, 10}:
+                    kind = {2:"voice", 4:"photo", 5:"file", 7:"video",
+                            8:"voice", 9:"audio", 10:"video_note"}[index]
                     media = {"kind":kind, "name":"crash_dump_0912.log" if index==5 else kind,
                         "size":24576, "duration":42, "available":True,
                         "url":f"/api/conversations/{rows[0].id}/media/{index}"}
@@ -84,10 +86,13 @@ async def main():
 
             async def media(key, message_id):
                 service.require(key)
+                if message_id in {7, 10} and '--video' in sys.argv:
+                    video = Path(sys.argv[sys.argv.index('--video') + 1])
+                    return video, 'video/webm', 'sample.webm', True
                 if message_id == 4:
                     return photo, "image/jpeg", "sample.jpg", True
-                fixture = root / ("sample.wav" if message_id == 2 else "sample.log")
-                if message_id == 2:
+                fixture = root / ("sample.wav" if message_id in {2, 8, 9} else "sample.log")
+                if message_id in {2, 8, 9}:
                     import wave
                     with wave.open(str(fixture), "wb") as audio:
                         audio.setnchannels(1)
@@ -96,8 +101,9 @@ async def main():
                         audio.writeframes(b"\0\0" * 8000 * 42)
                 else:
                     fixture.write_text("Synthetic visual fixture\n")
-                return fixture, "audio/wav" if message_id == 2 else "application/octet-stream", \
-                    fixture.name, message_id == 2
+                playable = message_id in {2, 8, 9}
+                mime = "audio/wav" if playable else "application/octet-stream"
+                return fixture, mime, fixture.name, playable
 
             async def send(key, request_id, text, image=None):
                 from app.inbox.service import InboxError

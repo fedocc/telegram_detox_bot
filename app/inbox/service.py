@@ -14,6 +14,7 @@ from telethon.tl.types import PeerChannel
 
 from app.db.tables import InboxSend
 from app.inbox.store import InboxStore
+from app.services.attention import DETERMINISTIC_ALERT_TYPES, classify_incoming
 from app.services.mentions import has_exact_fedocc_mention
 from app.telegram.mapper import display_name
 
@@ -96,6 +97,7 @@ class InboxService:
     def __init__(self, client, factory, ignored, cache_dir, self_id, clock=time.time):
         self.client = client
         self.store = InboxStore(factory, ignored, clock)
+        self.store.clamp_existing_lifetimes()
         self.self_id = self_id
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -111,10 +113,14 @@ class InboxService:
             raise InboxError("Разговор закрыт или время активности истекло.", 404)
         return row
 
-    async def observe(self, event):
+    async def observe(self, event, *, trigger=None):
         if (str(event.chat_id) in self.store.ignored() or event.out
-                or event.sender_id == self.self_id
-                or not has_exact_fedocc_mention(event.raw_text)):
+                or event.sender_id == self.self_id):
+            return
+        if trigger is None:
+            trigger = await classify_incoming(event.message, self_id=self.self_id,
+                                               text=event.raw_text, sender_id=event.sender_id)
+        if trigger not in DETERMINISTIC_ALERT_TYPES:
             return
         chat = await event.get_chat()
         thread, forum = await thread_context(event.message, chat)
@@ -155,12 +161,18 @@ class InboxService:
             kind = "file"
             if message.photo:
                 kind = "photo"
-            elif message.voice or message.audio:
+            elif message.voice:
                 kind = "voice"
+            elif message.audio:
+                kind = "audio"
+            elif message.video_note:
+                # video also matches round videos; test the narrower property first.
+                kind = "video_note"
             elif message.video:
                 kind = "video"
             result["media"] = {
                 "kind": kind, "name": file.name or {"photo": "Фото", "voice": "Голосовое",
+                    "audio": "Аудиофайл", "video_note": "Видеосообщение",
                     "video": "Видео"}.get(kind, "Файл"),
                 "size": file.size or 0, "duration": file.duration or 0,
                 "url": f"/api/conversations/{row.id}/media/{message.id}",

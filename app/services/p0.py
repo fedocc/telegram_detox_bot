@@ -18,7 +18,7 @@ from app.models.schemas import (
     P0Status,
     StoredMessage,
 )
-from app.services.mentions import has_exact_fedocc_mention
+from app.services.attention import trigger_from_evidence
 from app.services.text import safe_truncate
 from app.services.time_format import (
     format_user_datetime,
@@ -875,28 +875,34 @@ def handle_p0_candidate(
     if existing and existing.p0_classified_at:
         return False
 
-    if _is_non_text_media(message):
-        return _mark_not_p0(session, message)
-
     if settings is not None and settings.mention_only_mode:
-        if not has_exact_fedocc_mention(message.text or message.caption):
+        trigger = trigger_from_evidence(
+            message.text or message.caption, outgoing=message.is_outgoing,
+            reply_to_is_mine=message.reply_to_is_mine, reply_id=message.reply_to_message_id,
+        )
+        if trigger is None:
             return _mark_not_p0(session, message)
         job = repository.create_alert_job(
             session,
             chat_id=message.chat_id,
             message_id=message.message_id,
-            alert_type="mention_only",
+            alert_type=trigger,
             subject=repository.P0_EMAIL_SUBJECT,
             text_body=(
-                f"Чат: {message.chat_title}\n"
+                ("Упоминание @fedocc\n" if trigger == "mention_only"
+                 else "Ответ на ваше сообщение\n")
+                + f"Чат: {message.chat_title}\n"
                 f"Отправитель: {message.sender_name or 'Неизвестный отправитель'}\n"
                 f"Время: {format_user_datetime(message.timestamp)}\n\n"
-                f"{message.text or message.caption}"
+                f"{message.text or message.caption or '[Вложение]'}"
             ),
             html_body="",
             now=datetime.now(UTC),
         )
         return repository.send_alert_job(session, job, email_sender, datetime.now(UTC))
+
+    if _is_non_text_media(message):
+        return _mark_not_p0(session, message)
 
     from app.llm.client import LLMError
 

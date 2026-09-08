@@ -13,6 +13,7 @@ from uuid import UUID
 from aiohttp import web
 
 from app.inbox.service import MAX_IMAGE, InboxError, conversation_json
+from app.inbox.store import ACTIVE_MINUTES
 
 HOST = "127.0.0.1"
 PORT = 8787
@@ -68,12 +69,12 @@ def create_app(service, *, port=PORT):
 
     async def asset(request):
         name = request.match_info["name"]
-        if name not in {"app.js", "style.css"}:
+        if name not in {"app.js", "style.css", "playback.mjs"}:
             raise web.HTTPNotFound()
         return web.FileResponse(STATIC / name)
 
     async def session(request):
-        return web.json_response({"csrf": csrf})
+        return web.json_response({"csrf": csrf, "active_minutes": ACTIVE_MINUTES})
 
     async def health(request):
         connected = service.client.is_connected()

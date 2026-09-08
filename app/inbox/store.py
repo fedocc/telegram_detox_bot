@@ -3,11 +3,12 @@ from __future__ import annotations
 import time
 from uuid import uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 
 from app.db.tables import InboxConversation
 
-LIFETIME = 3600
+ACTIVE_MINUTES = 5
+LIFETIME = ACTIVE_MINUTES * 60
 
 
 class InboxStore:
@@ -15,6 +16,14 @@ class InboxStore:
         self.factory = session_factory
         self.ignored = ignored
         self.clock = clock
+
+    def clamp_existing_lifetimes(self):
+        # Upgrade existing hour-long windows without extending any short window.
+        with self.factory() as session:
+            session.execute(update(InboxConversation).where(
+                InboxConversation.expires_at > self.clock() + LIFETIME,
+            ).values(expires_at=self.clock() + LIFETIME))
+            session.commit()
 
     def active(self):
         with self.factory() as session:

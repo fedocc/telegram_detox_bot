@@ -94,7 +94,7 @@ async def event_to_stored_message(event, *, resolve_reply: bool = True) -> Store
     )
 
 
-async def resolve_reply_to_is_mine(message) -> bool | None:
+async def resolve_reply_to_is_mine(message, *, self_id=None) -> bool | None:
     if not getattr(message, "reply_to_msg_id", None):
         return None
     if not hasattr(message, "get_reply_message"):
@@ -105,4 +105,4 @@ async def resolve_reply_to_is_mine(message) -> bool | None:
         return None
     if parent is None:
         return None
-    return bool(parent.out)
+    return bool(parent.out or (self_id is not None and parent.sender_id == self_id))
