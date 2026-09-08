@@ -514,3 +514,7 @@ dialog img {
 .video-note-time {
   color:var(--muted);
   font-size:11px}
+
+.sidebar-item { position:relative }
+.sidebar-item .chat-row { width:100%; padding-right:30px }
+.sidebar-close { position:absolute; right:4px; top:10px; font-size:18px; color:var(--muted) }

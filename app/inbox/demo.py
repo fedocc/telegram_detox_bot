@@ -15,7 +15,6 @@ from PIL import Image, ImageDraw
 from app.config import Settings
 from app.db.session import init_db
 from app.inbox.service import InboxService
-from app.inbox.store import ACTIVE_MINUTES
 from app.inbox.web import serve_inbox
 
 
@@ -44,7 +43,8 @@ async def main():
 
                     record = session.get(InboxConversation, row.id)
                     record.activated_at = now - age * 60
-                    record.expires_at = now + (ACTIVE_MINUTES-age) * 60
+                    record.opened_at = None
+                    record.expires_at = 0
                     record.topic_title = "#backend-infra" if index == 0 else "Обсуждение"
                     session.commit()
                 rows.append(service.store.get(row.id))

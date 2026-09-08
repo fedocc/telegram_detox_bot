@@ -31,10 +31,23 @@ A mention plus reply produces one alert, with mention taking precedence. Both
 trigger types use durable email delivery; legacy alerts remain excluded from retry. Ignored chats are excluded at ingestion
 and again on every API operation. Ordinary messages never activate a conversation.
 
-A `(peer, topic/thread)` conversation lasts 5 minutes from its latest trigger.
-Close hides it immediately. A successful manual reply extends it for another
-5 minutes. A new trigger can reopen a closed conversation; a duplicate update
-cannot. Reading and ordinary follow-up messages do not extend the deadline.
+A `(peer, topic/thread)` conversation starts pending: it remains in the sidebar
+without a countdown until selected or manually closed. Listing and history reads
+do not open it. Explicit selection sends a CSRF/Origin-protected `POST /open`,
+which sets `opened_at` and a five-minute deadline exactly once. Repeated opens
+do not extend the deadline. There is no automatic selection on load or close.
+
+A successful manual send or a new meaningful trigger while opened resets the
+deadline to five minutes from now. Triggers while pending update the preview and
+keep it pending. Ordinary messages and reads do not extend anything. Close works
+from the sidebar even for pending conversations. A new trigger after close or
+expiry creates a new pending cycle; replayed trigger IDs cannot reopen it.
+
+The nullable `opened_at` field identifies pending state. For compatibility with
+the existing SQLite NOT NULL column, pending rows store zero in `expires_at`;
+the API exposes it as null and expiry checks ignore it. The additive migration
+marks existing records opened at their original activation time, preserving
+their deadlines rather than resurrecting old expired conversations.
 
 SQLite adds `inbox_conversations` (routing, timestamps, title, short preview) and
 `inbox_sends` (request ID and delivery status, no message bodies). Schema creation

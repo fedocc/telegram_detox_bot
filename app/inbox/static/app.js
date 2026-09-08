@@ -13,6 +13,8 @@ let csrf = '', selected = null, conversations = [], serverOffset = 0, polling = 
 let messageNodes = new Map(), shownKey = null;
 const drafts = new Map();
 const now = () => Date.now() / 1000 + serverOffset;
+const visible = row => row.opened_at === null || row.expires_at > now();
+let choosing = 0;
 const minutes = row => `${Math.max(1, Math.ceil((row.expires_at - now()) / 60))} мин`;
 const initials = name => name.trim().split(/\s+/).slice(0, 2).map(x => x[0]).join('').toUpperCase();
 function node(tag, className, text) { const n = document.createElement(tag); if (className) n.className = className; if (text !== undefined) n.textContent = text; return n; }
@@ -42,15 +44,20 @@ function renderList() {
     button.setAttribute('aria-current', selected === row.id ? 'true' : 'false');
     const top = node('div', 'row-top');
     top.append(node('span', 'avatar', initials(row.title)), node('span', 'row-title', row.title), node('span', 'age', `${Math.max(0, Math.floor((now()-row.activated_at)/60))}м`));
-    button.append(top, node('p', 'preview', row.preview), node('span', 'row-time', `${minutes(row)} осталось`));
-    button.onclick = () => choose(row.id); return button;
+    button.append(top, node('p', 'preview', row.preview), node('span', 'row-time', row.opened_at === null ? 'Новое' : `${minutes(row)} осталось`));
+    button.onclick = () => choose(row.id);
+    const item = node('div', 'sidebar-item'), close = node('button', 'sidebar-close', '×');
+    close.type = 'button'; close.setAttribute('aria-label', `Закрыть ${row.title}`);
+    close.onclick = () => closeConversation(row.id);
+    item.append(button, close); return item;
   });
   $('conversations').replaceChildren(...rows);
-  if (activeElement) [...$('conversations').children].find(n => n.dataset.key === activeElement)?.focus();
+  if (activeElement) [...$('conversations').querySelectorAll('[data-key]')].find(n => n.dataset.key === activeElement)?.focus();
 }
 function renderHeader() {
   const row = conversations.find(r => r.id === selected);
   $('empty').hidden = !!row; $('conversation').hidden = !row;
+  $('empty-title').textContent = conversations.length ? 'Выберите разговор' : 'Нет активных упоминаний';
   if (!row) return;
   $('chat-title').textContent = row.title + (row.topic_title ? ` · ${row.topic_title}` : row.thread_id ? ` · Тема ${row.thread_id}` : '');
   $('chat-avatar').textContent = initials(row.title); $('remaining').textContent = minutes(row);
@@ -66,12 +73,36 @@ function renderComposer() {
   $('send').setAttribute('aria-label', d.sending ? 'Отправка…' : 'Отправить сообщение');
   showError('send-error', d.error); resize();
 }
-function choose(key) {
+async function choose(key) {
   if (key === selected) return;
-  selected = key; shownKey = null; messageNodes.clear(); playback.pauseWithin($('messages')); $('messages').replaceChildren();
-  showError('load-error', ''); renderList(); renderHeader(); renderComposer();
-  loadMessages(key); $('text').focus();
+  const request = ++choosing;
+  try {
+    const result = await api(`/api/conversations/${key}/open`, {});
+    if (request !== choosing) return;
+    conversations = conversations.map(row => row.id === key ? result.conversation : row);
+    selected = key; shownKey = null; messageNodes.clear();
+    playback.pauseWithin($('messages')); $('messages').replaceChildren();
+    showError('open-error', ''); showError('load-error', '');
+    renderList(); renderHeader(); renderComposer();
+    loadMessages(key); $('text').focus();
+  } catch (error) {
+    if (request === choosing) showError(selected ? 'load-error' : 'open-error', error.message);
+  }
 }
+async function closeConversation(key) {
+  if (!key || draft(key).sending) return;
+  ++choosing;
+  try {
+    await api(`/api/conversations/${key}/close`, {});
+    conversations = conversations.filter(row => row.id !== key);
+    if (selected === key) {
+      selected = null; shownKey = null; messageNodes.clear();
+      playback.pauseWithin($('messages')); $('messages').replaceChildren();
+    }
+    renderList(); renderHeader();
+  } catch (error) { showError(selected ? 'send-error' : 'open-error', error.message); }
+}
+
 function highlight(text, mention) {
   const p = node('p', 'message-text');
   if (!mention) { p.textContent = text; return p; }
@@ -187,13 +218,12 @@ async function loadMessages(key) {
 async function poll() {
   if (polling) return; polling = true;
   try {
-    if (!csrf) { const session = await api('/api/session'); csrf = session.csrf; $('empty-description').textContent = `Чаты появляются после @fedocc или ответа на ваше сообщение и исчезают через ${session.active_minutes} мин.`; }
+    if (!csrf) { const session = await api('/api/session'); csrf = session.csrf; $('empty-description').textContent = `Чаты появляются после @fedocc или ответа на ваше сообщение. Ожидают открытия без таймера; после открытия доступны ${session.active_minutes} мин.`; }
     const result = await api('/api/conversations'); serverOffset = result.now - Date.now()/1000;
-    conversations = result.conversations.filter(r => r.expires_at > now());
-    if (!conversations.some(r => r.id === selected)) { selected = null; shownKey = null; messageNodes.clear(); playback.pauseWithin($('messages')); $('messages').replaceChildren(); }
+    conversations = result.conversations.filter(visible);
+    if (!conversations.some(r => r.id === selected && r.opened_at !== null)) { selected = null; shownKey = null; messageNodes.clear(); playback.pauseWithin($('messages')); $('messages').replaceChildren(); }
     renderList(); renderHeader();
-    if (!selected && conversations.length) choose(conversations[0].id);
-    else if (selected) await loadMessages(selected);
+    if (selected) await loadMessages(selected);
     if (!result.connected) showError('load-error', 'Telegram переподключается…');
   } catch (_) { showError('load-error', 'Нет соединения · проверьте SSH-туннель'); }
   finally { polling = false; setTimeout(poll,2000); }
@@ -223,12 +253,8 @@ $('composer').onsubmit = async event => {
   } catch (error) { d.error = error.message || 'Нет ответа. Проверьте сообщения перед повтором; черновик сохранён.'; if (error.status === 403) csrf = ''; }
   finally { d.sending = false; if(selected === key) renderComposer(); }
 };
-$('close').onclick = async () => {
-  const key = selected; if (!key || draft(key).sending) return;
-  try { await api(`/api/conversations/${key}/close`, {}); conversations = conversations.filter(r=>r.id!==key); selected = null; shownKey = null; messageNodes.clear(); playback.pauseWithin($('messages')); $('messages').replaceChildren(); renderList(); renderHeader(); if(conversations.length) choose(conversations[0].id); }
-  catch(error) { showError('send-error', error.message); }
-};
+$('close').onclick = () => closeConversation(selected);
 $('dismiss-photo').onclick = () => $('photo-dialog').close();
 $('photo-dialog').addEventListener('close', () => $('large-photo').removeAttribute('src'));
-setInterval(() => { conversations = conversations.filter(r=>r.expires_at>now()); if (selected && !conversations.some(r=>r.id===selected)) { selected=null; shownKey=null; messageNodes.clear(); playback.pauseWithin($('messages')); $('messages').replaceChildren(); } renderList(); renderHeader(); },1000);
+setInterval(() => { conversations = conversations.filter(visible); if (selected && !conversations.some(r=>r.id===selected && r.opened_at !== null)) { selected=null; shownKey=null; messageNodes.clear(); playback.pauseWithin($('messages')); $('messages').replaceChildren(); } renderList(); renderHeader(); },1000);
 poll();

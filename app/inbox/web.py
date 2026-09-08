@@ -90,6 +90,14 @@ def create_app(service, *, port=PORT):
         async with asyncio.timeout(45):
             return web.json_response(await service.history(request.match_info["key"]))
 
+    async def open_conversation(request):
+        async with service.action_lock:
+            row = service.store.open(request.match_info["key"])
+            if row is None:
+                raise InboxError("Разговор закрыт или время активности истекло.", 404)
+            service.snapshots.pop(row.id, None)
+            return web.json_response({"conversation": conversation_json(row)})
+
     async def close(request):
         await service.close(request.match_info["key"])
         return web.json_response({"ok": True})
@@ -125,6 +133,7 @@ def create_app(service, *, port=PORT):
         web.get("/api/session", session), web.get("/api/health", health),
         web.get("/api/conversations", conversations),
         web.get(r"/api/conversations/{key:[a-f0-9]{32}}/messages", history),
+        web.post(r"/api/conversations/{key:[a-f0-9]{32}}/open", open_conversation),
         web.post(r"/api/conversations/{key:[a-f0-9]{32}}/close", close),
         web.post(r"/api/conversations/{key:[a-f0-9]{32}}/send", send),
         web.get(r"/api/conversations/{key:[a-f0-9]{32}}/media/{message_id:[1-9][0-9]*}", media),

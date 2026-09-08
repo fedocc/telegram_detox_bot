@@ -80,9 +80,10 @@ def service(settings, tmp_path):
     return result
 
 
-def activate(service, *, thread=0, forum=False, peer="-100123", trigger=100):
-    return service.store.activate(peer_id=peer, thread_id=thread, is_forum=forum,
+def activate(service, *, thread=0, forum=False, peer="-100123", trigger=100, opened=True):
+    row = service.store.activate(peer_id=peer, thread_id=thread, is_forum=forum,
         title="Flare Team", trigger_id=trigger, preview="@fedocc проверь")
+    return service.store.open(row.id) if row and opened and not row.manually_closed else row
 
 
 def image_bytes():
@@ -614,3 +615,114 @@ async def test_unavailable_reply_parent_is_not_a_trigger(parent):
     message.get_reply_message = AsyncMock(
         side_effect=parent if isinstance(parent, Exception) else None, return_value=parent)
     assert await classify_incoming(message, self_id=1) is None
+
+
+async def test_pending_survives_listing_history_cleanup_and_new_trigger(service):
+    from app.inbox.service import conversation_json
+
+    event = SimpleNamespace(chat_id=-100123, out=False, sender_id=2, raw_text='@fedocc',
+        id=100, message=Message(100, '@fedocc'),
+        get_chat=AsyncMock(return_value=SimpleNamespace(title='Flare Team', forum=False)))
+    await service.observe(event)
+    row = service.store.active()[0]
+    assert row.opened_at is None
+    assert conversation_json(row)['expires_at'] is None
+    service.test_clock[0] += 30 * 86400
+    await service.cleanup()
+    assert service.store.get(row.id).opened_at is None
+    await service.history(row.id)
+    assert service.store.get(row.id).opened_at is None
+    event.id = 101
+    event.raw_text = 'new @fedocc'
+    await service.observe(event)
+    latest = service.store.get(row.id)
+    assert latest.opened_at is None and latest.expires_at == 0
+    assert latest.trigger_id == 101 and latest.preview == 'new @fedocc'
+
+
+async def test_first_open_is_idempotent_and_expiry_cannot_reopen(service):
+    row = activate(service, opened=False)
+    service.test_clock[0] += 10000
+    opened = service.store.open(row.id)
+    assert opened.opened_at == service.clock()
+    assert opened.expires_at == service.clock() + LIFETIME
+    service.test_clock[0] += 100
+    again = service.store.open(row.id)
+    assert again.opened_at == opened.opened_at
+    assert again.expires_at == opened.expires_at
+    service.test_clock[0] = opened.expires_at
+    assert service.store.get(row.id) is None
+    assert service.store.open(row.id) is None
+    # A fresh attention event starts a new pending cycle, not a countdown.
+    fresh = activate(service, trigger=101, opened=False)
+    assert fresh.opened_at is None
+    assert fresh.expires_at == 0
+
+
+@pytest.mark.parametrize('opened', [False, True])
+async def test_close_pending_or_opened_and_fresh_trigger(service, opened):
+    row = activate(service, opened=opened)
+    await service.close(row.id)
+    assert service.store.get(row.id) is None
+    assert service.store.open(row.id) is None
+    activate(service, trigger=100, opened=False)
+    assert service.store.get(row.id) is None
+    fresh = activate(service, trigger=101, opened=False)
+    assert fresh.opened_at is None
+
+
+async def test_pending_open_endpoint_security_and_list_is_read_only(service):
+    row = activate(service, opened=False)
+    async with TestClient(TestServer(create_app(service)),
+                          headers={'Host': '127.0.0.1:8787'}) as client:
+        metadata = await (await client.get('/api/session')).json()
+        url = f'/api/conversations/{row.id}/open'
+        headers = {'Origin': 'http://127.0.0.1:8787', 'X-Inbox-CSRF': metadata['csrf']}
+        for _ in range(2):
+            listing = await (await client.get('/api/conversations')).json()
+            assert listing['conversations'][0]['opened_at'] is None
+            assert listing['conversations'][0]['expires_at'] is None
+            service.test_clock[0] += LIFETIME + 1
+        assert (await client.get(url)).status == 405
+        for bad in [{}, {'Origin': headers['Origin']}, {'X-Inbox-CSRF': metadata['csrf']},
+                    {**headers, 'Origin': 'https://evil.test'}]:
+            assert (await client.post(url, json={}, headers=bad)).status == 403
+        assert service.store.get(row.id).opened_at is None
+        response = await client.post(url, json={}, headers=headers)
+        assert response.status == 200
+        opened = (await response.json())['conversation']
+        assert opened['opened_at'] == service.clock()
+        assert opened['expires_at'] == service.clock() + LIFETIME
+        service.test_clock[0] += 60
+        again = await (await client.post(url, json={}, headers=headers)).json()
+        assert again['conversation']['expires_at'] == opened['expires_at']
+        await service.close(row.id)
+        assert (await client.post(url, json={}, headers=headers)).status == 404
+
+
+def test_opened_at_migration_preserves_old_deadlines_and_is_repeatable(settings):
+    from sqlalchemy import text
+
+    from app.db.session import make_engine
+    from app.db.tables import InboxConversation
+    from app.inbox.store import InboxStore
+
+    factory = init_db(settings)
+    store = InboxStore(factory, lambda: set(), clock=lambda: 1000)
+    row = store.activate(peer_id='2', thread_id=0, is_forum=False,
+                         title='Test', trigger_id=1, preview='mention')
+    store.open(row.id)
+    engine = make_engine(settings)
+    with engine.begin() as connection:
+        connection.execute(text('ALTER TABLE inbox_conversations DROP COLUMN opened_at'))
+    upgraded = init_db(settings)
+    with upgraded() as session:
+        old = session.get(InboxConversation, row.id)
+        assert old.opened_at == 1000
+        assert old.expires_at == 1300
+    pending = InboxStore(upgraded, lambda: set(), clock=lambda: 1100).activate(
+        peer_id='3', thread_id=0, is_forum=False, title='New', trigger_id=1, preview='reply')
+    repeated = init_db(settings)
+    with repeated() as session:
+        assert session.get(InboxConversation, pending.id).opened_at is None
+    engine.dispose()

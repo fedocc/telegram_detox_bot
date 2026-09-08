@@ -171,6 +171,8 @@ class InboxConversation(Base):
     preview: Mapped[str] = mapped_column(String(256), default="")
     trigger_id: Mapped[int] = mapped_column(Integer)
     activated_at: Mapped[float] = mapped_column(Float)
+    opened_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Zero for pending rows; ignored until opened_at is set (legacy NOT NULL column).
     expires_at: Mapped[float] = mapped_column(Float, index=True)
     manually_closed: Mapped[bool] = mapped_column(Boolean, default=False)
 

@@ -28,6 +28,17 @@ def init_db(settings: Settings) -> sessionmaker[Session]:
     Base.metadata.create_all(engine)
     if engine.dialect.name == "sqlite":
         with engine.begin() as connection:
+            inbox_columns = {row[1] for row in connection.execute(
+                text("PRAGMA table_info(inbox_conversations)")
+            )}
+            if "opened_at" not in inbox_columns:
+                connection.execute(text(
+                    "ALTER TABLE inbox_conversations ADD COLUMN opened_at FLOAT"
+                ))
+                # Existing records keep their deadline; do not resurrect expired attention.
+                connection.execute(text(
+                    "UPDATE inbox_conversations SET opened_at = activated_at"
+                ))
             columns = {
                 row[1]
                 for row in connection.execute(text("PRAGMA table_info(messages)")).fetchall()

@@ -28,7 +28,8 @@ class InboxStore:
     def active(self):
         with self.factory() as session:
             return list(session.scalars(select(InboxConversation).where(
-                InboxConversation.expires_at > self.clock(),
+                (InboxConversation.opened_at.is_(None)
+                 | (InboxConversation.expires_at > self.clock())),
                 InboxConversation.manually_closed.is_(False),
                 InboxConversation.peer_id.not_in(self.ignored()),
             ).order_by(InboxConversation.activated_at.desc())))
@@ -50,15 +51,30 @@ class InboxStore:
             if row is None:
                 row = InboxConversation(id=uuid4().hex, peer_id=str(peer_id), thread_id=thread_id)
                 session.add(row)
+            pending = (row.opened_at is None or row.manually_closed
+                       or row.expires_at <= now)
             row.is_forum = is_forum
             row.title = title[:512]
             row.preview = preview[:256]
             row.trigger_id = trigger_id
             row.activated_at = now
-            row.expires_at = now + LIFETIME
+            row.opened_at = None if pending else row.opened_at
+            row.expires_at = 0 if pending else now + LIFETIME
             row.manually_closed = False
             session.commit()
             return row
+
+    def open(self, key):
+        now = self.clock()
+        with self.factory() as session:
+            session.execute(update(InboxConversation).where(
+                InboxConversation.id == key,
+                InboxConversation.opened_at.is_(None),
+                InboxConversation.manually_closed.is_(False),
+                InboxConversation.peer_id.not_in(self.ignored()),
+            ).values(opened_at=now, expires_at=now + LIFETIME))
+            session.commit()
+        return self.get(key)
 
     def close(self, key):
         with self.factory() as session:
@@ -72,13 +88,15 @@ class InboxStore:
         with self.factory() as session:
             row = session.get(InboxConversation, key)
             if row and not row.manually_closed and row.peer_id not in self.ignored():
+                row.opened_at = row.opened_at if row.opened_at is not None else self.clock()
                 row.expires_at = self.clock() + LIFETIME
                 session.commit()
 
     def cleanup(self):
         with self.factory() as session:
             session.execute(delete(InboxConversation).where(
-                (InboxConversation.expires_at <= self.clock())
+                (InboxConversation.opened_at.is_not(None)
+                 & (InboxConversation.expires_at <= self.clock()))
                 | InboxConversation.peer_id.in_(self.ignored())
             ))
             session.commit()

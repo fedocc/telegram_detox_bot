@@ -89,8 +89,9 @@ def normalize_image(raw):
 
 def conversation_json(row):
     return {name: getattr(row, name) for name in (
-        "id", "title", "topic_title", "preview", "trigger_id", "activated_at", "expires_at",
-    )} | {"thread_id": row.thread_id}
+        "id", "title", "topic_title", "preview", "trigger_id", "activated_at", "opened_at",
+    )} | {"thread_id": row.thread_id,
+          "expires_at": row.expires_at if row.opened_at is not None else None}
 
 
 class InboxService:
