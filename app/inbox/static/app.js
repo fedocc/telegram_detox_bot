@@ -1,5 +1,6 @@
 'use strict';
 import {createPlaybackController} from './playback.mjs';
+import {createNotificationToggle, linkedConversation} from './notifications.mjs';
 const playback = createPlaybackController(document);
 window.addEventListener('pagehide', () => playback.stopAll());
 // Removed/replaced bubbles must never keep playing outside the visible thread.
@@ -11,6 +12,7 @@ new MutationObserver(records => {
 const $ = id => document.getElementById(id);
 let csrf = '', selected = null, conversations = [], serverOffset = 0, polling = false;
 let messageNodes = new Map(), shownKey = null;
+let notificationLinkPending = true;
 const drafts = new Map();
 const now = () => Date.now() / 1000 + serverOffset;
 const visible = row => row.opened_at === null || row.expires_at > now();
@@ -223,6 +225,12 @@ async function poll() {
     conversations = result.conversations.filter(visible);
     if (!conversations.some(r => r.id === selected && r.opened_at !== null)) { selected = null; shownKey = null; messageNodes.clear(); playback.pauseWithin($('messages')); $('messages').replaceChildren(); }
     renderList(); renderHeader();
+    if (notificationLinkPending) {
+      notificationLinkPending = false;
+      const key = linkedConversation(location.search, conversations);
+      if (new URLSearchParams(location.search).has('conversation')) history.replaceState(null, '', '/');
+      if (key) await choose(key);
+    }
     if (selected) await loadMessages(selected);
     if (!result.connected) showError('load-error', 'Telegram переподключается…');
   } catch (_) { showError('load-error', 'Нет соединения · проверьте SSH-туннель'); }
@@ -258,3 +266,25 @@ $('dismiss-photo').onclick = () => $('photo-dialog').close();
 $('photo-dialog').addEventListener('close', () => $('large-photo').removeAttribute('src'));
 setInterval(() => { conversations = conversations.filter(visible); if (selected && !conversations.some(r=>r.id===selected && r.opened_at !== null)) { selected=null; shownKey=null; messageNodes.clear(); playback.pauseWithin($('messages')); $('messages').replaceChildren(); } renderList(); renderHeader(); },1000);
 poll();
+
+const notificationToggle = createNotificationToggle({
+  async request(path, csrfToken) {
+    const response = await fetch(`http://127.0.0.1:8788${path}`, {
+      method: csrfToken ? 'POST' : 'GET', cache: 'no-store', credentials: 'omit',
+      signal: AbortSignal.timeout(3000),
+      ...(csrfToken ? {headers: {'Content-Type': 'application/json', 'X-Notifier-CSRF': csrfToken}, body: '{}'} : {}),
+    });
+    if (!response.ok) throw new Error('Bridge unavailable');
+    return response.json();
+  },
+  render({enabled, available, busy, error, permission}) {
+    const button = $('notifications-toggle');
+    button.disabled = !available || busy;
+    button.setAttribute('aria-checked', String(available && enabled));
+    button.textContent = available ? (enabled ? 'ON' : 'OFF') : '—';
+    $('notifications-status').textContent = error || (!available ? 'Недоступны' : permission === 'denied' && enabled ? 'Разрешите в macOS' : '');
+  },
+});
+$('notifications-toggle').onclick = notificationToggle.toggle;
+notificationToggle.refresh();
+setInterval(notificationToggle.refresh, 15000);

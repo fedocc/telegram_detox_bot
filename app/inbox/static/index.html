@@ -12,6 +12,11 @@
     <aside>
       <header class="list-header"><strong>Упоминания <span id="count" class="count">0</span></strong><span>активные</span></header>
       <nav id="conversations" aria-label="Активные упоминания"></nav>
+      <div class="notifications-control">
+        <span id="notifications-label">Уведомления</span>
+        <button id="notifications-toggle" type="button" role="switch" aria-checked="false" aria-labelledby="notifications-label" disabled>—</button>
+        <small id="notifications-status" role="status">Недоступны</small>
+      </div>
     </aside>
     <main>
       <section id="empty" class="empty"><h1 id="empty-title">Нет активных упоминаний</h1><p id="empty-description">Чаты появляются после @fedocc или ответа на ваше сообщение.</p><div id="open-error" class="error" role="status" hidden></div></section>

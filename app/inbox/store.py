@@ -3,9 +3,9 @@ from __future__ import annotations
 import time
 from uuid import uuid4
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 
-from app.db.tables import InboxConversation
+from app.db.tables import InboxConversation, InboxNotification
 
 ACTIVE_MINUTES = 5
 LIFETIME = ACTIVE_MINUTES * 60
@@ -37,7 +37,7 @@ class InboxStore:
     def get(self, key):
         return next((row for row in self.active() if row.id == key), None)
 
-    def activate(self, *, peer_id, thread_id, is_forum, title, trigger_id, preview):
+    def activate(self, *, peer_id, thread_id, is_forum, title, trigger_id, preview, reason=None):
         now = self.clock()
         if str(peer_id) in self.ignored():
             return None
@@ -47,6 +47,8 @@ class InboxStore:
                 InboxConversation.thread_id == thread_id,
             ))
             if row and trigger_id <= row.trigger_id:
+                self.record_notification(session, row, trigger_id, title, preview, reason, now)
+                session.commit()
                 return row  # Replayed updates never reopen a manually closed conversation.
             if row is None:
                 row = InboxConversation(id=uuid4().hex, peer_id=str(peer_id), thread_id=thread_id)
@@ -61,8 +63,27 @@ class InboxStore:
             row.opened_at = None if pending else row.opened_at
             row.expires_at = 0 if pending else now + LIFETIME
             row.manually_closed = False
+            self.record_notification(session, row, trigger_id, title, preview, reason, now)
             session.commit()
             return row
+
+    @staticmethod
+    def record_notification(session, row, trigger_id, title, preview, reason, now):
+        if reason not in {"mention_only", "direct_reply"}:
+            return
+        existing = session.scalar(select(InboxNotification.id).where(
+            InboxNotification.peer_id == str(row.peer_id),
+            InboxNotification.trigger_id == trigger_id,
+        ))
+        if existing is None:
+            session.add(InboxNotification(
+                peer_id=str(row.peer_id), trigger_id=trigger_id, conversation_id=row.id,
+                title=plain_preview(title, 160),
+                topic_title=plain_preview(row.topic_title or "", 160),
+                preview=plain_preview(preview, 240),
+                trigger_reason="mention" if reason == "mention_only" else "direct_reply",
+                created_at=now,
+            ))
 
     def open(self, key):
         now = self.clock()
@@ -92,11 +113,47 @@ class InboxStore:
                 row.expires_at = self.clock() + LIFETIME
                 session.commit()
 
+    def notifications(self, after=None):
+        # Cursor advances over suppressed rows too. No lifecycle writes.
+        with self.factory() as session:
+            latest = session.scalar(select(func.max(InboxNotification.id))) or 0
+            if after is None or after > latest:
+                return {"events": [], "cursor": latest}
+            rows = list(session.scalars(select(InboxNotification).where(
+                InboxNotification.id > after, InboxNotification.id <= latest,
+            ).order_by(InboxNotification.id).limit(100)))
+            active = {row.id: row for row in self.active()}
+            events = []
+            for row in rows:
+                conversation = active.get(row.conversation_id)
+                if (conversation is None or row.peer_id in self.ignored()
+                        or row.created_at < self.clock() - 86400):
+                    continue
+                events.append({
+                    "event_id": row.id, "conversation_id": row.conversation_id,
+                    "title": row.title, "topic_title": plain_preview(
+                        conversation.topic_title or row.topic_title, 160),
+                    "preview": row.preview, "trigger_reason": row.trigger_reason,
+                    "created_at": row.created_at,
+                })
+            return {"events": events, "cursor": rows[-1].id if rows else latest}
+
     def cleanup(self):
         with self.factory() as session:
+            # Keep compact dedup/cursor tombstones, discard notification text after one day.
+            session.execute(update(InboxNotification).where(
+                (InboxNotification.created_at < self.clock() - 86400)
+                | InboxNotification.peer_id.in_(self.ignored()),
+                (InboxNotification.title != "") | (InboxNotification.preview != "")
+                | (InboxNotification.topic_title != ""),
+            ).values(title="", topic_title="", preview=""))
             session.execute(delete(InboxConversation).where(
                 (InboxConversation.opened_at.is_not(None)
                  & (InboxConversation.expires_at <= self.clock()))
                 | InboxConversation.peer_id.in_(self.ignored())
             ))
             session.commit()
+
+
+def plain_preview(value, limit):
+    return " ".join("".join(c if c.isprintable() else " " for c in value).split())[:limit]

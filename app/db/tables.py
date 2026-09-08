@@ -185,3 +185,21 @@ class InboxSend(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending")
     message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[float] = mapped_column(Float)
+
+
+class InboxNotification(Base):
+    __tablename__ = "inbox_notifications"
+    __table_args__ = (
+        UniqueConstraint("peer_id", "trigger_id", name="uq_inbox_notification_trigger"),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    peer_id: Mapped[str] = mapped_column(String(128))
+    trigger_id: Mapped[int] = mapped_column(Integer)
+    conversation_id: Mapped[str] = mapped_column(String(32), index=True)
+    title: Mapped[str] = mapped_column(String(160))
+    topic_title: Mapped[str] = mapped_column(String(160), default="")
+    preview: Mapped[str] = mapped_column(String(240))
+    trigger_reason: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[float] = mapped_column(Float, index=True)

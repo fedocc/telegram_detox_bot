@@ -595,6 +595,7 @@ async def test_attention_email_and_inbox_integration(
         assert processed is bool(expected)
     assert len(email.sent) == int(bool(expected))
     assert len(service.store.active()) == int(bool(expected))
+    assert len(service.store.notifications(0)["events"]) == int(bool(expected))
     with service.store.factory() as session:
         jobs = list(session.scalars(select(AlertJob)))
         assert [job.alert_type for job in jobs] == ([expected] if expected else [])
@@ -726,3 +727,83 @@ def test_opened_at_migration_preserves_old_deadlines_and_is_repeatable(settings)
     with repeated() as session:
         assert session.get(InboxConversation, pending.id).opened_at is None
     engine.dispose()
+
+
+@pytest.mark.parametrize('reason', ['mention_only', 'direct_reply'])
+async def test_notification_feed_stable_passive_and_private(service, reason):
+    row = service.store.activate(peer_id='-100123', thread_id=0, is_forum=False,
+        title='Team', trigger_id=100, preview=' hello\n\tworld ' + 'x' * 400, reason=reason)
+    first = service.store.notifications(0)
+    assert len(first['events']) == 1
+    event = first['events'][0]
+    assert event['conversation_id'] == row.id
+    assert event['trigger_reason'] == ('mention' if reason == 'mention_only' else 'direct_reply')
+    assert len(event['preview']) == 240 and '\n' not in event['preview']
+    assert set(event) == {'event_id', 'conversation_id', 'title', 'topic_title', 'preview',
+                          'trigger_reason', 'created_at'}
+    assert service.store.notifications(0) == first
+    assert service.store.notifications(first['cursor'])['events'] == []
+    assert service.store.notifications() == {'events': [], 'cursor': first['cursor']}
+    assert service.store.get(row.id).opened_at is None
+    service.store.activate(peer_id='-100123', thread_id=0, is_forum=False,
+        title='Team', trigger_id=100, preview='replayed', reason=reason)
+    assert service.store.notifications(0) == first
+    service.store.close(row.id)
+    assert service.store.notifications(0) == {'events': [], 'cursor': first['cursor']}
+
+
+async def test_notification_feed_endpoint_and_invalid_cursor(service):
+    service.store.activate(peer_id='-100123', thread_id=0, is_forum=False,
+        title='Team', trigger_id=100, preview='@fedocc', reason='mention_only')
+    async with TestClient(TestServer(create_app(service)),
+                          headers={'Host': '127.0.0.1:8787'}) as client:
+        assert (await (await client.get('/api/notifications')).json())['events'] == []
+        response = await client.get('/api/notifications?after=0')
+        assert len((await response.json())['events']) == 1
+        assert service.store.active()[0].opened_at is None
+        for invalid in ['-1', 'NaN', '9' * 30, '1.2']:
+            assert (await client.get('/api/notifications?after=' + invalid)).status == 400
+        forbidden = await client.get('/api/notifications',
+                                     headers={'Origin': 'https://evil.test'})
+        assert forbidden.status == 403
+        response = await client.get('/api/notifications?after=0')
+        assert response.headers['Cache-Control'] == 'no-store'
+
+
+async def test_feed_cursor_pagination_ignored_retention_and_backend_restart(service):
+    from app.inbox.store import InboxStore
+
+    for mid in range(1, 104):
+        service.store.activate(peer_id='-100123', thread_id=0, is_forum=False,
+            title='Team', trigger_id=mid, preview='@fedocc', reason='mention_only')
+    first = service.store.notifications(0)
+    assert len(first['events']) == 100
+    restarted = InboxStore(service.store.factory, lambda: service.test_ignored, service.clock)
+    tail = restarted.notifications(first['cursor'])
+    assert len(tail['events']) == 3
+    service.test_ignored.add('-100123')
+    assert restarted.notifications(first['cursor'])['events'] == []
+    service.test_ignored.clear()
+    service.test_clock[0] += 86401
+    await service.cleanup()
+    assert restarted.notifications(0)['events'] == []
+    # Pending conversation remains, but old notification bodies are redacted.
+    assert service.store.active()[0].opened_at is None
+    from sqlalchemy import select
+
+    from app.db.tables import InboxNotification
+
+    with service.store.factory() as session:
+        assert all(row.preview == '' for row in session.scalars(select(InboxNotification)))
+
+
+def test_feed_keeps_distinct_out_of_order_triggers_without_rewinding_lifecycle(service):
+    row = service.store.activate(peer_id='-100123', thread_id=0, is_forum=False,
+        title='Team', trigger_id=102, preview='newer mention', reason='mention_only')
+    for _ in range(2):
+        service.store.activate(peer_id='-100123', thread_id=0, is_forum=False,
+            title='Team', trigger_id=101, preview='resolved reply', reason='direct_reply')
+    events = service.store.notifications(0)['events']
+    assert [e['trigger_reason'] for e in events] == ['mention', 'direct_reply']
+    assert service.store.get(row.id).trigger_id == 102
+    assert service.store.get(row.id).opened_at is None

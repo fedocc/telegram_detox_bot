@@ -128,6 +128,7 @@ class InboxService:
         self.store.activate(
             peer_id=event.chat_id, thread_id=thread, is_forum=forum,
             title=display_name(chat), trigger_id=event.id, preview=event.raw_text or "",
+            reason=trigger,
         )
 
     async def belongs(self, message, row):

@@ -518,3 +518,9 @@ dialog img {
 .sidebar-item { position:relative }
 .sidebar-item .chat-row { width:100%; padding-right:30px }
 .sidebar-close { position:absolute; right:4px; top:10px; font-size:18px; color:var(--muted) }
+
+.notifications-control { margin-top:auto; padding:12px; border-top:1px solid var(--border); display:flex; align-items:center; flex-wrap:wrap; gap:8px; color:var(--muted) }
+#notifications-toggle { margin-left:auto; min-width:42px; padding:4px 8px; border:1px solid var(--border); border-radius:12px; font-size:11px }
+#notifications-toggle[aria-checked="true"] { background:var(--border); color:var(--text) }
+#notifications-status { width:100%; font-size:10px }
+#notifications-status:empty { display:none }

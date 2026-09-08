@@ -151,3 +151,12 @@ video, photos and files are distinct. Starting playback pauses other media;
 removing or switching conversations stops their playback. Nothing autoplays.
 
 Playback regression checks: `node --test tests/inbox_playback.test.mjs`.
+
+## Native Mac notifications
+
+The optional [Swift notifier](../tools/macos/notifier/README.md) runs independently
+of the browser. Its sidebar switch controls only local Mac banners via a strict
+loopback bridge. Feed and status polling leave pending conversations unopened.
+A banner click supplies an explicit conversation link and starts the existing
+open action. The control reuses the existing muted sidebar palette, border tokens
+and focus styles; no new settings page or global header is introduced.

@@ -59,7 +59,8 @@ def create_app(service, *, port=PORT):
             "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
             "Cross-Origin-Resource-Policy": "same-origin",
             "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; "
-                "img-src 'self' blob:; media-src 'self' blob:; connect-src 'self'; "
+                "img-src 'self' blob:; media-src 'self' blob:; "
+                "connect-src 'self' http://127.0.0.1:8788; "
                 "base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
         })
         return response
@@ -69,7 +70,7 @@ def create_app(service, *, port=PORT):
 
     async def asset(request):
         name = request.match_info["name"]
-        if name not in {"app.js", "style.css", "playback.mjs"}:
+        if name not in {"app.js", "style.css", "playback.mjs", "notifications.mjs"}:
             raise web.HTTPNotFound()
         return web.FileResponse(STATIC / name)
 
@@ -80,6 +81,15 @@ def create_app(service, *, port=PORT):
         connected = service.client.is_connected()
         return web.json_response({"ok": connected, "telegram_connected": connected},
                                  status=200 if connected else 503)
+
+    async def notifications(request):
+        raw = request.query.get("after")
+        if raw is not None and (not raw.isascii() or not raw.isdecimal() or len(raw) > 19):
+            raise InboxError("Некорректный cursor.", 400)
+        after = int(raw) if raw is not None else None
+        if after is not None and after > 9223372036854775807:
+            raise InboxError("Некорректный cursor.", 400)
+        return web.json_response(service.store.notifications(after))
 
     async def conversations(request):
         return web.json_response({"conversations": [conversation_json(r) for r in
@@ -131,6 +141,7 @@ def create_app(service, *, port=PORT):
     app.add_routes([
         web.get("/", index), web.get("/static/{name}", asset),
         web.get("/api/session", session), web.get("/api/health", health),
+        web.get("/api/notifications", notifications),
         web.get("/api/conversations", conversations),
         web.get(r"/api/conversations/{key:[a-f0-9]{32}}/messages", history),
         web.post(r"/api/conversations/{key:[a-f0-9]{32}}/open", open_conversation),
