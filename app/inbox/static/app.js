@@ -1,6 +1,7 @@
 'use strict';
 import {createPlaybackController} from './playback.mjs';
 import {createNotificationToggle, linkedConversation} from './notifications.mjs';
+import {isWritable, mergeMessagePages, uploadWithinLimit} from './ui.mjs';
 const playback = createPlaybackController(document);
 window.addEventListener('pagehide', () => playback.stopAll());
 // Removed/replaced bubbles must never keep playing outside the visible thread.
@@ -10,8 +11,10 @@ new MutationObserver(records => {
   }
 }).observe(document.body, {childList:true, subtree:true});
 const $ = id => document.getElementById(id);
-let csrf = '', selected = null, conversations = [], serverOffset = 0, polling = false;
+let csrf = '', selected = null, selectedMode = null, conversations = [], library = [], serverOffset = 0, polling = false;
 let messageNodes = new Map(), shownKey = null;
+let nextBefore = null, uploadMax = 100 * 1024 * 1024;
+let libraryPollAt = 0;
 let notificationLinkPending = true;
 const drafts = new Map();
 const now = () => Date.now() / 1000 + serverOffset;
@@ -23,7 +26,7 @@ function node(tag, className, text) { const n = document.createElement(tag); if 
 function draft(key = selected) {
   if (!drafts.has(key)) {
     let text = ''; try { text = sessionStorage.getItem(`draft:${key}`) || ''; } catch (_) {}
-    drafts.set(key, {text, file: null, url: null, requestId: null, sending: false, error: ''});
+    drafts.set(key, {text, file: null, url: null, requestId: null, sending: false, error: '', reply:null});
   }
   return drafts.get(key);
 }
@@ -36,12 +39,18 @@ async function api(path, data) {
   if (!response.ok) { const error = new Error(result.error || 'Ошибка соединения.'); error.status = response.status; throw error; }
   return result;
 }
+async function multipartApi(path, form) {
+  const response = await fetch(path, {method:'POST', headers:{'X-Inbox-CSRF':csrf}, body:form});
+  const result = await response.json();
+  if (!response.ok) { const error = new Error(result.error || 'Ошибка соединения.'); error.status=response.status; throw error; }
+  return result;
+}
 function showError(id, message) { $(id).textContent = message || ''; $(id).hidden = !message; }
 function renderList() {
   $('count').textContent = conversations.length;
   const activeElement = document.activeElement?.dataset.key;
   const rows = conversations.map(row => {
-    const button = node('button', `chat-row${selected === row.id ? ' selected' : ''}`);
+    const button = node('button', `chat-row${selectedMode === 'inbox' && selected === row.id ? ' selected' : ''}`);
     button.type = 'button'; button.dataset.key = row.id;
     button.setAttribute('aria-current', selected === row.id ? 'true' : 'false');
     const top = node('div', 'row-top');
@@ -56,24 +65,40 @@ function renderList() {
   $('conversations').replaceChildren(...rows);
   if (activeElement) [...$('conversations').querySelectorAll('[data-key]')].find(n => n.dataset.key === activeElement)?.focus();
 }
+function renderLibrary() {
+  $('library-list').replaceChildren(...library.map(row => {
+    const button=node('button',`library-row${selectedMode==='library'&&selected===row.id?' selected':''}`,row.title);
+    button.type='button'; button.onclick=()=>chooseLibrary(row.id); return button;
+  }));
+}
 function renderHeader() {
-  const row = conversations.find(r => r.id === selected);
+  const row = selectedMode === 'library' ? library.find(r=>r.id===selected) : conversations.find(r => r.id === selected);
   $('empty').hidden = !!row; $('conversation').hidden = !row;
-  $('empty-title').textContent = conversations.length ? 'Выберите разговор' : 'Нет активных упоминаний';
+  $('empty-title').textContent = conversations.length ? 'Выберите разговор' : 'Нет активных разговоров';
   if (!row) return;
   $('chat-title').textContent = row.title + (row.topic_title ? ` · ${row.topic_title}` : row.thread_id ? ` · Тема ${row.thread_id}` : '');
-  $('chat-avatar').textContent = initials(row.title); $('remaining').textContent = minutes(row);
+  $('chat-avatar').textContent = initials(row.title);
+  $('remaining').hidden = selectedMode === 'library';
+  $('remaining').textContent = selectedMode === 'library' ? '' : minutes(row);
+  $('close').hidden = selectedMode === 'library';
 }
 function renderComposer() {
   if (!selected) return;
   const d = draft(); $('text').value = d.text;
+  const source = library.find(row=>row.id===selected);
+  const writable = isWritable(selectedMode, source);
+  $('conversation').querySelector('footer').hidden=!writable;
+  $('composer').hidden = !writable; $('ghost-note').hidden = !(selectedMode==='library'&&source?.id==='saved');
+  if (!writable) { $('reply-target').hidden=true; return; }
   $('attachment').hidden = !d.file;
-  if (d.file) { $('attachment-preview').src = d.url; $('attachment-name').textContent = d.file.name; }
-  else $('attachment-preview').removeAttribute('src');
-  for (const id of ['text','attach','remove-image','close']) $(id).disabled = d.sending;
+  if (d.file) { $('attachment-preview').hidden=!d.url; if(d.url)$('attachment-preview').src = d.url; $('attachment-name').textContent = d.file.name; }
+  else { $('attachment-preview').hidden=false; $('attachment-preview').removeAttribute('src'); }
+  for (const id of ['text','attach','remove-image']) $(id).disabled = d.sending;
+  $('close').disabled = d.sending;
   $('send').disabled = d.sending || (!d.text.trim() && !d.file);
   $('send').setAttribute('aria-label', d.sending ? 'Отправка…' : 'Отправить сообщение');
   showError('send-error', d.error); resize();
+  $('reply-target').hidden=!d.reply; $('reply-target').querySelector('span').textContent=d.reply ? `Ответ: ${d.reply.text}` : '';
 }
 async function choose(key) {
   if (key === selected) return;
@@ -82,7 +107,7 @@ async function choose(key) {
     const result = await api(`/api/conversations/${key}/open`, {});
     if (request !== choosing) return;
     conversations = conversations.map(row => row.id === key ? result.conversation : row);
-    selected = key; shownKey = null; messageNodes.clear();
+    selected = key; selectedMode='inbox'; shownKey = null; messageNodes.clear();
     playback.pauseWithin($('messages')); $('messages').replaceChildren();
     showError('open-error', ''); showError('load-error', '');
     renderList(); renderHeader(); renderComposer();
@@ -91,6 +116,13 @@ async function choose(key) {
     if (request === choosing) showError(selected ? 'load-error' : 'open-error', error.message);
   }
 }
+async function chooseLibrary(key) {
+  if (key===selected && selectedMode==='library') { await loadLibrary(key); return; }
+  ++choosing; selected=key; selectedMode='library'; shownKey=null; nextBefore=null; messageNodes.clear();
+  playback.pauseWithin($('messages')); $('messages').replaceChildren();
+  showError('open-error',''); showError('load-error',''); renderList(); renderLibrary(); renderHeader(); renderComposer();
+  await loadLibrary(key); if (library.find(row=>row.id===key)?.writable) $('text').focus();
+}
 async function closeConversation(key) {
   if (!key || draft(key).sending) return;
   ++choosing;
@@ -98,22 +130,31 @@ async function closeConversation(key) {
     await api(`/api/conversations/${key}/close`, {});
     conversations = conversations.filter(row => row.id !== key);
     if (selected === key) {
-      selected = null; shownKey = null; messageNodes.clear();
+      selected = null; selectedMode=null; shownKey = null; messageNodes.clear();
       playback.pauseWithin($('messages')); $('messages').replaceChildren();
     }
     renderList(); renderHeader();
   } catch (error) { showError(selected ? 'send-error' : 'open-error', error.message); }
 }
 
+function appendLinked(parent, text) {
+  let last=0;
+  for (const match of text.matchAll(/https?:\/\/[^\s<>]+/gi)) {
+    parent.append(document.createTextNode(text.slice(last,match.index)));
+    const link=node('a','',match[0]); link.href=match[0]; link.target='_blank'; link.rel='noopener noreferrer'; parent.append(link);
+    last=match.index+match[0].length;
+  }
+  parent.append(document.createTextNode(text.slice(last)));
+}
 function highlight(text, mention) {
   const p = node('p', 'message-text');
-  if (!mention) { p.textContent = text; return p; }
+  if (!mention) { appendLinked(p,text); return p; }
   let last = 0;
   for (const match of text.matchAll(/(?<![A-Za-z0-9_])@fedocc(?![A-Za-z0-9_])/gi)) {
-    p.append(document.createTextNode(text.slice(last, match.index)), node('mark', '', match[0]));
+    appendLinked(p,text.slice(last, match.index)); p.append(node('mark', '', match[0]));
     last = match.index + match[0].length;
   }
-  p.append(document.createTextNode(text.slice(last))); return p;
+  appendLinked(p,text.slice(last)); return p;
 }
 const sizeLabel = size => size >= 1048576 ? `${(size/1048576).toFixed(1)} МБ` : `${Math.ceil(size/1024)} КБ`;
 const duration = seconds => `${Math.floor(seconds/60)}:${String(Math.floor(seconds%60)).padStart(2,'0')}`;
@@ -177,6 +218,11 @@ function attachment(media) {
 function messageNode(message) {
   const bubble = node('article', `bubble${message.own ? ' own' : ''}${message.mention ? ' mention' : ''}`);
   bubble.dataset.id = message.id;
+  if (selectedMode==='inbox' && !message.own) {
+    const reply=node('button','reply-action','↩'); reply.type='button'; reply.title='Ответить';
+    reply.onclick=()=>{ const d=draft(); d.reply={id:message.id,text:(message.text||message.media?.name||'Вложение').slice(0,120)}; renderComposer(); $('text').focus(); };
+    bubble.append(reply);
+  }
   if (!message.own) {
     const sender = node('div','sender', message.sender);
     if (message.mention) sender.append(node('span','mention-badge','@ упом.'));
@@ -188,15 +234,14 @@ function messageNode(message) {
   const timestamp = node('time','timestamp', new Date(message.timestamp).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}) + (message.own ? ' ✓' : ''));
   timestamp.dateTime = message.timestamp; timestamp.title = new Date(message.timestamp).toLocaleString('ru-RU'); bubble.append(timestamp); return bubble;
 }
-async function loadMessages(key) {
-  try {
-    const result = await api(`/api/conversations/${key}/messages`);
-    if (selected !== key) return;
-    const row = conversations.find(r => r.id === key); if (row) Object.assign(row, result.conversation);
-    renderHeader(); showError('load-error','');
+function renderMessages(messages, key, {triggerId=null, prepend=false, merge=false}={}) {
     const list = $('messages'), initial = shownKey !== key, atBottom = list.scrollHeight-list.scrollTop-list.clientHeight < 70;
+    const oldHeight=list.scrollHeight;
+    const current=[...messageNodes.values()].filter(x=>x.message).map(x=>x.message);
+    const all = merge ? [...messages,...current] : messages;
+    const unique=mergeMessagePages([],all);
     const keep = new Set(), order = []; let date = '', previousMessage = null;
-    for (const m of result.messages) {
+    for (const m of unique) {
       const day = new Date(m.timestamp).toLocaleDateString('ru-RU',{day:'numeric',month:'long'});
       if (day !== date) {
         const dateKey = `day:${day}`; keep.add(dateKey); order.push(dateKey);
@@ -205,25 +250,47 @@ async function loadMessages(key) {
       }
       const id = String(m.id), signature = JSON.stringify(m); keep.add(id); order.push(id);
       const existing = messageNodes.get(id);
-      if (!existing) { const n = messageNode(m); messageNodes.set(id,{node:n,signature}); list.append(n); }
-      else if (existing.signature !== signature) { const n = messageNode(m); playback.pauseWithin(existing.node); existing.node.replaceWith(n); messageNodes.set(id,{node:n,signature}); }
+      if (!existing) { const n = messageNode(m); messageNodes.set(id,{node:n,signature,message:m}); list.append(n); }
+      else if (existing.signature !== signature) { const n = messageNode(m); playback.pauseWithin(existing.node); existing.node.replaceWith(n); messageNodes.set(id,{node:n,signature,message:m}); }
       messageNodes.get(id).node.classList.toggle('grouped', !!previousMessage && previousMessage.sender === m.sender && previousMessage.own === m.own);
       previousMessage = m;
     }
     for (const [id, value] of messageNodes) if (!keep.has(id)) { playback.pauseWithin(value.node); value.node.remove(); messageNodes.delete(id); }
     order.forEach((id, index) => { const n = messageNodes.get(id).node; if (list.children[index] !== n) list.insertBefore(n, list.children[index] || null); });
     shownKey = key;
-    if (initial) { const trigger = messageNodes.get(String(result.conversation.trigger_id)); if (trigger) trigger.node.scrollIntoView({block:'center'}); else list.scrollTop = list.scrollHeight; }
+    if (prepend) list.scrollTop += list.scrollHeight-oldHeight;
+    else if (initial) { const trigger = messageNodes.get(String(triggerId)); if (trigger) trigger.node.scrollIntoView({block:'center'}); else list.scrollTop = list.scrollHeight; }
     else if (atBottom) list.scrollTop = list.scrollHeight;
+}
+async function loadMessages(key) {
+  try {
+    const result = await api(`/api/conversations/${key}/messages`);
+    if (selected !== key || selectedMode!=='inbox') return;
+    const row = conversations.find(r => r.id === key); if (row) Object.assign(row, result.conversation);
+    renderHeader(); showError('load-error','');
+    renderMessages(result.messages,key,{triggerId:result.conversation.trigger_id});
   } catch (error) { if (selected === key) showError('load-error', error.message); }
+}
+async function loadLibrary(key, before=null, refresh=false) {
+  try {
+    const suffix=before?`?before=${before}`:'';
+    const result=await api(`/api/library/${key}/messages${suffix}`);
+    if(selected!==key||selectedMode!=='library') return;
+    if(!refresh) nextBefore=result.next_before; $('older').hidden=!nextBefore;
+    renderMessages(result.messages,`library:${key}`,{prepend:!!before,merge:!!before||refresh}); showError('load-error','');
+  } catch(error) { if(selected===key&&selectedMode==='library') showError('load-error',error.message); }
 }
 async function poll() {
   if (polling) return; polling = true;
   try {
-    if (!csrf) { const session = await api('/api/session'); csrf = session.csrf; $('empty-description').textContent = `Чаты появляются после @fedocc или ответа на ваше сообщение. Ожидают открытия без таймера; после открытия доступны ${session.active_minutes} мин.`; }
+    if (!csrf) {
+      const session = await api('/api/session'); csrf = session.csrf; uploadMax=session.upload_max_mb*1024*1024;
+      $('empty-description').textContent = `Личные сообщения, @fedocc и ответы ожидают без таймера; после открытия доступны ${session.active_minutes} мин.`;
+      library=(await api('/api/library')).sources; renderLibrary();
+    }
     const result = await api('/api/conversations'); serverOffset = result.now - Date.now()/1000;
     conversations = result.conversations.filter(visible);
-    if (!conversations.some(r => r.id === selected && r.opened_at !== null)) { selected = null; shownKey = null; messageNodes.clear(); playback.pauseWithin($('messages')); $('messages').replaceChildren(); }
+    if (selectedMode==='inbox' && !conversations.some(r => r.id === selected && r.opened_at !== null)) { selected = null; selectedMode=null; shownKey = null; messageNodes.clear(); playback.pauseWithin($('messages')); $('messages').replaceChildren(); }
     renderList(); renderHeader();
     if (notificationLinkPending) {
       notificationLinkPending = false;
@@ -231,7 +298,10 @@ async function poll() {
       if (new URLSearchParams(location.search).has('conversation')) history.replaceState(null, '', '/');
       if (key) await choose(key);
     }
-    if (selected) await loadMessages(selected);
+    if (selected && selectedMode==='inbox') await loadMessages(selected);
+    if (selected && selectedMode==='library' && Date.now() >= libraryPollAt) {
+      libraryPollAt=Date.now()+10000; await loadLibrary(selected,null,true);
+    }
     if (!result.connected) showError('load-error', 'Telegram переподключается…');
   } catch (_) { showError('load-error', 'Нет соединения · проверьте SSH-туннель'); }
   finally { polling = false; setTimeout(poll,2000); }
@@ -239,32 +309,40 @@ async function poll() {
 function resize() { $('text').style.height = 'auto'; $('text').style.height = `${Math.min(180,$('text').scrollHeight)}px`; }
 $('text').oninput = () => { const d = draft(); d.text = $('text').value; d.requestId = null; d.error = ''; saveDraft(d); $('send').disabled = !d.text.trim() && !d.file; showError('send-error',''); resize(); };
 $('text').onkeydown = event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.isComposing) { event.preventDefault(); $('composer').requestSubmit(); } };
-$('attach').onclick = () => $('image-input').click();
-$('image-input').onchange = () => {
-  const file = $('image-input').files[0]; $('image-input').value = ''; if (!file || !selected) return;
+function chooseFile(file) {
+  if (!file || !selected) return;
   const d = draft();
-  if (!['image/jpeg','image/png','image/webp'].includes(file.type) || file.size > 10*1024*1024) { d.error = 'Выберите JPEG, PNG или WebP размером до 10 МБ.'; renderComposer(); return; }
+  if (!uploadWithinLimit(file,uploadMax)) { d.error = `Файл пустой или больше ${Math.floor(uploadMax/1048576)} МБ.`; renderComposer(); return; }
   if (d.url) URL.revokeObjectURL(d.url);
-  d.file = file; d.url = URL.createObjectURL(file); d.requestId = null; d.error = ''; renderComposer();
-};
+  d.file = file; d.url = file.type.startsWith('image/') ? URL.createObjectURL(file) : null; d.requestId = null; d.error = ''; renderComposer();
+}
+$('attach').onclick = () => $('image-input').click();
+$('image-input').onchange = () => { const file=$('image-input').files[0]; $('image-input').value=''; chooseFile(file); };
 $('remove-image').onclick = () => { const d = draft(); if(d.url) URL.revokeObjectURL(d.url); d.file = null; d.url = null; d.requestId = null; renderComposer(); };
-async function imageBase64(file) { const bytes = new Uint8Array(await file.arrayBuffer()); let binary = ''; for(let i=0;i<bytes.length;i+=8192) binary += String.fromCharCode(...bytes.subarray(i,i+8192)); return btoa(binary); }
 $('composer').onsubmit = async event => {
   event.preventDefault(); if (!selected) return;
   const key = selected, d = draft(key); if (d.sending || (!d.text.trim() && !d.file)) return;
   d.sending = true; d.error = ''; d.requestId ||= crypto.randomUUID(); renderComposer();
   try {
-    await api(`/api/conversations/${key}/send`, {request_id:d.requestId,text:d.text,...(d.file ? {image:await imageBase64(d.file)} : {})});
-    d.text = ''; d.file = null; d.requestId = null; if(d.url) URL.revokeObjectURL(d.url); d.url = null;
+    const form=new FormData(); form.set('request_id',d.requestId); form.set('text',d.text);
+    if(d.file) form.set('file',d.file,d.file.name); if(d.reply) form.set('reply_to',String(d.reply.id));
+    const path=selectedMode==='library' ? '/api/library/saved/send' : `/api/conversations/${key}/upload`;
+    await multipartApi(path,form);
+    d.text = ''; d.file = null; d.reply=null; d.requestId = null; if(d.url) URL.revokeObjectURL(d.url); d.url = null;
     try { sessionStorage.removeItem(`draft:${key}`); } catch (_) {}
-    if(selected === key) await loadMessages(key);
+    if(selected === key) { if(selectedMode==='library') await loadLibrary(key); else await loadMessages(key); }
   } catch (error) { d.error = error.message || 'Нет ответа. Проверьте сообщения перед повтором; черновик сохранён.'; if (error.status === 403) csrf = ''; }
   finally { d.sending = false; if(selected === key) renderComposer(); }
 };
 $('close').onclick = () => closeConversation(selected);
+$('reply-target').querySelector('button').onclick=()=>{ const d=draft(); d.reply=null; renderComposer(); };
+$('library-toggle').onclick=()=>{ const open=$('library-toggle').getAttribute('aria-expanded')!=='true'; $('library-toggle').setAttribute('aria-expanded',String(open)); $('library-list').hidden=!open; };
+$('older').onclick=()=>{ if(selectedMode==='library'&&nextBefore) loadLibrary(selected,nextBefore); };
+for(const type of ['dragenter','dragover']) $('conversation').addEventListener(type,event=>{ if(selected&&(selectedMode==='inbox'||library.find(x=>x.id===selected)?.writable)){event.preventDefault();$('drop-zone').hidden=false;} });
+for(const type of ['dragleave','drop']) $('conversation').addEventListener(type,event=>{event.preventDefault();$('drop-zone').hidden=true;if(type==='drop')chooseFile(event.dataTransfer.files[0]);});
 $('dismiss-photo').onclick = () => $('photo-dialog').close();
 $('photo-dialog').addEventListener('close', () => $('large-photo').removeAttribute('src'));
-setInterval(() => { conversations = conversations.filter(visible); if (selected && !conversations.some(r=>r.id===selected && r.opened_at !== null)) { selected=null; shownKey=null; messageNodes.clear(); playback.pauseWithin($('messages')); $('messages').replaceChildren(); } renderList(); renderHeader(); },1000);
+setInterval(() => { conversations = conversations.filter(visible); if (selectedMode==='inbox' && selected && !conversations.some(r=>r.id===selected && r.opened_at !== null)) { selected=null; selectedMode=null; shownKey=null; messageNodes.clear(); playback.pauseWithin($('messages')); $('messages').replaceChildren(); } renderList(); renderHeader(); },1000);
 poll();
 
 const notificationToggle = createNotificationToggle({

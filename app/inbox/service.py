@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import io
+import math
 import time
 import warnings
 from collections import OrderedDict
+from datetime import timedelta
 from pathlib import Path
 
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -13,14 +15,16 @@ from telethon.errors import RPCError
 from telethon.tl.types import PeerChannel
 
 from app.db.tables import InboxSend
+from app.inbox.library import SAVED_MESSAGES
 from app.inbox.store import InboxStore
-from app.services.attention import DETERMINISTIC_ALERT_TYPES, classify_incoming
+from app.services.attention import INBOX_TRIGGER_TYPES, classify_incoming
 from app.services.mentions import has_exact_fedocc_mention
 from app.telegram.mapper import display_name
 
 MAX_IMAGE = 10 * 1024 * 1024
 MAX_MEDIA = 64 * 1024 * 1024
 MAX_CACHE = 256 * 1024 * 1024
+LIBRARY_PAGE_SIZE = 50
 
 
 class InboxError(Exception):
@@ -95,7 +99,9 @@ def conversation_json(row):
 
 
 class InboxService:
-    def __init__(self, client, factory, ignored, cache_dir, self_id, clock=time.time):
+    def __init__(self, client, factory, ignored, cache_dir, self_id, clock=time.time,
+                 library=None, upload_max_mb=100, upload_concurrency=2,
+                 upload_stale_hours=24):
         self.client = client
         self.store = InboxStore(factory, ignored, clock)
         self.store.clamp_existing_lifetimes()
@@ -106,6 +112,14 @@ class InboxService:
         self.history_lock = asyncio.Lock()
         self.action_lock = asyncio.Lock()
         self.media_lock = asyncio.Lock()
+        self.library = tuple(library or (SAVED_MESSAGES,))
+        self.library_by_id = {row.id: row for row in self.library}
+        self.library_snapshots = OrderedDict()
+        self.upload_max = upload_max_mb * 1024 * 1024
+        self.upload_stale = upload_stale_hours * 3600
+        self.upload_dir = self.cache_dir.parent / "outbox_tmp"
+        self.upload_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.upload_slots = asyncio.Semaphore(upload_concurrency)
         self.clock = clock
 
     def require(self, key):
@@ -121,7 +135,7 @@ class InboxService:
         if trigger is None:
             trigger = await classify_incoming(event.message, self_id=self.self_id,
                                                text=event.raw_text, sender_id=event.sender_id)
-        if trigger not in DETERMINISTIC_ALERT_TYPES:
+        if trigger not in INBOX_TRIGGER_TYPES:
             return
         chat = await event.get_chat()
         thread, forum = await thread_context(event.message, chat)
@@ -130,6 +144,51 @@ class InboxService:
             title=display_name(chat), trigger_id=event.id, preview=event.raw_text or "",
             reason=trigger,
         )
+
+    def library_json(self):
+        return [{"id": row.id, "title": row.title, "writable": row.writable}
+                for row in self.library]
+
+    def library_source(self, source_id):
+        source = self.library_by_id.get(source_id)
+        if source is None:
+            raise InboxError("Раздел библиотеки не найден.", 404)
+        return source
+
+    async def serialize_library(self, message, source_id, by_id):
+        row = type("LibraryRow", (), {"id": source_id, "is_forum": False,
+                                      "thread_id": 0})()
+        result = await self.serialize(message, row, by_id)
+        if result["media"]:
+            result["media"]["url"] = f"/api/library/{source_id}/media/{message.id}"
+        return result
+
+    async def library_history(self, source_id, before=None):
+        source = self.library_source(source_id)
+        if before is not None and (not isinstance(before, int) or before <= 0):
+            raise InboxError("Некорректный cursor.")
+        key = (source_id, before or 0)
+        snapshot = self.library_snapshots.get(key)
+        if snapshot and self.clock() - snapshot["fetched"] < 2:
+            return snapshot["payload"]
+        options = {"limit": LIBRARY_PAGE_SIZE}
+        if before:
+            options["offset_id"] = before
+        fetched = list(await self.client.get_messages(source.peer_id, **options))
+        fetched.sort(key=lambda message: message.id)
+        by_id = {message.id: message for message in fetched}
+        payload = {
+            "source": {"id": source.id, "title": source.title, "writable": source.writable},
+            "messages": [await self.serialize_library(message, source_id, by_id)
+                         for message in fetched],
+            "next_before": min(by_id) if len(fetched) == LIBRARY_PAGE_SIZE else None,
+        }
+        self.library_snapshots[key] = {"fetched": self.clock(), "messages": by_id,
+                                       "payload": payload}
+        self.library_snapshots.move_to_end(key)
+        while len(self.library_snapshots) > 40:
+            self.library_snapshots.popitem(last=False)
+        return payload
 
     async def belongs(self, message, row):
         if row.is_forum:
@@ -254,44 +313,77 @@ class InboxService:
             async with self.media_lock:
                 await self.cleanup()
 
-    async def send(self, key, request_id, text, image=None):
+    async def validate_reply(self, peer, reply_to, row=None):
+        if reply_to is None:
+            return None
+        if not isinstance(reply_to, int) or reply_to <= 0:
+            raise InboxError("Некорректное сообщение для ответа.")
+        message = await self.client.get_messages(peer, ids=reply_to)
+        if not message or (row is not None and not await self.belongs(message, row)):
+            raise InboxError("Сообщение для ответа не принадлежит этому разговору.", 422)
+        return reply_to
+
+    async def _claim_send(self, request_id, scope, *, insert=True):
+        with self.store.factory() as session:
+            previous = session.get(InboxSend, request_id)
+            if previous:
+                if previous.conversation_id != scope:
+                    raise InboxError("Идентификатор отправки уже использован.", 409)
+                if previous.status == "sent":
+                    return {"message_id": previous.message_id}
+                raise InboxError(
+                    "Статус отправки неизвестен. Проверьте сообщения перед повтором.", 409,
+                )
+            if insert:
+                session.add(InboxSend(request_id=request_id, conversation_id=scope,
+                                      created_at=self.clock(), status="pending"))
+                session.commit()
+        return None
+
+    def _finish_send(self, request_id, sent):
+        with self.store.factory() as session:
+            record = session.get(InboxSend, request_id)
+            record.status = "sent"
+            record.message_id = sent.id
+            session.commit()
+
+    async def send(self, key, request_id, text, image=None, *, file_path=None,
+                   filename=None, mime_type=None, reply_to=None):
         async with self.action_lock:
-            with self.store.factory() as session:
-                previous = session.get(InboxSend, request_id)
-                if previous:
-                    if previous.conversation_id != key:
-                        raise InboxError("Идентификатор отправки уже использован.", 409)
-                    if previous.status == "sent":
-                        return {"message_id": previous.message_id}
-                    raise InboxError(
-                        "Статус отправки неизвестен. Проверьте сообщения перед повтором.", 409,
-                    )
+            previous = await self._claim_send(request_id, key, insert=False)
+            if previous:
+                return previous
             row = self.require(key)
             if not self.client.is_connected():
                 raise InboxError("Telegram не подключён. Черновик сохранён.", 503)
             if not isinstance(text, str) or len(text.encode("utf-16-le")) // 2 > (
-                1024 if image is not None else 4096
+                1024 if image is not None or file_path is not None else 4096
             ):
                 raise InboxError("Слишком длинное сообщение (4096 символов; с фото — 1024).")
-            if image is None and not text.strip():
-                raise InboxError("Введите сообщение или прикрепите изображение.")
+            if image is None and file_path is None and not text.strip():
+                raise InboxError("Введите сообщение или прикрепите файл.")
             photo = await asyncio.to_thread(normalize_image, image) if image is not None else None
+            attachment, force_document = await self._attachment(file_path, mime_type)
             self.require(key)
-            with self.store.factory() as session:
-                session.add(InboxSend(request_id=request_id, conversation_id=key,
-                                      created_at=self.clock(), status="pending"))
-                session.commit()
+            target_reply = await self.validate_reply(int(row.peer_id), reply_to, row)
+            default_reply = row.thread_id or None
+            await self._claim_send(request_id, key)
             try:
-                async with asyncio.timeout(90):
-                    if photo is None:
+                async with asyncio.timeout(180):
+                    if photo is None and file_path is None:
                         sent = await self.client.send_message(
-                            int(row.peer_id), text, reply_to=row.thread_id or None,
+                            int(row.peer_id), text, reply_to=target_reply or default_reply,
                             parse_mode=None, link_preview=False,
                         )
                     else:
+                        attachment = photo or attachment
                         sent = await self.client.send_file(
-                            int(row.peer_id), photo, caption=text, reply_to=row.thread_id or None,
-                            parse_mode=None, force_document=False,
+                            int(row.peer_id), attachment, caption=text,
+                            reply_to=target_reply or default_reply, parse_mode=None,
+                            force_document=force_document if photo is None else False,
+                            mime_type=mime_type,
+                            attributes=(self._file_attributes(filename)
+                                        if photo is None and force_document else None),
                         )
             except RPCError:
                 with self.store.factory() as session:
@@ -302,15 +394,78 @@ class InboxService:
             except (OSError, TimeoutError):
                 raise InboxError("Связь прервалась. Статус отправки неизвестен; "
                                  "проверьте сообщения. Черновик сохранён.", 409) from None
-            with self.store.factory() as session:
-                record = session.get(InboxSend, request_id)
-                record.status = "sent"
-                record.message_id = sent.id
-                session.commit()
+            self._finish_send(request_id, sent)
             self.store.extend(key)
             if key in self.snapshots:
                 self.snapshots[key]["fetched"] = 0
             return {"message_id": sent.id}
+
+    @staticmethod
+    def _file_attributes(filename):
+        if not filename:
+            return None
+        from telethon.tl.types import DocumentAttributeFilename
+
+        return [DocumentAttributeFilename(Path(filename).name[:180])]
+
+    async def _attachment(self, file_path, mime_type):
+        if not file_path or not (mime_type or "").startswith("image/"):
+            return file_path, True
+        path = Path(file_path)
+        if path.stat().st_size > MAX_IMAGE:
+            raise InboxError("Изображение должно быть не больше 10 МБ.")
+        raw = await asyncio.to_thread(path.read_bytes)
+        return await asyncio.to_thread(normalize_image, raw), False
+
+    async def send_saved(self, request_id, text, *, file_path=None, filename=None,
+                         mime_type=None):
+        scope = "library:saved"
+        async with self.action_lock:
+            previous = await self._claim_send(request_id, scope, insert=False)
+            if previous:
+                return previous
+            if not self.client.is_connected():
+                raise InboxError("Telegram не подключён. Черновик сохранён.", 503)
+            if not isinstance(text, str) or len(text.encode("utf-16-le")) // 2 > (
+                    1024 if file_path else 4096):
+                raise InboxError("Слишком длинное сообщение.")
+            if not text.strip() and file_path is None:
+                raise InboxError("Введите сообщение или прикрепите файл.")
+            # Current AyuGram dev uses 12s for text and 12 + upload estimate + 1
+            # for files. Scheduling is server-side and survives this request.
+            size = Path(file_path).stat().st_size if file_path else 0
+            delay = (12 if not file_path else 13 + math.ceil(max(
+                6, math.ceil(size / (1024 * 1024) * 0.7),
+            )))
+            schedule = timedelta(seconds=delay)
+            attachment, force_document = await self._attachment(file_path, mime_type)
+            await self._claim_send(request_id, scope)
+            try:
+                async with asyncio.timeout(180):
+                    if file_path is None:
+                        sent = await self.client.send_message(
+                            "me", text, parse_mode=None, link_preview=False, schedule=schedule,
+                        )
+                    else:
+                        sent = await self.client.send_file(
+                            "me", attachment, caption=text, parse_mode=None,
+                            force_document=force_document, mime_type=mime_type,
+                            attributes=(self._file_attributes(filename)
+                                        if force_document else None),
+                            schedule=schedule,
+                        )
+            except RPCError:
+                with self.store.factory() as session:
+                    session.execute(delete(InboxSend).where(InboxSend.request_id == request_id))
+                    session.commit()
+                raise InboxError("Telegram отклонил запланированную отправку.", 422) from None
+            except (OSError, TimeoutError):
+                raise InboxError(
+                    "Статус отправки неизвестен; проверьте Saved Messages.", 409,
+                ) from None
+            self._finish_send(request_id, sent)
+            self.library_snapshots.clear()
+            return {"message_id": sent.id, "scheduled_in": delay}
 
     async def media(self, key, message_id):
         async with self.media_lock:
@@ -349,10 +504,39 @@ class InboxService:
                               "video/webm", "audio/ogg", "audio/mpeg", "audio/mp4", "audio/wav"}
             return path, mime if inline else "application/octet-stream", message.file.name, inline
 
+    async def library_media(self, source_id, message_id):
+        source = self.library_source(source_id)
+        message = await self.client.get_messages(source.peer_id, ids=message_id)
+        if not message or not message.file:
+            raise InboxError("Вложение недоступно.", 404)
+        size = message.file.size
+        if not size or size > MAX_MEDIA:
+            raise InboxError("Вложение превышает лимит 64 МБ.", 413)
+        path = self.cache_dir / f"library_{source_id}_{message_id}.bin"
+        if path.is_symlink():
+            raise InboxError("Вложение недоступно.", 404)
+        if not path.exists():
+            temporary = path.with_suffix(".part")
+            try:
+                with temporary.open("xb") as output:
+                    temporary.chmod(0o600)
+                    await self.client.download_media(message, file=output,
+                                                     progress_callback=lambda *_: None)
+                temporary.replace(path)
+            except BaseException:
+                temporary.unlink(missing_ok=True)
+                raise
+        mime = message.file.mime_type or "application/octet-stream"
+        inline = mime.startswith(("image/", "video/", "audio/"))
+        return path, mime if inline else "application/octet-stream", message.file.name, inline
+
     async def cleanup(self, reserve=0):
         self.store.cleanup()
         for partial in self.cache_dir.glob("*.part"):
             partial.unlink(missing_ok=True)
+        for partial in self.upload_dir.glob("*.upload"):
+            if partial.stat().st_mtime < self.clock() - self.upload_stale:
+                partial.unlink(missing_ok=True)
         active = {row.id for row in self.store.active()}
         for key in list(self.snapshots):
             if key not in active:
@@ -360,7 +544,8 @@ class InboxService:
         files = sorted(self.cache_dir.glob("*.bin"), key=lambda p: p.stat().st_mtime)
         total = sum(p.stat().st_size for p in files)
         for path in files:
-            if path.stem.split("_")[0] not in active or total + reserve > MAX_CACHE:
+            if (not path.stem.startswith("library_")
+                    and path.stem.split("_")[0] not in active) or total + reserve > MAX_CACHE:
                 total -= path.stat().st_size
                 path.unlink(missing_ok=True)
         with self.store.factory() as session:

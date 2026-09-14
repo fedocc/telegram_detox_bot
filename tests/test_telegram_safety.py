@@ -35,7 +35,8 @@ def scan_telegram_safety_source(source: str, path: str = "snippet.py") -> list[t
         for cls in tree.body:
             if isinstance(cls, ast.ClassDef) and cls.name == "InboxService":
                 for method in cls.body:
-                    if isinstance(method, ast.AsyncFunctionDef) and method.name == "send":
+                    if (isinstance(method, ast.AsyncFunctionDef)
+                            and method.name in {"send", "send_saved"}):
                         allowed.update(id(n) for n in ast.walk(method)
                             if isinstance(n, ast.Attribute)
                             and n.attr in {"send_message", "send_file"}

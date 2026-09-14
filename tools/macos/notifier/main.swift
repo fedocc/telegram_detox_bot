@@ -103,7 +103,13 @@ final class Notifier: NSObject, NSApplicationDelegate, UNUserNotificationCenterD
     func notify(_ event: AttentionEvent) {
         let content = UNMutableNotificationContent()
         content.title = "Telegram — " + plain(event.title, limit: 100)
-        content.subtitle = event.trigger_reason == "direct_reply" ? "Ответ на ваше сообщение" : "Упоминание"
+        if event.trigger_reason == "direct_reply" {
+            content.subtitle = "Ответ на ваше сообщение"
+        } else if event.trigger_reason == "private_message" {
+            content.subtitle = "Личное сообщение"
+        } else {
+            content.subtitle = "Упоминание"
+        }
         if !event.topic_title.isEmpty { content.subtitle += " · " + plain(event.topic_title, limit: 60) }
         content.body = plain(event.preview, limit: 240)
         content.sound = .default

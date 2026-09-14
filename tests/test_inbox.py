@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
 from PIL import Image
 from telethon.errors import ChatWriteForbiddenError
@@ -90,6 +91,188 @@ def image_bytes():
     stream = io.BytesIO()
     Image.new("RGB", (10, 10)).save(stream, format="PNG")
     return stream.getvalue()
+
+
+def test_library_config_is_static_ordered_and_fail_closed(tmp_path):
+    from app.inbox.library import load_library_chats
+
+    path = tmp_path / "library.json"
+    path.write_text('{"chats":[{"peer_id":-10022,"title":"Team"},'
+                    '{"peer_id":-10022,"title":"Duplicate"},'
+                    '{"peer_id":"oops","title":"Bad"}]}', encoding="utf-8")
+    rows = load_library_chats(path)
+    assert [(row.id, row.title, row.writable) for row in rows] == [
+        ("saved", "Сохранённые сообщения", True), ("n10022", "Team", False),
+    ]
+    path.write_text("not json", encoding="utf-8")
+    assert [row.id for row in load_library_chats(path)] == ["saved"]
+
+
+async def test_library_is_paginated_read_only_and_does_not_touch_lifecycle(service):
+    from app.inbox.library import SAVED_MESSAGES, LibraryChat
+
+    service.library = (SAVED_MESSAGES, LibraryChat("n10022", -10022, "Team"))
+    service.library_by_id = {row.id: row for row in service.library}
+    service.client.messages = [Message(mid, f"message {mid}") for mid in range(1, 61)]
+    pending = activate(service, opened=False)
+    first = await service.library_history("n10022")
+    assert len(first["messages"]) == 50 and first["next_before"] == 11
+    second = await service.library_history("n10022", first["next_before"])
+    assert [item["id"] for item in second["messages"]] == list(range(1, 11))
+    assert service.store.get(pending.id).opened_at is None
+    assert service.library_json()[0] == {
+        "id": "saved", "title": "Сохранённые сообщения", "writable": True,
+    }
+    assert all("peer" not in key for row in service.library_json() for key in row)
+
+
+async def test_saved_messages_use_server_schedule_without_status_rpc(service, tmp_path):
+    result = await service.send_saved(str(uuid4()), "remember this")
+    assert result["scheduled_in"] == 12
+    args, kwargs = service.client.send_message.await_args
+    assert args == ("me", "remember this")
+    assert kwargs["schedule"].total_seconds() == 12
+    assert not hasattr(service.client, "update_status")
+    document = tmp_path / "report.pdf"
+    document.write_bytes(b"x" * (2 * 1024 * 1024))
+    result = await service.send_saved(str(uuid4()), "file", file_path=document,
+                                      filename="report.pdf", mime_type="application/pdf")
+    assert result["scheduled_in"] == 19
+    assert service.client.send_file.await_args.kwargs["force_document"] is True
+
+
+async def test_reply_and_generic_file_are_bound_to_active_conversation(service, tmp_path):
+    row = activate(service)
+    target = Message(88, "incoming")
+    service.client.messages = [target]
+    document = tmp_path / "note.txt"
+    document.write_text("hello", encoding="utf-8")
+    await service.send(row.id, str(uuid4()), "answer", reply_to=88,
+                       file_path=document, filename="note.txt", mime_type="text/plain")
+    kwargs = service.client.send_file.await_args.kwargs
+    assert kwargs["reply_to"] == 88 and kwargs["force_document"] is True
+    with pytest.raises(InboxError, match="не принадлежит"):
+        await service.send(row.id, str(uuid4()), "bad", reply_to=999)
+
+
+async def test_multipart_upload_is_bounded_safe_and_cleaned(service):
+    row = activate(service)
+    async with TestClient(TestServer(create_app(service)),
+                          headers={"Host": "127.0.0.1:8787"}) as client:
+        token = (await (await client.get("/api/session")).json())["csrf"]
+        headers = {"Origin": "http://127.0.0.1:8787", "X-Inbox-CSRF": token}
+        form = FormData()
+        form.add_field("request_id", str(uuid4()))
+        form.add_field("text", "document")
+        form.add_field("file", b"content", filename="../../note.txt",
+                       content_type="text/plain")
+        response = await client.post(f"/api/conversations/{row.id}/upload",
+                                     data=form, headers=headers)
+        assert response.status == 200
+        attributes = service.client.send_file.await_args.kwargs["attributes"]
+        assert attributes[0].file_name == "note.txt"
+        assert list(service.upload_dir.glob("*.upload")) == []
+        assert (await client.post("/api/library/n123/send", json={},
+                                  headers=headers)).status == 404
+
+
+async def test_multipart_over_configured_limit_never_reaches_telegram(service):
+    row = activate(service)
+    service.upload_max = 4
+    async with TestClient(TestServer(create_app(service)),
+                          headers={"Host": "127.0.0.1:8787"}) as client:
+        token = (await (await client.get("/api/session")).json())["csrf"]
+        form = FormData()
+        form.add_field("request_id", str(uuid4()))
+        form.add_field("text", "file")
+        form.add_field("file", b"12345", filename="large.bin",
+                       content_type="application/octet-stream")
+        response = await client.post(f"/api/conversations/{row.id}/upload", data=form,
+            headers={"Origin": "http://127.0.0.1:8787", "X-Inbox-CSRF": token})
+        assert response.status == 413
+        service.client.send_file.assert_not_called()
+        assert list(service.upload_dir.glob("*.upload")) == []
+
+
+async def test_saved_unknown_delivery_state_is_not_retried(service):
+    service.client.send_message.side_effect = OSError("network ended")
+    request_id = str(uuid4())
+    with pytest.raises(InboxError, match="неизвестен"):
+        await service.send_saved(request_id, "once")
+    with pytest.raises(InboxError, match="неизвестен"):
+        await service.send_saved(request_id, "once")
+    assert service.client.send_message.await_count == 1
+
+
+async def test_private_trigger_reopens_and_extends_only_active_window(service):
+    row = service.store.activate(peer_id="2", thread_id=0, is_forum=False,
+        title="Nikita", trigger_id=1, preview="first", reason="private_message")
+    assert row.opened_at is None and row.expires_at == 0
+    opened = service.store.open(row.id)
+    service.test_clock[0] += 20
+    extended = service.store.activate(peer_id="2", thread_id=0, is_forum=False,
+        title="Nikita", trigger_id=2, preview="second", reason="private_message")
+    assert extended.expires_at == service.clock() + LIFETIME
+    service.test_clock[0] = extended.expires_at
+    reopened = service.store.activate(peer_id="2", thread_id=0, is_forum=False,
+        title="Nikita", trigger_id=3, preview="third", reason="private_message")
+    assert reopened.opened_at is None and reopened.expires_at == 0
+    assert reopened.id == opened.id
+
+
+@pytest.mark.parametrize("private_human,expected", [
+    (True, "private_message"), (False, None),
+])
+async def test_private_human_trigger_and_priority(private_human, expected):
+    from app.services.attention import classify_incoming
+
+    ordinary = Message(1, "hello")
+    assert await classify_incoming(ordinary, self_id=1,
+                                   private_human=private_human) == expected
+    mention = Message(2, "@fedocc hello")
+    assert await classify_incoming(mention, self_id=1,
+                                   private_human=private_human) == "mention_only"
+
+
+async def test_private_human_activates_inbox_and_notification_without_email(
+        service, settings, monkeypatch):
+    from sqlalchemy import select
+
+    from app.db.tables import AlertJob, MessageRecord
+    from app.telegram.client import ingest_event
+    from tests.fixtures.messages import msg
+    from tests.test_mention_only import FakeEmail
+
+    monkeypatch.setattr("app.telegram.client.event_to_stored_message",
+                        AsyncMock(return_value=msg(text="ordinary private")))
+    event = SimpleNamespace(
+        chat_id=2, sender_id=2, out=False, raw_text="ordinary private", id=44,
+        message=Message(44, "ordinary private"),
+        get_sender=AsyncMock(return_value=SimpleNamespace(id=2, bot=False)),
+        get_chat=AsyncMock(return_value=SimpleNamespace(
+            id=2, first_name="Nikita", last_name="", forum=False)),
+    )
+    email = FakeEmail()
+    assert await ingest_event(
+        event, settings=settings.model_copy(update={"mention_only_mode": True}),
+        session_factory=service.store.factory, llm=None, email=email,
+        ignored_chat_ids=set(), inbox=service, self_id=1,
+    )
+    assert email.sent == []
+    assert service.store.notifications(0)["events"][0]["trigger_reason"] == "private_message"
+    assert service.store.active()[0].opened_at is None
+    with service.store.factory() as session:
+        assert len(list(session.scalars(select(MessageRecord)))) == 1
+        assert list(session.scalars(select(AlertJob))) == []
+    event.id = 45
+    event.message = Message(45, "@fedocc from bot")
+    event.get_sender = AsyncMock(return_value=SimpleNamespace(id=9, bot=True))
+    assert not await ingest_event(
+        event, settings=settings.model_copy(update={"mention_only_mode": True}),
+        session_factory=service.store.factory, llm=None, email=email,
+        ignored_chat_ids=set(), inbox=service, self_id=1,
+    )
+    assert len(service.store.notifications(0)["events"]) == 1
 
 
 @pytest.mark.parametrize("text,outgoing,sender,ignored,expected", [

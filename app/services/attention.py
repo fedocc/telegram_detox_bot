@@ -5,6 +5,7 @@ from app.services.mentions import has_exact_fedocc_mention
 from app.telegram.mapper import resolve_reply_to_is_mine
 
 DETERMINISTIC_ALERT_TYPES = frozenset({"mention_only", "direct_reply"})
+INBOX_TRIGGER_TYPES = frozenset({*DETERMINISTIC_ALERT_TYPES, "private_message"})
 
 
 def trigger_from_evidence(text, *, outgoing, reply_to_is_mine=False, reply_id=None):
@@ -18,7 +19,8 @@ def trigger_from_evidence(text, *, outgoing, reply_to_is_mine=False, reply_id=No
     return None
 
 
-async def classify_incoming(message, *, self_id=None, text=None, outgoing=False, sender_id=None):
+async def classify_incoming(message, *, self_id=None, text=None, outgoing=False, sender_id=None,
+                            private_human=False):
     if outgoing or getattr(message, "out", False):
         return None
     author = sender_id if sender_id is not None else getattr(message, "sender_id", None)
@@ -29,5 +31,6 @@ async def classify_incoming(message, *, self_id=None, text=None, outgoing=False,
         return "mention_only"
     # The resolver checks reply_to_msg_id before making any Telegram request.
     mine = await resolve_reply_to_is_mine(message, self_id=self_id)
-    return trigger_from_evidence(body, outgoing=False, reply_to_is_mine=mine,
-                                 reply_id=getattr(message, "reply_to_msg_id", None))
+    result = trigger_from_evidence(body, outgoing=False, reply_to_is_mine=mine,
+                                   reply_id=getattr(message, "reply_to_msg_id", None))
+    return result or ("private_message" if private_human else None)

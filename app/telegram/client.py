@@ -4,6 +4,7 @@ import asyncio
 import getpass
 import logging
 import os
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -15,6 +16,8 @@ from app.config import Settings
 from app.db import repository
 from app.email.sender import EmailSender
 from app.ignored_chats import load_ignored_chats_from_settings
+from app.inbox.library import load_library_chats
+from app.models.schemas import ChatType
 from app.services.attention import classify_incoming
 from app.services.p0 import handle_p0_candidate
 from app.telegram.backfill import run_startup_backfill
@@ -75,10 +78,25 @@ async def ingest_event(
         stored = await event_to_stored_message(event)
     trigger = None
     if settings.mention_only_mode:
+        get_sender = getattr(event, "get_sender", None)
+        sender = await get_sender() if get_sender else None
+        if sender is not None and (
+            getattr(sender, "bot", False)
+            or getattr(sender, "id", None) in {42777, 777000}
+            or getattr(event.message, "action", None) is not None
+        ):
+            return False
+        private_human = (
+            stored.chat_type == ChatType.private
+            and sender is not None
+            and not getattr(sender, "bot", False)
+            and getattr(sender, "id", None) != self_id
+        )
         trigger = await classify_incoming(
             getattr(event, "message", None), self_id=self_id,
             text=stored.text or stored.caption, outgoing=stored.is_outgoing,
             sender_id=getattr(event, "sender_id", None),
+            private_human=private_human,
         )
         if trigger is None:
             return False
@@ -93,7 +111,7 @@ async def ingest_event(
     def persist_and_alert():
         with session_factory() as session:
             repository.save_message(session, stored)
-            if not stored.is_outgoing:
+            if not stored.is_outgoing and trigger != "private_message":
                 handle_p0_candidate(
                     session, stored, llm, email, settings=settings,
                     ignored_chat_ids=ignored_chat_ids,
@@ -144,7 +162,10 @@ async def run_listener(
         inbox = InboxService(
             client, session_factory,
             lambda: load_ignored_chats_from_settings(settings).chat_ids,
-            Path("data/media_cache"), me.id,
+            Path("data/media_cache"), me.id, time.time,
+            load_library_chats(settings.library_chats_path),
+            settings.inbox_upload_max_mb, settings.inbox_upload_concurrency,
+            settings.inbox_upload_stale_hours,
         )
 
     ingestion_lock = asyncio.Lock()

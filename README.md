@@ -17,9 +17,21 @@ Codex не является частью runtime-пайплайна. В runtime 
 - Используется Telethon / MTProto под личным аккаунтом.
 - Telegram Bot API и Chat Automation не используются.
 - Secret Chats не поддерживаются: Telegram не отдаёт их через обычный MTProto client session.
-- Фоновый listener не отправляет Telegram-сообщения, не удаляет их, не ставит реакции и не меняет настройки. Единственное исключение для отправки — ручные текст/фото из приватного inbox.
+- Фоновый listener не отправляет Telegram-сообщения, не удаляет их, не ставит реакции и не меняет настройки. Исключение — ручная отправка текста, фото или файла из приватного inbox и Saved Messages.
 - Анализируются только текст, подписи к медиа и metadata о типе медиа.
-- Inbox загружает media для просмотра по запросу; media не передаются в LLM.
+- Inbox загружает media для просмотра по запросу; media не передаются в LLM. Обычные личные сообщения от людей создают pending conversation и локальный banner без email; группы активируются только по @fedocc или direct reply.
+
+Статическая «Библиотека» читается из локального `data/library_chats.json` в формате
+`data/library_chats.example.json`. Saved Messages всегда идут первым пунктом. Остальные
+записи доступны только для чтения, загружаются страницами по 50 сообщений и не создают
+read receipts, lifecycle events или уведомления. Конфигурация хранит только `peer_id` и
+локальную подпись; некорректные и повторяющиеся записи пропускаются.
+
+Загрузки до `INBOX_UPLOAD_MAX_MB` (по умолчанию 100 МБ) потоково пишутся во временный
+каталог с ограниченной конкуренцией и удаляются после отправки или ошибки. Отправка в
+Saved Messages использует серверное планирование по схеме AyuGram: 12 секунд для текста
+и динамическую задержку для media. Это снижает вероятность online-сигнала, но не является
+гарантией невидимости, особенно для self-chat.
 
 ## Safety guarantees and limits
 
@@ -309,7 +321,7 @@ rm -rf logs/*
 - Raw messages удаляются через 14 дней.
 - Digests хранятся 90 дней.
 - Тексты сообщений, API keys, SMTP credentials, OAuth tokens, OAuth client secrets и session details не пишутся намеренно в логи; logging filter редактирует секретоподобные значения.
-- `.env`, session-файлы, `data/birthdays.json`, `data/ignored_chats.json`, остальные runtime-файлы в `data/`, logs, secrets и database files не должны попадать в Git/GitHub.
+- `.env`, session-файлы, `data/birthdays.json`, `data/ignored_chats.json`, `data/library_chats.json`, остальные runtime-файлы в `data/`, logs, secrets и database files не должны попадать в Git/GitHub.
 
 ## Тесты без Telegram и сети
 

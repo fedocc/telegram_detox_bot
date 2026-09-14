@@ -22,6 +22,9 @@ class DemoClient:
     def is_connected(self):
         return True
 
+    async def get_messages(self, peer, **kwargs):
+        return []
+
 
 async def main():
     with tempfile.TemporaryDirectory(prefix="inbox-demo-") as directory:
@@ -113,8 +116,9 @@ async def main():
             service.history = history
             service.media = media
             service.send = send
-        async with serve_inbox(service):
-            print("Synthetic local preview: http://127.0.0.1:8787", flush=True)
+        port = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else 8787
+        async with serve_inbox(service, port=port):
+            print(f"Synthetic local preview: http://127.0.0.1:{port}", flush=True)
             await asyncio.Event().wait()
 
 

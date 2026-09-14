@@ -1,7 +1,8 @@
 # macOS inbox notifier
 
 The private Aeza listener records an attention event in the same transaction as
-conversation activation. `GET /api/notifications?after=N` returns at most 100
+conversation activation (mention, direct reply, or an ordinary private message from a
+human account). `GET /api/notifications?after=N` returns at most 100
 scanned events with a cursor. Without `after`, it returns only the latest cursor.
 Reading this feed, sidebar, or local status never opens a conversation.
 

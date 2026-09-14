@@ -69,7 +69,7 @@ class InboxStore:
 
     @staticmethod
     def record_notification(session, row, trigger_id, title, preview, reason, now):
-        if reason not in {"mention_only", "direct_reply"}:
+        if reason not in {"mention_only", "direct_reply", "private_message"}:
             return
         existing = session.scalar(select(InboxNotification.id).where(
             InboxNotification.peer_id == str(row.peer_id),
@@ -81,7 +81,8 @@ class InboxStore:
                 title=plain_preview(title, 160),
                 topic_title=plain_preview(row.topic_title or "", 160),
                 preview=plain_preview(preview, 240),
-                trigger_reason="mention" if reason == "mention_only" else "direct_reply",
+                trigger_reason={"mention_only": "mention", "direct_reply": "direct_reply",
+                                "private_message": "private_message"}[reason],
                 created_at=now,
             ))
 

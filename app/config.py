@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     birthday_manual_path: Path = Path("data/birthdays.json")
     ignore_chat_ids: str = ""
     ignored_chats_path: Path = Path("data/ignored_chats.json")
+    library_chats_path: Path = Path("data/library_chats.json")
+    inbox_upload_max_mb: int = Field(default=100, ge=1, le=2000)
+    inbox_upload_concurrency: int = Field(default=2, ge=1, le=8)
+    inbox_upload_stale_hours: int = Field(default=24, ge=1, le=168)
     inbox_enabled: bool = True
     mention_only_mode: bool = False
     p0_classify_private_text: bool = True

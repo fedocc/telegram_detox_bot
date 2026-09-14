@@ -1,0 +1,7 @@
+{
+  "chats": [
+    {"peer_id": -1001234567890, "title": "DL for Search"},
+    {"peer_id": -1009876543210, "title": "ML-2"},
+    {"peer_id": -1001122334455, "title": "Robotics"}
+  ]
+}
