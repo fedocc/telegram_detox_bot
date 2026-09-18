@@ -55,6 +55,7 @@ function renderList() {
     button.setAttribute('aria-current', selected === row.id ? 'true' : 'false');
     const top = node('div', 'row-top');
     top.append(node('span', 'avatar', initials(row.title)), node('span', 'row-title', row.title), node('span', 'age', `${Math.max(0, Math.floor((now()-row.activated_at)/60))}м`));
+    if(row.unread_count) top.append(node('span','unread',row.unread_count>9?'9+':String(row.unread_count)));
     button.append(top, node('p', 'preview', row.preview), node('span', 'row-time', row.opened_at === null ? 'Новое' : `${minutes(row)} осталось`));
     button.onclick = () => choose(row.id);
     const item = node('div', 'sidebar-item'), close = node('button', 'sidebar-close', '×');
@@ -105,6 +106,7 @@ async function choose(key) {
   const request = ++choosing;
   try {
     const result = await api(`/api/conversations/${key}/open`, {});
+    notificationToggle.conversationOpened(key);
     if (request !== choosing) return;
     conversations = conversations.map(row => row.id === key ? result.conversation : row);
     selected = key; selectedMode='inbox'; shownKey = null; messageNodes.clear();
@@ -145,6 +147,18 @@ function appendLinked(parent, text) {
     last=match.index+match[0].length;
   }
   parent.append(document.createTextNode(text.slice(last)));
+}
+function appendSegments(parent, segments, fallback, mention=false) {
+  if (!Array.isArray(segments) || !segments.length) {
+    const rendered=highlight(fallback, mention); parent.append(...rendered.childNodes); return;
+  }
+  for (const segment of segments) {
+    if (segment.url) {
+      const link=node('a','',segment.text); link.href=segment.url; link.target='_blank'; link.rel='noopener noreferrer'; parent.append(link);
+    } else if (mention) {
+      const marked=highlight(segment.text,true); parent.append(...marked.childNodes);
+    } else parent.append(document.createTextNode(segment.text));
+  }
 }
 function highlight(text, mention) {
   const p = node('p', 'message-text');
@@ -228,9 +242,9 @@ function messageNode(message) {
     if (message.mention) sender.append(node('span','mention-badge','@ упом.'));
     bubble.append(sender);
   }
-  if (message.reply) { const quote = node('div','quote'); quote.append(node('strong','',message.reply.sender),node('span','',message.reply.text)); bubble.append(quote); }
+  if (message.reply) { const quote = node('div','quote'), text=node('span'); appendSegments(text,message.reply.segments,message.reply.text); quote.append(node('strong','',message.reply.sender),text); bubble.append(quote); }
   if (message.media) bubble.append(attachment(message.media));
-  if (message.text) bubble.append(highlight(message.text, message.mention));
+  if (message.text) { const p=node('p','message-text'); appendSegments(p,message.segments,message.text,message.mention); bubble.append(p); }
   const timestamp = node('time','timestamp', new Date(message.timestamp).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}) + (message.own ? ' ✓' : ''));
   timestamp.dateTime = message.timestamp; timestamp.title = new Date(message.timestamp).toLocaleString('ru-RU'); bubble.append(timestamp); return bubble;
 }
@@ -346,23 +360,24 @@ setInterval(() => { conversations = conversations.filter(visible); if (selectedM
 poll();
 
 const notificationToggle = createNotificationToggle({
-  async request(path, csrfToken) {
+  async request(path, csrfToken, body={}) {
     const response = await fetch(`http://127.0.0.1:8788${path}`, {
       method: csrfToken ? 'POST' : 'GET', cache: 'no-store', credentials: 'omit',
       signal: AbortSignal.timeout(3000),
-      ...(csrfToken ? {headers: {'Content-Type': 'application/json', 'X-Notifier-CSRF': csrfToken}, body: '{}'} : {}),
+      ...(csrfToken ? {headers: {'Content-Type': 'application/json', 'X-Notifier-CSRF': csrfToken}, body: JSON.stringify(body)} : {}),
     });
     if (!response.ok) throw new Error('Bridge unavailable');
     return response.json();
   },
-  render({enabled, available, busy, error, permission}) {
+  render({enabled, effective_enabled, mute_until, available, busy, error, permission}) {
     const button = $('notifications-toggle');
     button.disabled = !available || busy;
-    button.setAttribute('aria-checked', String(available && enabled));
-    button.textContent = available ? (enabled ? 'ON' : 'OFF') : '—';
-    $('notifications-status').textContent = error || (!available ? 'Недоступны' : permission === 'denied' && enabled ? 'Разрешите в macOS' : '');
+    button.querySelector('b').textContent = available ? (effective_enabled ? 'ON' : enabled ? 'Пауза' : 'OFF') : '—';
+    const until=mute_until?new Date(mute_until*1000).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}):'';
+    $('notifications-status').textContent = error || (!available ? 'Недоступны' : permission === 'denied' && enabled ? 'Разрешите в macOS' : until ? `До ${until}` : '');
   },
 });
-$('notifications-toggle').onclick = notificationToggle.toggle;
+$('notifications-toggle').onclick = ()=>{const menu=$('notifications-menu'),open=menu.hidden;menu.hidden=!open;$('notifications-toggle').setAttribute('aria-expanded',String(open));};
+for(const button of document.querySelectorAll('[data-notification-action]'))button.onclick=async()=>{await notificationToggle.action(button.dataset.notificationAction);$('notifications-menu').hidden=true;$('notifications-toggle').setAttribute('aria-expanded','false');};
 notificationToggle.refresh();
 setInterval(notificationToggle.refresh, 15000);

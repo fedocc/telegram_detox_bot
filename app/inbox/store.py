@@ -51,7 +51,9 @@ class InboxStore:
                 session.commit()
                 return row  # Replayed updates never reopen a manually closed conversation.
             if row is None:
-                row = InboxConversation(id=uuid4().hex, peer_id=str(peer_id), thread_id=thread_id)
+                row = InboxConversation(id=uuid4().hex, peer_id=str(peer_id), thread_id=thread_id,
+                                        latest_relevant_message_id=0,
+                                        last_seen_message_id=0, unread_count=0)
                 session.add(row)
             pending = (row.opened_at is None or row.manually_closed
                        or row.expires_at <= now)
@@ -59,6 +61,8 @@ class InboxStore:
             row.title = title[:512]
             row.preview = preview[:256]
             row.trigger_id = trigger_id
+            row.latest_relevant_message_id = trigger_id
+            row.unread_count = max(0, row.unread_count or 0) + 1
             row.activated_at = now
             row.opened_at = None if pending else row.opened_at
             row.expires_at = 0 if pending else now + LIFETIME
@@ -83,18 +87,22 @@ class InboxStore:
                 preview=plain_preview(preview, 240),
                 trigger_reason={"mention_only": "mention", "direct_reply": "direct_reply",
                                 "private_message": "private_message"}[reason],
+                unread_count=row.unread_count,
                 created_at=now,
             ))
 
     def open(self, key):
         now = self.clock()
         with self.factory() as session:
-            session.execute(update(InboxConversation).where(
-                InboxConversation.id == key,
-                InboxConversation.opened_at.is_(None),
-                InboxConversation.manually_closed.is_(False),
-                InboxConversation.peer_id.not_in(self.ignored()),
-            ).values(opened_at=now, expires_at=now + LIFETIME))
+            row = session.get(InboxConversation, key)
+            if (row is not None and not row.manually_closed
+                    and row.peer_id not in self.ignored()
+                    and (row.opened_at is None or row.expires_at > now)):
+                if row.opened_at is None:
+                    row.opened_at = now
+                    row.expires_at = now + LIFETIME
+                row.last_seen_message_id = row.latest_relevant_message_id
+                row.unread_count = 0
             session.commit()
         return self.get(key)
 
@@ -135,6 +143,7 @@ class InboxStore:
                     "title": row.title, "topic_title": plain_preview(
                         conversation.topic_title or row.topic_title, 160),
                     "preview": row.preview, "trigger_reason": row.trigger_reason,
+                    "unread_count": row.unread_count,
                     "created_at": row.created_at,
                 })
             return {"events": events, "cursor": rows[-1].id if rows else latest}

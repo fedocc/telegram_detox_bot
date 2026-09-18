@@ -18,7 +18,7 @@ class LibraryChat:
     writable: bool = False
 
 
-SAVED_MESSAGES = LibraryChat("saved", "me", "Сохранённые сообщения", True)
+SAVED_MESSAGES = LibraryChat("saved", "me", "Избранное", True)
 
 
 def load_library_chats(path: Path) -> tuple[LibraryChat, ...]:

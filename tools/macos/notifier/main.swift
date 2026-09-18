@@ -103,7 +103,9 @@ final class Notifier: NSObject, NSApplicationDelegate, UNUserNotificationCenterD
     func notify(_ event: AttentionEvent) {
         let content = UNMutableNotificationContent()
         content.title = "Telegram — " + plain(event.title, limit: 100)
-        if event.trigger_reason == "direct_reply" {
+        if event.unread_count > 1 {
+            content.subtitle = "\(event.unread_count) новых сообщений"
+        } else if event.trigger_reason == "direct_reply" {
             content.subtitle = "Ответ на ваше сообщение"
         } else if event.trigger_reason == "private_message" {
             content.subtitle = "Личное сообщение"
@@ -114,8 +116,12 @@ final class Notifier: NSObject, NSApplicationDelegate, UNUserNotificationCenterD
         content.body = plain(event.preview, limit: 240)
         content.sound = .default
         content.userInfo = ["conversation": event.conversation_id]
-        UNUserNotificationCenter.current().add(UNNotificationRequest(
-            identifier: "attention-\(event.event_id)", content: content, trigger: nil
+        let identifier = "conversation:\(event.conversation_id)"
+        let center = UNUserNotificationCenter.current()
+        center.removePendingNotificationRequests(withIdentifiers: [identifier])
+        center.removeDeliveredNotifications(withIdentifiers: [identifier])
+        center.add(UNNotificationRequest(
+            identifier: identifier, content: content, trigger: nil
         )) { error in
             DispatchQueue.main.async {
                 if error != nil { self.log("Native notification submission failed") }
@@ -125,7 +131,8 @@ final class Notifier: NSObject, NSApplicationDelegate, UNUserNotificationCenterD
     }
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                 withCompletionHandler completion: @escaping (UNNotificationPresentationOptions) -> Void) {
-        DispatchQueue.main.async { completion(self.state.enabled ? [.banner, .sound] : []) }
+        DispatchQueue.main.async { completion(self.state.effectiveEnabled(
+            now: Date().timeIntervalSince1970) ? [.banner, .sound] : []) }
     }
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                 withCompletionHandler completion: @escaping () -> Void) {
@@ -162,11 +169,12 @@ final class Notifier: NSObject, NSApplicationDelegate, UNUserNotificationCenterD
             if accumulated.count > 8192 || done || error != nil {
                 timeout.cancel(); connection.cancel(); self.connections -= 1; return
             }
-            guard accumulated.range(of: Data("\r\n\r\n".utf8)) != nil else {
+            guard accumulated.range(of: Data("\r\n\r\n".utf8)) != nil,
+                  let request = BridgeRequest.parse(accumulated) else {
                 self.receive(connection, buffer: accumulated, timeout: timeout); return
             }
             timeout.cancel()
-            self.respond(connection, request: BridgeRequest.parse(accumulated))
+            self.respond(connection, request: request)
         }
     }
     func respond(_ connection: NWConnection, request: BridgeRequest?) {
@@ -180,9 +188,25 @@ final class Notifier: NSObject, NSApplicationDelegate, UNUserNotificationCenterD
             code = 200
             if request.method == "POST" {
                 let previous = state
-                state.setEnabled(request.path == "/enable")
+                var valid = true
+                if request.path == "/enable" { state.setEnabled(true) }
+                else if request.path == "/disable" { state.setEnabled(false) }
+                else if request.path == "/snooze" {
+                    let seconds = request.json()?["seconds"] as? Int
+                    valid = seconds.map { state.snooze(seconds: $0,
+                        now: Date().timeIntervalSince1970) } ?? false
+                } else if request.path == "/conversation-opened" {
+                    let conversation = request.json()?["conversation_id"] as? String ?? ""
+                    valid = conversation.range(of: "^[a-f0-9]{32}$", options: .regularExpression) != nil
+                    if valid {
+                        let identifier = "conversation:\(conversation)"
+                        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [identifier])
+                        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [identifier])
+                    }
+                }
+                if !valid { state = previous; code = 400 }
                 do {
-                    try save()
+                    if valid { try save() }
                     if state.enabled != previous.enabled { generation += 1 }
                     if !state.enabled {
                         UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
@@ -191,7 +215,9 @@ final class Notifier: NSObject, NSApplicationDelegate, UNUserNotificationCenterD
                 } catch { state = previous; code = 503 }
             }
             refreshPermission()
-            body = ["enabled": state.enabled, "csrf": token, "permission": permission,
+            let epoch = Date().timeIntervalSince1970
+            body = ["enabled": state.enabled, "effective_enabled": state.effectiveEnabled(now: epoch),
+                    "mute_until": state.mute_until ?? NSNull(), "csrf": token, "permission": permission,
                     "connected": connected, "submitted": submitted, "delivered": delivered]
         }
         let payload = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()

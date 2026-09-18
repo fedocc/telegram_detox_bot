@@ -172,6 +172,9 @@ class InboxConversation(Base):
     trigger_id: Mapped[int] = mapped_column(Integer)
     activated_at: Mapped[float] = mapped_column(Float)
     opened_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    latest_relevant_message_id: Mapped[int] = mapped_column(Integer, default=0)
+    last_seen_message_id: Mapped[int] = mapped_column(Integer, default=0)
+    unread_count: Mapped[int] = mapped_column(Integer, default=0)
     # Zero for pending rows; ignored until opened_at is set (legacy NOT NULL column).
     expires_at: Mapped[float] = mapped_column(Float, index=True)
     manually_closed: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -202,4 +205,5 @@ class InboxNotification(Base):
     topic_title: Mapped[str] = mapped_column(String(160), default="")
     preview: Mapped[str] = mapped_column(String(240))
     trigger_reason: Mapped[str] = mapped_column(String(32))
+    unread_count: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[float] = mapped_column(Float, index=True)

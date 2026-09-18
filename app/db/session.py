@@ -39,6 +39,18 @@ def init_db(settings: Settings) -> sessionmaker[Session]:
                 connection.execute(text(
                     "UPDATE inbox_conversations SET opened_at = activated_at"
                 ))
+            for name in ("latest_relevant_message_id", "last_seen_message_id", "unread_count"):
+                if name not in inbox_columns:
+                    connection.execute(text(
+                        f"ALTER TABLE inbox_conversations ADD COLUMN {name} INTEGER DEFAULT 0"
+                    ))
+            notification_columns = {row[1] for row in connection.execute(
+                text("PRAGMA table_info(inbox_notifications)")
+            )}
+            if "unread_count" not in notification_columns:
+                connection.execute(text(
+                    "ALTER TABLE inbox_notifications ADD COLUMN unread_count INTEGER DEFAULT 1"
+                ))
             columns = {
                 row[1]
                 for row in connection.execute(text("PRAGMA table_info(messages)")).fetchall()

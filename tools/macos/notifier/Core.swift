@@ -20,6 +20,7 @@ struct AttentionEvent: Codable {
     let topic_title: String
     let preview: String
     let trigger_reason: String
+    let unread_count: Int
     let created_at: Double
 }
 struct Feed: Codable { let events: [AttentionEvent]; let cursor: Int64 }
@@ -27,16 +28,25 @@ struct NotifierState: Codable {
     var enabled = true
     var cursor: Int64? = nil
     var bootstrap = true
+    var mute_until: Double? = nil
+
+    func effectiveEnabled(now: Double) -> Bool { enabled && (mute_until ?? 0) <= now }
 
     mutating func setEnabled(_ value: Bool) {
         if value && !enabled { bootstrap = true }
         enabled = value
+        if value { mute_until = nil }
+    }
+    mutating func snooze(seconds: Int, now: Double) -> Bool {
+        guard [600, 1800, 3600, 10800, 21600, 43200].contains(seconds), enabled else { return false }
+        mute_until = now + Double(seconds)
+        return true
     }
     mutating func consume(_ feed: Feed, now: Double) -> [AttentionEvent] {
         let previous = cursor
         cursor = feed.cursor
         defer { bootstrap = false }
-        guard enabled, !bootstrap, let previous, feed.cursor >= previous else { return [] }
+        guard effectiveEnabled(now: now), !bootstrap, let previous, feed.cursor >= previous else { return [] }
         var seen = Set<Int64>()
         return feed.events.sorted { $0.event_id < $1.event_id }.filter {
             $0.event_id > previous && $0.event_id <= feed.cursor && seen.insert($0.event_id).inserted
@@ -56,6 +66,7 @@ struct BridgeRequest {
     let method: String
     let path: String
     let headers: [String: String]
+    let body: Data = Data()
     static func parse(_ data: Data) -> BridgeRequest? {
         guard data.count <= 8192, let raw = String(data: data, encoding: .utf8),
               let boundary = raw.range(of: "\r\n\r\n") else { return nil }
@@ -69,15 +80,19 @@ struct BridgeRequest {
             guard headers[key] == nil else { return nil }
             headers[key] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
         }
-        return BridgeRequest(method: String(first[0]), path: String(first[1]), headers: headers)
+        guard let length = Int(headers["content-length"] ?? "0"), length >= 0, length <= 256 else { return nil }
+        let bodyStart = boundary.upperBound
+        guard raw[bodyStart...].utf8.count == length else { return nil }
+        return BridgeRequest(method: String(first[0]), path: String(first[1]), headers: headers,
+                             body: Data(raw[bodyStart...].utf8))
     }
     func authorized(token: String) -> Bool {
         guard headers["host"] == bridgeHost,
               headers["origin"] == inboxOrigin,
               headers["transfer-encoding"] == nil,
-              [nil, "0", "2"].contains(headers["content-length"]) else { return false }
+              headers["content-length"].flatMap(Int.init).map({ $0 <= 256 }) != false else { return false }
         if method == "OPTIONS" {
-            return ["/status", "/enable", "/disable"].contains(path)
+            return ["/status", "/enable", "/disable", "/snooze", "/conversation-opened"].contains(path)
                 && ["GET", "POST"].contains(headers["access-control-request-method"] ?? "")
                 && (headers["access-control-request-headers"] ?? "").lowercased()
                     .split(separator: ",").allSatisfy {
@@ -85,8 +100,11 @@ struct BridgeRequest {
                     }
         }
         if method == "GET" && path == "/status" { return true }
-        return method == "POST" && ["/enable", "/disable"].contains(path)
+        return method == "POST" && ["/enable", "/disable", "/snooze", "/conversation-opened"].contains(path)
             && headers["x-notifier-csrf"] == token && headers["content-type"] == "application/json"
+    }
+    func json() -> [String: Any]? {
+        (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
     }
 }
 func retryDelay(_ failures: Int) -> Double { min(60, 4 * pow(2, Double(min(failures, 4)))) }

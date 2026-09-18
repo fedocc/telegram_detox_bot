@@ -8,11 +8,12 @@ import warnings
 from collections import OrderedDict
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 from sqlalchemy import delete
 from telethon.errors import RPCError
-from telethon.tl.types import PeerChannel
+from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl, PeerChannel
 
 from app.db.tables import InboxSend
 from app.inbox.library import SAVED_MESSAGES
@@ -94,8 +95,45 @@ def normalize_image(raw):
 def conversation_json(row):
     return {name: getattr(row, name) for name in (
         "id", "title", "topic_title", "preview", "trigger_id", "activated_at", "opened_at",
+        "latest_relevant_message_id", "last_seen_message_id", "unread_count",
     )} | {"thread_id": row.thread_id,
           "expires_at": row.expires_at if row.opened_at is not None else None}
+
+
+def safe_link_segments(text, entities):
+    """Split Telegram UTF-16 entities into text/link segments safe for DOM rendering."""
+    if not text:
+        return []
+    encoded = text.encode("utf-16-le")
+    links = []
+    for entity in entities or ():
+        if not isinstance(entity, (MessageEntityTextUrl, MessageEntityUrl)):
+            continue
+        start, end = entity.offset * 2, (entity.offset + entity.length) * 2
+        if start < 0 or end > len(encoded) or start >= end:
+            continue
+        try:
+            label = encoded[start:end].decode("utf-16-le")
+            prefix = encoded[:start].decode("utf-16-le")
+        except UnicodeDecodeError:
+            continue
+        url = entity.url if isinstance(entity, MessageEntityTextUrl) else label
+        parsed = urlsplit(url)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            continue
+        links.append((len(prefix), len(prefix) + len(label), url))
+    links.sort()
+    segments, cursor = [], 0
+    for start, end, url in links:
+        if start < cursor:
+            continue
+        if start > cursor:
+            segments.append({"text": text[cursor:start]})
+        segments.append({"text": text[start:end], "url": url})
+        cursor = end
+    if cursor < len(text):
+        segments.append({"text": text[cursor:]})
+    return segments or [{"text": text}]
 
 
 class InboxService:
@@ -204,6 +242,7 @@ class InboxService:
         sender = message.sender
         result = {
             "id": message.id, "text": message.raw_text or "", "own": bool(message.out),
+            "segments": safe_link_segments(message.raw_text or "", message.entities),
             "sender": display_name(sender) if sender else "Неизвестный отправитель",
             "timestamp": message.date.isoformat(),
             "mention": has_exact_fedocc_mention(message.raw_text) and not message.out,
@@ -215,8 +254,11 @@ class InboxService:
             if parent is None:
                 parent = await message.get_reply_message()
             if parent and await self.belongs(parent, row):
+                reply_text = (parent.raw_text or "[Вложение]")[:500]
                 result["reply"] = {"sender": display_name(parent.sender) if parent.sender else "",
-                                   "text": (parent.raw_text or "[Вложение]")[:500]}
+                                   "text": reply_text,
+                                   "segments": safe_link_segments(
+                                       reply_text, getattr(parent, "entities", None))}
         file = message.file
         if file:
             kind = "file"

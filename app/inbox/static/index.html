@@ -17,8 +17,17 @@
         <nav id="library-list" aria-label="Библиотека" hidden></nav>
       </section>
       <div class="notifications-control">
-        <span id="notifications-label">Уведомления</span>
-        <button id="notifications-toggle" type="button" role="switch" aria-checked="false" aria-labelledby="notifications-label" disabled>—</button>
+        <button id="notifications-toggle" type="button" aria-expanded="false" aria-controls="notifications-menu" disabled><span id="notifications-label">Уведомления</span><b>—</b></button>
+        <div id="notifications-menu" hidden>
+          <button type="button" data-notification-action="enable">Включить</button>
+          <button type="button" data-notification-action="600">На 10 минут</button>
+          <button type="button" data-notification-action="1800">На 30 минут</button>
+          <button type="button" data-notification-action="3600">На 1 час</button>
+          <button type="button" data-notification-action="10800">На 3 часа</button>
+          <button type="button" data-notification-action="21600">На 6 часов</button>
+          <button type="button" data-notification-action="43200">На 12 часов</button>
+          <button type="button" data-notification-action="disable">Выключить</button>
+        </div>
         <small id="notifications-status" role="status">Недоступны</small>
       </div>
     </aside>
@@ -32,7 +41,7 @@
         <div id="drop-zone" hidden>Отпустите файл для отправки</div>
         <footer>
           <div id="send-error" class="error" role="alert" hidden></div>
-          <div id="ghost-note" hidden>Отправка в Saved Messages будет запланирована на сервере. Ghost Mode не гарантирует полную невидимость.</div>
+          <div id="ghost-note" hidden>Отправка в Избранное будет запланирована на сервере. Ghost Mode не гарантирует полную невидимость.</div>
           <div id="reply-target" hidden><span></span><button type="button" aria-label="Отменить ответ">×</button></div>
           <div id="attachment" hidden><img id="attachment-preview" alt="Выбранный файл"><span id="attachment-name"></span><button id="remove-image" type="button" aria-label="Удалить файл">×</button></div>
           <form id="composer">
