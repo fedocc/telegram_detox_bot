@@ -129,3 +129,30 @@ def test_explicit_gmail_recipient_takes_precedence_over_legacy_email_to() -> Non
     )
 
     assert settings.gmail_recipient_email == "current-recipient@example.com"
+
+
+def test_inbox_origins_are_exact_loopback_and_private_tailscale() -> None:
+    settings = Settings(
+        _env_file=None,
+        inbox_allowed_origins=(
+            "http://127.0.0.1:8787,https://telegram-detox.example-tailnet.ts.net/"
+        ),
+    )
+
+    assert settings.allowed_inbox_origins == (
+        "http://127.0.0.1:8787",
+        "https://telegram-detox.example-tailnet.ts.net",
+    )
+
+
+@pytest.mark.parametrize("value", [
+    "*",
+    "https://*.ts.net",
+    "http://example.com",
+    "https://example.com",
+    "https://node.tailnet.ts.net/path",
+    "https://node.tailnet.ts.net,https://node.tailnet.ts.net",
+])
+def test_inbox_origins_reject_public_wildcard_or_non_origin_values(value: str) -> None:
+    with pytest.raises(ValueError, match="INBOX_ALLOWED_ORIGINS|HTTP inbox|HTTPS inbox"):
+        Settings(_env_file=None, inbox_allowed_origins=value)

@@ -18,6 +18,24 @@ class LibraryChat:
     writable: bool = False
 
 
+def peer_type_for_marked_id(peer_id: int | str) -> str:
+    """Classify a Telethon marked peer ID without exposing it to API callers."""
+    try:
+        marked = int(peer_id)
+    except (TypeError, ValueError):
+        return "unknown"
+    if marked > 0:
+        return "user"
+    if marked <= -1_000_000_000_000:
+        return "channel"
+    return "chat"
+
+
+def source_token(peer_id: int | str) -> str:
+    marked = int(peer_id)
+    return f"n{abs(marked)}" if marked < 0 else f"p{marked}"
+
+
 SAVED_MESSAGES = LibraryChat("saved", "me", "Избранное", True)
 
 
@@ -48,6 +66,6 @@ def load_library_chats(path: Path) -> tuple[LibraryChat, ...]:
         if peer == 0 or peer in peers:
             continue
         peers.add(peer)
-        token = f"n{abs(peer)}" if peer < 0 else f"p{peer}"
+        token = source_token(peer)
         result.append(LibraryChat(token, peer, title.strip()))
     return tuple(result)

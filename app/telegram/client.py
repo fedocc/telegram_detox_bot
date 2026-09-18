@@ -77,14 +77,16 @@ async def ingest_event(
     else:
         stored = await event_to_stored_message(event)
     trigger = None
+    sender_is_bot = False
     if settings.mention_only_mode:
         get_sender = getattr(event, "get_sender", None)
         sender = await get_sender() if get_sender else None
-        if sender is not None and (
-            getattr(sender, "bot", False)
-            or getattr(sender, "id", None) in {42777, 777000}
+        sender_is_bot = bool(sender is not None and getattr(sender, "bot", False))
+        excluded_sender = sender is not None and (
+            getattr(sender, "id", None) in {42777, 777000}
             or getattr(event.message, "action", None) is not None
-        ):
+        )
+        if excluded_sender:
             return False
         private_human = (
             stored.chat_type == ChatType.private
@@ -92,21 +94,24 @@ async def ingest_event(
             and not getattr(sender, "bot", False)
             and getattr(sender, "id", None) != self_id
         )
-        trigger = await classify_incoming(
-            getattr(event, "message", None), self_id=self_id,
-            text=stored.text or stored.caption, outgoing=stored.is_outgoing,
-            sender_id=getattr(event, "sender_id", None),
-            private_human=private_human,
-        )
-        if trigger is None:
-            return False
+        if not sender_is_bot:
+            trigger = await classify_incoming(
+                getattr(event, "message", None), self_id=self_id,
+                text=stored.text or stored.caption, outgoing=stored.is_outgoing,
+                sender_id=getattr(event, "sender_id", None),
+                private_human=private_human,
+            )
         if trigger == "direct_reply":
             stored = stored.model_copy(update={"reply_to_is_mine": True})
     if inbox is not None:
         try:
-            await inbox.observe(event, trigger=trigger)
+            await inbox.observe(event, trigger=trigger, sender_is_bot=sender_is_bot)
         except Exception as exc:
             logger.warning("Inbox activation failed (%s)", type(exc).__name__)
+    if settings.mention_only_mode and trigger is None:
+        # Selected Library sources still project into Inbox via inbox.observe,
+        # but ordinary non-attention updates never enter the legacy message/email path.
+        return False
 
     def persist_and_alert():
         with session_factory() as session:
@@ -198,7 +203,7 @@ async def run_listener(
         from app.inbox.web import serve_inbox
 
         try:
-            async with serve_inbox(inbox):
+            async with serve_inbox(inbox, allowed_origins=settings.allowed_inbox_origins):
                 await client.run_until_disconnected()
         finally:
             await client.disconnect()

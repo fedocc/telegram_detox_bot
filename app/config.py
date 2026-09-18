@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -50,6 +51,7 @@ class Settings(BaseSettings):
     inbox_upload_max_mb: int = Field(default=100, ge=1, le=2000)
     inbox_upload_concurrency: int = Field(default=2, ge=1, le=8)
     inbox_upload_stale_hours: int = Field(default=24, ge=1, le=168)
+    inbox_allowed_origins: str = "http://127.0.0.1:8787"
     inbox_enabled: bool = True
     mention_only_mode: bool = False
     p0_classify_private_text: bool = True
@@ -100,6 +102,28 @@ class Settings(BaseSettings):
             raise ValueError("EMAIL_TRANSPORT must be one of: gmail_api, smtp")
         return normalized
 
+    @field_validator("inbox_allowed_origins")
+    @classmethod
+    def validate_inbox_allowed_origins(cls, value: str) -> str:
+        origins = []
+        for raw in value.split(","):
+            origin = raw.strip().rstrip("/")
+            if not origin or "*" in origin:
+                raise ValueError("INBOX_ALLOWED_ORIGINS must contain exact origins")
+            parsed = urlsplit(origin)
+            if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                    or parsed.username or parsed.password or parsed.path
+                    or parsed.query or parsed.fragment):
+                raise ValueError("INBOX_ALLOWED_ORIGINS must contain exact origins")
+            if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost"}:
+                raise ValueError("HTTP inbox origins must be loopback")
+            if parsed.scheme == "https" and not parsed.hostname.endswith(".ts.net"):
+                raise ValueError("HTTPS inbox origins must be private Tailscale origins")
+            origins.append(origin)
+        if not origins or len(origins) != len(set(origins)):
+            raise ValueError("INBOX_ALLOWED_ORIGINS must contain unique exact origins")
+        return ",".join(origins)
+
     @field_validator("gmail_sender_name")
     @classmethod
     def validate_gmail_sender_name(cls, value: str) -> str:
@@ -128,6 +152,10 @@ class Settings(BaseSettings):
     def ensure_runtime_dirs(self) -> None:
         Path("data").mkdir(mode=0o700, exist_ok=True)
         Path("logs").mkdir(mode=0o700, exist_ok=True)
+
+    @property
+    def allowed_inbox_origins(self) -> tuple[str, ...]:
+        return tuple(self.inbox_allowed_origins.split(","))
 
     def require_telegram_credentials(self) -> None:
         if self.tg_api_id is None or not self.tg_api_hash or not self.tg_phone:

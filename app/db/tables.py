@@ -160,10 +160,19 @@ class AlertJob(Base):
 
 class InboxConversation(Base):
     __tablename__ = "inbox_conversations"
-    __table_args__ = (UniqueConstraint("peer_id", "thread_id", name="uq_inbox_peer_thread"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "peer_type", "peer_id", "thread_id", name="uq_inbox_peer_type_thread"
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    # ``peer_id`` is Telethon's marked ID (user > 0, chat < 0, channel -100...).
+    # The explicit type prevents callers from having to infer routing from the sign.
+    # Access hashes never leave the backend serializers.
+    peer_type: Mapped[str] = mapped_column(String(16), default="unknown")
     peer_id: Mapped[str] = mapped_column(String(128))
+    access_hash: Mapped[str | None] = mapped_column(String(32), nullable=True)
     thread_id: Mapped[int] = mapped_column(Integer, default=0)
     is_forum: Mapped[bool] = mapped_column(Boolean, default=False)
     title: Mapped[str] = mapped_column(String(512))
@@ -178,6 +187,11 @@ class InboxConversation(Base):
     # Zero for pending rows; ignored until opened_at is set (legacy NOT NULL column).
     expires_at: Mapped[float] = mapped_column(Float, index=True)
     manually_closed: Mapped[bool] = mapped_column(Boolean, default=False)
+    library_source_id: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True
+    )
+    quarantined_at: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
+    quarantine_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class InboxSend(Base):
@@ -206,4 +220,29 @@ class InboxNotification(Base):
     preview: Mapped[str] = mapped_column(String(240))
     trigger_reason: Mapped[str] = mapped_column(String(32))
     unread_count: Mapped[int] = mapped_column(Integer, default=1)
+    # Suppressed rows are retained as cursor/dedup history but never returned as banners.
+    suppressed: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[float] = mapped_column(Float, index=True)
+
+
+class LibrarySource(Base):
+    __tablename__ = "library_sources"
+    __table_args__ = (
+        UniqueConstraint("peer_type", "peer_id", name="uq_library_peer"),
+    )
+
+    # Opaque stable identifier exposed to the browser; Telegram IDs stay server-side.
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    peer_type: Mapped[str] = mapped_column(String(16))
+    peer_id: Mapped[str] = mapped_column(String(128))
+    access_hash: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    display_title: Mapped[str] = mapped_column(String(512))
+    library_enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    notifications_muted: Mapped[bool] = mapped_column(Boolean, default=False)
+    allow_bot_write: Mapped[bool] = mapped_column(Boolean, default=False)
+    digest_excluded: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_seen_message_id: Mapped[int] = mapped_column(Integer, default=0)
+    is_bot: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[float] = mapped_column(Float)
+    updated_at: Mapped[float] = mapped_column(Float)

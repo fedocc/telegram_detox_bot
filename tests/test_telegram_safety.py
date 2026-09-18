@@ -14,6 +14,8 @@ BANNED_WRITES = {
     "delete_messages",
     "edit_message",
     "mark_read",
+    "send_read_acknowledge",
+    "ReadHistoryRequest",
     "send_reaction",
     "react",
     "join_channel",
@@ -36,7 +38,7 @@ def scan_telegram_safety_source(source: str, path: str = "snippet.py") -> list[t
             if isinstance(cls, ast.ClassDef) and cls.name == "InboxService":
                 for method in cls.body:
                     if (isinstance(method, ast.AsyncFunctionDef)
-                            and method.name in {"send", "send_saved"}):
+                            and method.name in {"send", "send_saved", "send_library"}):
                         allowed.update(id(n) for n in ast.walk(method)
                             if isinstance(n, ast.Attribute)
                             and n.attr in {"send_message", "send_file"}
@@ -47,6 +49,8 @@ def scan_telegram_safety_source(source: str, path: str = "snippet.py") -> list[t
     for node in ast.walk(tree):
         if id(node) in allowed:
             continue
+        if isinstance(node, ast.Name) and node.id in BANNED_WRITES:
+            offenders.append((path, node.id))
         if isinstance(node, ast.Attribute) and node.attr in BANNED_WRITES:
             offenders.append((path, node.attr))
         if isinstance(node, ast.Call):
@@ -165,6 +169,11 @@ def test_safety_scan_detects_direct_write_attempt() -> None:
     offenders = scan_telegram_safety_source("client.send_message('x')")
 
     assert offenders
+
+
+def test_safety_scan_detects_telegram_read_receipts() -> None:
+    assert scan_telegram_safety_source("client.send_read_acknowledge(peer)")
+    assert scan_telegram_safety_source("ReadHistoryRequest(peer=peer, max_id=1)")
 
 
 def test_scanner_covers_full_app_tree(tmp_path) -> None:

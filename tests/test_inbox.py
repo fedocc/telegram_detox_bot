@@ -30,7 +30,7 @@ class Message(SimpleNamespace):
                 reply_to_top_id=thread or None, reply_to_msg_id=thread or None,
                 forum_topic=bool(thread)), reply_to_msg_id=thread or None,
             file=None, photo=None, voice=None, audio=None, video=None, video_note=None,
-            fwd_from=None,
+            fwd_from=None, entities=None, pinned=False,
             action=None)
         self.__dict__.update(kwargs)
 
@@ -55,6 +55,11 @@ class FakeTelegram:
         if "ids" in kwargs:
             return next((m for m in self.messages if m.id == kwargs["ids"]), None)
         messages = self.messages
+        if "filter" in kwargs:
+            messages = [m for m in messages if getattr(m, "pinned", False)]
+        if kwargs.get("search"):
+            needle = kwargs["search"].casefold()
+            messages = [m for m in messages if needle in (m.raw_text or "").casefold()]
         if kwargs.get("reply_to"):
             messages = [m for m in messages if m.reply_to.reply_to_top_id == kwargs["reply_to"]]
         if kwargs.get("offset_id"):
@@ -102,10 +107,44 @@ def test_library_config_is_static_ordered_and_fail_closed(tmp_path):
                     '{"peer_id":"oops","title":"Bad"}]}', encoding="utf-8")
     rows = load_library_chats(path)
     assert [(row.id, row.title, row.writable) for row in rows] == [
-        ("saved", "Сохранённые сообщения", True), ("n10022", "Team", False),
+        ("saved", "Избранное", True), ("n10022", "Team", False),
     ]
     path.write_text("not json", encoding="utf-8")
     assert [row.id for row in load_library_chats(path)] == ["saved"]
+
+
+def test_static_library_is_seeded_persistently_without_dialog_scan(settings, tmp_path):
+    from app.inbox.library import SAVED_MESSAGES, LibraryChat
+
+    factory = init_db(settings)
+    configured = LibraryChat("n1000000000022", -1000000000022, "Course")
+    from app.inbox.store import InboxStore
+
+    existing = InboxStore(factory, lambda: set()).activate(
+        peer_id=configured.peer_id, peer_type="channel", thread_id=0,
+        is_forum=False, title="Course", trigger_id=1, preview="lesson",
+        reason="mention_only",
+    )
+    first_client = FakeTelegram()
+    first_client.iter_dialogs = AsyncMock(side_effect=AssertionError("startup scan"))
+    first = InboxService(
+        first_client, factory, lambda: set(), tmp_path / "first-cache", self_id=1,
+        library=(SAVED_MESSAGES, configured),
+    )
+    assert [row["title"] for row in first.library_json()] == ["Избранное", "Course"]
+    assert first.store.get(existing.id).library_source_id == configured.id
+    first_client.iter_dialogs.assert_not_called()
+
+    restarted = InboxService(
+        FakeTelegram(), factory, lambda: set(), tmp_path / "second-cache", self_id=1,
+        library=(SAVED_MESSAGES,),
+    )
+    payload = restarted.library_json()
+    assert [row["id"] for row in payload] == ["saved", configured.id]
+    assert all(
+        "peer_id" not in row and "peer_type" not in row and "access_hash" not in row
+        for row in payload
+    )
 
 
 async def test_library_is_paginated_read_only_and_does_not_touch_lifecycle(service):
@@ -121,7 +160,9 @@ async def test_library_is_paginated_read_only_and_does_not_touch_lifecycle(servi
     assert [item["id"] for item in second["messages"]] == list(range(1, 11))
     assert service.store.get(pending.id).opened_at is None
     assert service.library_json()[0] == {
-        "id": "saved", "title": "Сохранённые сообщения", "writable": True,
+        "id": "saved", "title": "Избранное", "writable": True,
+        "notifications_muted": False, "allow_bot_write": False,
+        "digest_excluded": False, "sort_order": 0, "is_bot": False,
     }
     assert all("peer" not in key for row in service.library_json() for key in row)
 
@@ -574,8 +615,9 @@ async def test_runtime_shares_exact_client_and_loop(service, settings, monkeypat
         return service
 
     @asynccontextmanager
-    async def server(inbox):
+    async def server(inbox, **kwargs):
         assert inbox.client is client
+        assert kwargs["allowed_origins"] == ("http://127.0.0.1:8787",)
         calls.append(asyncio.get_running_loop())
         yield
 
@@ -669,6 +711,36 @@ async def test_failed_media_download_never_leaves_a_partial_cache(service):
     partial.write_bytes(b"partial")
     await service.cleanup()
     assert not partial.exists()
+
+
+async def test_inbox_media_flood_wait_cleans_partial_and_blocks_other_peers(service):
+    from telethon.errors import FloodWaitError
+
+    row = activate(service)
+    message = Message(100, file=SimpleNamespace(
+        name="photo.jpg", size=10, mime_type="image/jpeg", duration=0,
+    ), photo=True)
+    service.client.messages = [message]
+    await service.history(row.id)
+    calls = 0
+
+    async def flood_wait(message, *, file, progress_callback):
+        nonlocal calls
+        calls += 1
+        file.write(b"partial")
+        raise FloodWaitError(request=None, capture=11)
+
+    service.client.download_media = flood_wait
+    with pytest.raises(InboxError) as failure:
+        await service.media(row.id, message.id)
+    assert failure.value.status == 429 and failure.value.retry_after == 11
+    assert calls == 1 and list(service.cache_dir.iterdir()) == []
+
+    reads = list(service.client.reads)
+    with pytest.raises(InboxError) as cooldown:
+        await service.library_history("saved")
+    assert cooldown.value.status == 429 and cooldown.value.retry_after == 11
+    assert service.client.reads == reads and calls == 1
 
 
 @pytest.mark.parametrize('kind', ['voice', 'audio', 'video_note', 'video', 'photo', 'file'])
@@ -923,7 +995,7 @@ async def test_notification_feed_stable_passive_and_private(service, reason):
     assert event['trigger_reason'] == ('mention' if reason == 'mention_only' else 'direct_reply')
     assert len(event['preview']) == 240 and '\n' not in event['preview']
     assert set(event) == {'event_id', 'conversation_id', 'title', 'topic_title', 'preview',
-                          'trigger_reason', 'created_at'}
+                          'trigger_reason', 'unread_count', 'created_at'}
     assert service.store.notifications(0) == first
     assert service.store.notifications(first['cursor'])['events'] == []
     assert service.store.notifications() == {'events': [], 'cursor': first['cursor']}
@@ -990,3 +1062,703 @@ def test_feed_keeps_distinct_out_of_order_triggers_without_rewinding_lifecycle(s
     assert [e['trigger_reason'] for e in events] == ['mention', 'direct_reply']
     assert service.store.get(row.id).trigger_id == 102
     assert service.store.get(row.id).opened_at is None
+
+
+async def test_private_reply_metadata_uses_one_canonical_conversation(service):
+    from telethon.tl.types import InputPeerUser
+
+    event = SimpleNamespace(
+        chat_id=2,
+        sender_id=2,
+        out=False,
+        raw_text="reply",
+        id=10,
+        message=Message(10, "reply", thread=7),
+        get_chat=AsyncMock(return_value=SimpleNamespace(
+            id=2, first_name="Nikita", last_name="", forum=False,
+        )),
+        get_input_chat=AsyncMock(return_value=InputPeerUser(2, 123456)),
+    )
+    await service.observe(event, trigger="private_message")
+    event.id = 11
+    event.message = Message(11, "plain")
+    await service.observe(event, trigger="private_message")
+
+    rows = service.store.active()
+    assert len(rows) == 1
+    assert rows[0].peer_type == "user"
+    assert rows[0].thread_id == 0
+    assert rows[0].access_hash == "123456"
+    assert rows[0].unread_count == 2
+
+
+def test_local_unread_is_persistent_deduplicated_and_open_suppresses_feed(service):
+    row = None
+    for message_id in range(1, 21):
+        row = service.store.activate(
+            peer_id="2", peer_type="user", thread_id=999, is_forum=False,
+            title="Nikita", trigger_id=message_id, preview=str(message_id),
+            reason="private_message",
+        )
+    assert row.thread_id == 0
+    assert row.unread_count == 20
+    opened = service.store.open(row.id)
+    assert opened.unread_count == 0
+    assert opened.last_seen_message_id == 20
+    suppressed = service.store.notifications(0)
+    assert suppressed["events"] == [] and suppressed["cursor"] == 20
+
+    for message_id in (22, 21, 22):
+        service.store.activate(
+            peer_id="2", peer_type="user", thread_id=0, is_forum=False,
+            title="Nikita", trigger_id=message_id, preview=str(message_id),
+            reason="private_message",
+        )
+    updated = service.store.get(row.id)
+    assert updated.latest_relevant_message_id == 22
+    assert updated.unread_count == 2
+
+
+def test_concurrent_activation_keeps_one_canonical_row_and_all_events(service):
+    from concurrent.futures import ThreadPoolExecutor
+
+    def activate_one(message_id):
+        return service.store.activate(
+            peer_id="2", peer_type="user", thread_id=message_id, is_forum=False,
+            title="Nikita", trigger_id=message_id, preview=str(message_id),
+            reason="private_message",
+        ).id
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        ids = list(pool.map(activate_one, range(1, 21)))
+    assert len(set(ids)) == 1
+    row = service.store.get_any(ids[0])
+    assert row.thread_id == 0
+    assert row.latest_relevant_message_id == 20
+    assert row.unread_count == 20
+    assert len(service.store.notifications(0)["events"]) == 20
+
+
+async def test_expired_projection_keeps_stable_id_for_later_message(service):
+    row = service.store.activate(
+        peer_id="2", peer_type="user", thread_id=0, is_forum=False,
+        title="Nikita", trigger_id=1, preview="one", reason="private_message",
+    )
+    service.store.open(row.id)
+    service.test_clock[0] += LIFETIME + 1
+    await service.cleanup()
+    assert service.store.active() == []
+    assert service.store.get_any(row.id) is not None
+    later = service.store.activate(
+        peer_id="2", peer_type="user", thread_id=0, is_forum=False,
+        title="Nikita", trigger_id=2, preview="two", reason="private_message",
+    )
+    assert later.id == row.id
+    assert later.opened_at is None and later.unread_count == 1
+
+
+def test_duplicate_migration_merges_private_rows_and_repoints_durable_refs(settings):
+    from sqlalchemy import select
+
+    from app.db.tables import InboxConversation, InboxNotification, InboxSend
+
+    factory = init_db(settings)
+    canonical_id, phantom_id = "a" * 32, "b" * 32
+    with factory() as session:
+        session.add_all([
+            InboxConversation(
+                id=canonical_id, peer_type="user", peer_id="2", access_hash="11",
+                thread_id=0, is_forum=False, title="Nikita", topic_title="", preview="old",
+                trigger_id=10, activated_at=1000, opened_at=1000,
+                latest_relevant_message_id=10, last_seen_message_id=10, unread_count=0,
+                expires_at=1300, manually_closed=False, library_source_id=None,
+                quarantined_at=None, quarantine_reason=None,
+            ),
+            InboxConversation(
+                id=phantom_id, peer_type="user", peer_id="2", access_hash="22",
+                thread_id=77, is_forum=False, title="Nikita", topic_title="",
+                preview="new", trigger_id=12, activated_at=1010, opened_at=None,
+                latest_relevant_message_id=12, last_seen_message_id=0, unread_count=2,
+                expires_at=0, manually_closed=False, library_source_id=None,
+                quarantined_at=None, quarantine_reason=None,
+            ),
+            InboxNotification(
+                peer_id="2", trigger_id=10, conversation_id=canonical_id, title="Nikita",
+                topic_title="", preview="old", trigger_reason="private_message",
+                unread_count=1, suppressed=False, created_at=1000,
+            ),
+            InboxNotification(
+                peer_id="2", trigger_id=11, conversation_id=phantom_id, title="Nikita",
+                topic_title="", preview="new", trigger_reason="private_message",
+                unread_count=1, suppressed=False, created_at=1010,
+            ),
+            InboxNotification(
+                peer_id="2", trigger_id=12, conversation_id=phantom_id, title="Nikita",
+                topic_title="", preview="newer", trigger_reason="private_message",
+                unread_count=2, suppressed=False, created_at=1020,
+            ),
+            InboxSend(
+                request_id=str(uuid4()), conversation_id=phantom_id, status="sent",
+                message_id=99, created_at=1010,
+            ),
+        ])
+        session.commit()
+
+    repeated = init_db(settings)
+    init_db(settings)  # idempotent on the already-merged schema
+    with repeated() as session:
+        rows = list(session.scalars(select(InboxConversation)))
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.id == canonical_id and row.thread_id == 0
+        assert row.trigger_id == 12 and row.latest_relevant_message_id == 12
+        assert row.last_seen_message_id == 10 and row.unread_count == 2
+        assert row.opened_at is None and row.preview == "new"
+        notifications = list(session.scalars(select(InboxNotification).order_by(
+            InboxNotification.id
+        )))
+        assert {item.conversation_id for item in notifications} == {canonical_id}
+        assert [item.unread_count for item in notifications] == [0, 1, 2]
+        assert session.scalar(select(InboxSend)).conversation_id == canonical_id
+
+
+def test_handoff_zero_sentinel_read_state_is_repaired_once(settings):
+    from sqlalchemy import select
+
+    from app.db.tables import InboxConversation, InboxNotification
+
+    factory = init_db(settings)
+    opened_id, pending_id = "c" * 32, "d" * 32
+    with factory() as session:
+        session.add_all([
+            InboxConversation(
+                id=opened_id, peer_type="user", peer_id="10", access_hash=None,
+                thread_id=0, is_forum=False, title="Opened", topic_title="",
+                preview="seen", trigger_id=10, activated_at=1000, opened_at=1001,
+                latest_relevant_message_id=0, last_seen_message_id=0, unread_count=0,
+                expires_at=1301, manually_closed=False, library_source_id=None,
+                quarantined_at=None, quarantine_reason=None,
+            ),
+            InboxConversation(
+                id=pending_id, peer_type="user", peer_id="20", access_hash=None,
+                thread_id=0, is_forum=False, title="Pending", topic_title="",
+                preview="unseen", trigger_id=12, activated_at=1012, opened_at=None,
+                latest_relevant_message_id=0, last_seen_message_id=0, unread_count=0,
+                expires_at=0, manually_closed=False, library_source_id=None,
+                quarantined_at=None, quarantine_reason=None,
+            ),
+            InboxNotification(
+                peer_id="20", trigger_id=11, conversation_id=pending_id,
+                title="Pending", topic_title="", preview="one",
+                trigger_reason="private_message", unread_count=1,
+                suppressed=False, created_at=1011,
+            ),
+            InboxNotification(
+                peer_id="20", trigger_id=12, conversation_id=pending_id,
+                title="Pending", topic_title="", preview="two",
+                trigger_reason="private_message", unread_count=2,
+                suppressed=False, created_at=1012,
+            ),
+        ])
+        session.commit()
+
+    upgraded = init_db(settings)
+    init_db(settings)
+    with upgraded() as session:
+        opened = session.get(InboxConversation, opened_id)
+        pending = session.get(InboxConversation, pending_id)
+        assert (opened.latest_relevant_message_id, opened.last_seen_message_id,
+                opened.unread_count) == (10, 10, 0)
+        assert (pending.latest_relevant_message_id, pending.last_seen_message_id,
+                pending.unread_count) == (12, 0, 2)
+        assert len(list(session.scalars(select(InboxNotification).where(
+            InboxNotification.conversation_id == pending_id
+        )))) == 2
+
+
+async def test_invalid_peer_is_quarantined_once_and_returns_gone(service):
+    from telethon.errors import PeerIdInvalidError
+
+    row = activate(service)
+    service.client.get_messages = AsyncMock(side_effect=PeerIdInvalidError(request=None))
+    with pytest.raises(InboxError) as first:
+        await service.history(row.id)
+    assert first.value.status == 410
+    assert service.store.active() == []
+    with pytest.raises(InboxError) as second:
+        await service.history(row.id)
+    assert second.value.status == 410
+    assert service.client.get_messages.await_count == 1
+
+
+async def test_peer_retry_failure_is_also_quarantined(service):
+    from telethon.errors import PeerIdInvalidError
+    from telethon.tl.types import InputPeerUser
+
+    row = service.store.activate(
+        peer_id="2", peer_type="user", access_hash=222, thread_id=0,
+        is_forum=False, title="Nikita", trigger_id=10, preview="message",
+        reason="private_message",
+    )
+
+    async def iter_dialogs(*, limit):
+        assert limit == 200
+        yield SimpleNamespace(
+            id=2, name="Nikita", entity=SimpleNamespace(
+                id=2, first_name="Nikita", last_name="", bot=False,
+            ), input_entity=InputPeerUser(2, 333),
+        )
+
+    service.client.iter_dialogs = iter_dialogs
+    service.client.get_messages = AsyncMock(side_effect=[
+        PeerIdInvalidError(request=None), PeerIdInvalidError(request=None),
+    ])
+    with pytest.raises(InboxError) as failure:
+        await service.history(row.id)
+    assert failure.value.status == 410
+    assert service.client.get_messages.await_count == 2
+    assert service.store.get_any(row.id).quarantine_reason == "invalid_peer"
+
+
+async def test_flood_wait_is_rate_limited_without_peer_refresh(service):
+    from telethon.errors import FloodWaitError
+
+    row = service.store.activate(
+        peer_id="2", peer_type="user", access_hash=222, thread_id=0,
+        is_forum=False, title="Nikita", trigger_id=10, preview="message",
+        reason="private_message",
+    )
+    service.client.get_messages = AsyncMock(
+        side_effect=FloodWaitError(request=None, capture=12)
+    )
+    with pytest.raises(InboxError) as failure:
+        await service.history(row.id)
+    assert failure.value.status == 429
+    assert failure.value.retry_after == 12
+    assert service.store.get(row.id) is not None
+    with pytest.raises(InboxError) as cooldown:
+        await service.history(row.id)
+    assert cooldown.value.status == 429 and cooldown.value.retry_after == 12
+    assert service.client.get_messages.await_count == 1
+    service.test_clock[0] += 12
+    with pytest.raises(InboxError):
+        await service.history(row.id)
+    assert service.client.get_messages.await_count == 2
+
+
+async def test_saved_send_flood_wait_enters_shared_cooldown(service):
+    from telethon.errors import FloodWaitError
+
+    service.client.send_message.side_effect = FloodWaitError(request=None, capture=7)
+    request_id = str(uuid4())
+    with pytest.raises(InboxError) as failure:
+        await service.send_saved(request_id, "remember")
+    assert failure.value.status == 429 and failure.value.retry_after == 7
+    with pytest.raises(InboxError) as cooldown:
+        await service.send_saved(request_id, "remember")
+    assert cooldown.value.status == 429 and cooldown.value.retry_after == 7
+    assert service.client.send_message.await_count == 1
+
+
+async def test_transient_rpc_during_peer_refresh_does_not_quarantine(service):
+    from telethon.errors import PeerIdInvalidError, RPCError
+
+    row = service.store.activate(
+        peer_id="2", peer_type="user", access_hash=222, thread_id=0,
+        is_forum=False, title="Nikita", trigger_id=10, preview="message",
+        reason="private_message",
+    )
+
+    async def iter_dialogs(*, limit):
+        assert limit == 200
+        raise RPCError(request=None, message="temporary", code=500)
+        yield  # pragma: no cover - keeps this an async generator
+
+    service.client.iter_dialogs = iter_dialogs
+    service.client.get_messages = AsyncMock(
+        side_effect=PeerIdInvalidError(request=None)
+    )
+    with pytest.raises(InboxError) as failure:
+        await service.history(row.id)
+    assert failure.value.status == 503
+    assert service.store.get(row.id) is not None
+    assert service.store.get_any(row.id).quarantined_at is None
+
+
+async def test_library_projection_cannot_send_through_inbox_routes(service, tmp_path):
+    source = service.store.upsert_library_source(
+        source_id="course", peer_type="chat", peer_id="-22", access_hash=None,
+        display_title="Course", is_bot=False,
+    )
+    row = service.store.activate(
+        peer_id="-22", peer_type="chat", thread_id=0, is_forum=False,
+        title="Course", trigger_id=10, preview="lesson", reason="library_message",
+        library_source_id=source.id,
+    )
+    upload = tmp_path / "notes.txt"
+    upload.write_text("notes", encoding="utf-8")
+    attempts = (
+        service.send(row.id, str(uuid4()), "reply"),
+        service.send(
+            row.id, str(uuid4()), "upload", file_path=upload,
+            filename="notes.txt", mime_type="text/plain",
+        ),
+    )
+    for attempt in attempts:
+        with pytest.raises(InboxError) as denied:
+            await attempt
+        assert denied.value.status == 403
+    assert service.client.send_message.await_count == 0
+    assert service.client.send_file.await_count == 0
+
+
+async def test_selecting_existing_inbox_peer_immediately_disables_generic_send(service):
+    row = service.store.activate(
+        peer_id="-22", peer_type="chat", thread_id=0, is_forum=False,
+        title="Course", trigger_id=10, preview="@fedocc question",
+        reason="mention_only",
+    )
+    source = service.store.upsert_library_source(
+        source_id="course", peer_type="chat", peer_id="-22", access_hash=None,
+        display_title="Course", is_bot=False,
+    )
+    assert service.store.get(row.id).library_source_id == source.id
+    with pytest.raises(InboxError) as denied:
+        await service.send(row.id, str(uuid4()), "reply")
+    assert denied.value.status == 403
+    assert service.client.send_message.await_count == 0
+
+
+def test_selecting_forum_source_closes_topic_rows_and_uses_one_projection(service):
+    for thread in (7, 8):
+        service.store.activate(
+            peer_id="-1000000000022", peer_type="channel", thread_id=thread,
+            is_forum=True, title="Course", trigger_id=thread, preview="mention",
+            reason="mention_only",
+        )
+    source = service.store.upsert_library_source(
+        source_id="course", peer_type="channel", peer_id="-1000000000022",
+        access_hash=222, display_title="Course", is_bot=False,
+    )
+    assert service.store.active() == []
+    projection = service.store.activate(
+        peer_id="-1000000000022", peer_type="channel", thread_id=0,
+        is_forum=False, title="Course", trigger_id=9, preview="lesson",
+        reason="library_message", library_source_id=source.id,
+    )
+    assert [(row.id, row.thread_id) for row in service.store.active()] == [
+        (projection.id, 0)
+    ]
+
+
+async def test_deselected_source_reclassifies_as_writable_ordinary_inbox(service):
+    source = service.store.upsert_library_source(
+        source_id="course", peer_type="chat", peer_id="-22", access_hash=None,
+        display_title="Course", is_bot=False, notifications_muted=True,
+    )
+    projection = service.store.activate(
+        peer_id="-22", peer_type="chat", thread_id=0, is_forum=False,
+        title="Course", trigger_id=10, preview="library", reason="library_message",
+        library_source_id=source.id, notifications_muted=True,
+    )
+    service.store.update_library_source(source.id, library_enabled=False)
+    ordinary = service.store.activate(
+        peer_id="-22", peer_type="chat", thread_id=0, is_forum=False,
+        title="Course", trigger_id=11, preview="@fedocc check",
+        reason="mention_only", library_source_id=None,
+    )
+    assert ordinary.id == projection.id
+    assert ordinary.library_source_id is None and not ordinary.manually_closed
+    assert service.store.notifications(1)["events"][0]["trigger_reason"] == "mention"
+    sent = await service.send(ordinary.id, str(uuid4()), "reply")
+    assert sent == {"message_id": 901}
+
+
+async def test_exact_conversation_message_authorizes_its_media_download(service):
+    row = activate(service)
+    message = Message(777, "far away")
+    message.file = SimpleNamespace(
+        size=9, mime_type="application/pdf", name="lesson.pdf", duration=0,
+    )
+    service.client.messages = [message]
+    exact = await service.conversation_message(row.id, message.id)
+    assert exact["message"]["media"]["url"].endswith("/777")
+    path, mime, name, inline = await service.media(row.id, message.id)
+    assert path.read_bytes() == b"fake media"
+    assert (mime, name, inline) == ("application/octet-stream", "lesson.pdf", False)
+
+
+async def test_selected_muted_library_source_projects_without_banner(service):
+    from telethon.tl.types import InputPeerChannel
+
+    source = service.store.upsert_library_source(
+        source_id="course", peer_type="channel", peer_id="-1000000000123",
+        access_hash=777, display_title="Course", is_bot=False,
+        notifications_muted=True,
+    )
+    event = SimpleNamespace(
+        chat_id=-1000000000123, sender_id=55, out=False, raw_text="lesson", id=1,
+        message=Message(1, "lesson"),
+        get_chat=AsyncMock(return_value=SimpleNamespace(
+            id=123, title="Course", forum=True, access_hash=777,
+        )),
+        get_input_chat=AsyncMock(return_value=InputPeerChannel(123, 777)),
+    )
+    await service.observe(event, trigger=None)
+    row = service.store.active()[0]
+    assert row.library_source_id == source.id and row.thread_id == 0
+    assert row.unread_count == 1
+    feed = service.store.notifications(0)
+    assert feed["events"] == [] and feed["cursor"] == 1
+
+    service.store.open(row.id)
+    service.store.close(row.id)
+    event.id = 2
+    event.message = Message(2, "next")
+    await service.observe(event, trigger=None)
+    reopened = service.store.active()[0]
+    assert reopened.id == row.id and reopened.unread_count == 1
+    assert service.store.library_source(source.id).display_title == "Course"
+
+
+def test_open_library_reports_only_its_opened_inbox_projection(service):
+    source = service.store.upsert_library_source(
+        source_id="course", peer_type="chat", peer_id="-22", access_hash=None,
+        display_title="Course", is_bot=False,
+    )
+    projection = service.store.activate(
+        peer_id="-22", peer_type="chat", thread_id=0, is_forum=False,
+        title="Course", trigger_id=10, preview="lesson", reason="library_message",
+        library_source_id=source.id,
+    )
+    unrelated = service.store.activate(
+        peer_id="2", peer_type="user", thread_id=0, is_forum=False,
+        title="Nikita", trigger_id=11, preview="hello", reason="private_message",
+    )
+
+    result = service.open_library(source.id)
+    assert result["opened_conversation_ids"] == [projection.id]
+    assert result["source"]["id"] == source.id
+    opened = service.store.get(projection.id)
+    assert opened.unread_count == 0 and opened.last_seen_message_id == 10
+    assert service.store.get(unrelated.id).unread_count == 1
+
+    expiry = opened.expires_at
+    repeated = service.open_library(source.id)
+    assert repeated["opened_conversation_ids"] == [projection.id]
+    assert service.store.get(projection.id).expires_at == expiry
+
+
+async def test_library_dialog_tokens_preferences_and_bot_write_are_validated(service):
+    from telethon.tl.types import InputPeerUser
+
+    bot = SimpleNamespace(id=42, first_name="Study Bot", last_name="", bot=True)
+    human = SimpleNamespace(id=43, first_name="Human", last_name="", bot=False)
+    dialogs = [
+        SimpleNamespace(id=42, name="Study Bot", entity=bot,
+                        input_entity=InputPeerUser(42, 4200)),
+        SimpleNamespace(id=43, name="Human", entity=human,
+                        input_entity=InputPeerUser(43, 4300)),
+    ]
+
+    async def iter_dialogs(*, limit):
+        assert limit == 200
+        for dialog in dialogs:
+            yield dialog
+
+    service.client.iter_dialogs = iter_dialogs
+    payload = await service.library_dialogs()
+    assert len(payload["dialogs"]) == 2
+    assert all("peer_id" not in row and "peer_type" not in row and "access_hash" not in row
+               for row in payload["dialogs"])
+    bot_row = next(row for row in payload["dialogs"] if row["is_bot"])
+    source = await service.update_library(bot_row["token"], {
+        "library_enabled": True, "allow_bot_write": True,
+        "notifications_muted": False, "digest_excluded": True,
+    })
+    assert source["writable"] is True
+    result = await service.send_library(source["id"], str(uuid4()), "hello")
+    assert result == {"message_id": 901}
+    assert service.client.send_message.await_args.args[0] == 42
+
+    human_row = next(row for row in payload["dialogs"] if not row["is_bot"])
+    with pytest.raises(InboxError) as unsafe:
+        await service.update_library(human_row["token"], {"allow_bot_write": True})
+    assert unsafe.value.status == 422
+    with pytest.raises(InboxError):
+        await service.update_library("forged-token", {"library_enabled": True})
+
+
+async def test_queued_library_disable_wins_before_later_bot_send(service):
+    import asyncio
+
+    source = service.store.upsert_library_source(
+        source_id="studybot", peer_type="user", peer_id="42", access_hash=4200,
+        display_title="Study Bot", is_bot=True, allow_bot_write=True,
+    )
+    await service.action_lock.acquire()
+    disable = asyncio.create_task(service.update_library(source.id, {
+        "library_enabled": False,
+        "allow_bot_write": False,
+    }))
+    await asyncio.sleep(0)
+    send = asyncio.create_task(service.send_library(
+        source.id, str(uuid4()), "must not send",
+    ))
+    await asyncio.sleep(0)
+    service.action_lock.release()
+
+    disabled = await disable
+    assert disabled["id"] == source.id
+    with pytest.raises(InboxError) as denied:
+        await send
+    assert denied.value.status == 404
+    assert service.client.send_message.await_count == 0
+
+
+async def test_disabled_persisted_source_cannot_fall_back_to_static_access(service):
+    from app.inbox.library import SAVED_MESSAGES, LibraryChat
+
+    legacy = LibraryChat("n10022", -10022, "Legacy")
+    service.library = (SAVED_MESSAGES, legacy)
+    service.library_by_id = {row.id: row for row in service.library}
+    persisted = service.store.upsert_library_source(
+        source_id="persisted", peer_type="chat", peer_id="-10022",
+        access_hash=None, display_title="Legacy", is_bot=False,
+    )
+    service.store.update_library_source(persisted.id, library_enabled=False)
+    assert {row["id"] for row in service.library_json()} == {"saved"}
+
+    reads_before = list(service.client.reads)
+    for operation in (
+        service.library_history(legacy.id),
+        service.library_search(legacy.id, "lesson"),
+        service.library_media(legacy.id, 1),
+    ):
+        with pytest.raises(InboxError) as disabled:
+            await operation
+        assert disabled.value.status == 404
+    assert service.client.reads == reads_before
+
+
+async def test_library_media_enforces_progress_limit_and_safe_inline_mime(service):
+    from app.inbox.library import SAVED_MESSAGES, LibraryChat
+
+    source = LibraryChat("n10022", -10022, "Course")
+    service.library = (SAVED_MESSAGES, source)
+    service.library_by_id = {row.id: row for row in service.library}
+    message = Message(7, "file")
+    message.file = SimpleNamespace(
+        size=100, mime_type="image/svg+xml", name="active.svg", duration=0,
+    )
+    service.client.messages = [message]
+
+    async def oversized(message, *, file, progress_callback):
+        file.write(b"partial")
+        progress_callback(message.file.size + 1, message.file.size + 1)
+
+    service.client.download_media = oversized
+    with pytest.raises(InboxError) as blocked:
+        await service.library_media(source.id, message.id)
+    assert blocked.value.status == 413
+    assert not list(service.cache_dir.glob("library_*.part"))
+    assert not list(service.cache_dir.glob("library_*.bin"))
+
+    async def safe_download(message, *, file, progress_callback):
+        progress_callback(message.file.size, message.file.size)
+        file.write(b"safe")
+
+    service.client.download_media = safe_download
+    path, mime, _, inline = await service.library_media(source.id, message.id)
+    assert path.read_bytes() == b"safe"
+    assert mime == "application/octet-stream" and inline is False
+
+
+async def test_library_media_flood_wait_cleans_partial_and_blocks_inbox(service):
+    from telethon.errors import FloodWaitError
+
+    from app.inbox.library import SAVED_MESSAGES, LibraryChat
+
+    source = LibraryChat("n10022", -10022, "Course")
+    service.library = (SAVED_MESSAGES, source)
+    service.library_by_id = {row.id: row for row in service.library}
+    message = Message(7, "file")
+    message.file = SimpleNamespace(
+        size=100, mime_type="application/pdf", name="lesson.pdf", duration=0,
+    )
+    service.client.messages = [message]
+    row = activate(service, peer="-10099", trigger=99)
+    calls = 0
+
+    async def flood_wait(message, *, file, progress_callback):
+        nonlocal calls
+        calls += 1
+        file.write(b"partial")
+        raise FloodWaitError(request=None, capture=7)
+
+    service.client.download_media = flood_wait
+    with pytest.raises(InboxError) as failure:
+        await service.library_media(source.id, message.id)
+    assert failure.value.status == 429 and failure.value.retry_after == 7
+    assert calls == 1
+    assert not list(service.cache_dir.glob("library_*.part"))
+    assert not list(service.cache_dir.glob("library_*.bin"))
+
+    reads = list(service.client.reads)
+    with pytest.raises(InboxError) as cooldown:
+        await service.history(row.id)
+    assert cooldown.value.status == 429 and cooldown.value.retry_after == 7
+    assert service.client.reads == reads and calls == 1
+
+
+async def test_library_three_pages_pins_exact_and_source_search(service):
+    from app.inbox.library import SAVED_MESSAGES, LibraryChat
+
+    source = LibraryChat("n10022", -10022, "Team")
+    service.library = (SAVED_MESSAGES, source)
+    service.library_by_id = {row.id: row for row in service.library}
+    service.client.messages = [
+        Message(mid, f"needle {mid}" if mid in {7, 107} else f"message {mid}",
+                pinned=mid in {3, 140})
+        for mid in range(1, 151)
+    ]
+    first = await service.library_history(source.id)
+    second = await service.library_history(source.id, first["next_before"])
+    third = await service.library_history(source.id, second["next_before"])
+    assert [item["id"] for item in first["messages"]] == list(range(101, 151))
+    assert [item["id"] for item in second["messages"]] == list(range(51, 101))
+    assert [item["id"] for item in third["messages"]] == list(range(1, 51))
+    assert third["next_before"] is None
+    assert len({item["id"] for page in (first, second, third)
+                for item in page["messages"]}) == 150
+
+    pins = await service.library_pins(source.id)
+    assert [item["id"] for item in pins["pins"]] == [3, 140]
+    exact = await service.library_message(source.id, 3)
+    assert exact["message"]["id"] == 3
+    results = await service.library_search(source.id, "needle")
+    assert [item["id"] for item in results["results"]] == [107, 7]
+
+
+def test_telegram_link_segments_use_utf16_and_reject_malformed_urls():
+    from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl
+
+    from app.inbox.service import safe_link_segments
+
+    text = "😀 кириллица лекция и https://example.com"
+    label = "лекция"
+    offset = len(text[:text.index(label)].encode("utf-16-le")) // 2
+    url_start = text.index("https://")
+    url_offset = len(text[:url_start].encode("utf-16-le")) // 2
+    entities = [
+        MessageEntityTextUrl(offset, len(label), "https://course.example/path"),
+        MessageEntityUrl(url_offset, len("https://example.com")),
+    ]
+    segments = safe_link_segments(text, entities)
+    assert "".join(item["text"] for item in segments) == text
+    assert [item["url"] for item in segments if "url" in item] == [
+        "https://course.example/path", "https://example.com",
+    ]
+    malformed = MessageEntityTextUrl(0, 1, "https://[broken")
+    unsafe = MessageEntityTextUrl(0, 1, "javascript:alert(1)")
+    assert safe_link_segments("x", [malformed, unsafe]) == []
