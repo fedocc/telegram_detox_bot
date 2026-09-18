@@ -12,4 +12,11 @@ if [ "$action" != status ]; then
     --data '{}' "$bridge/$action")
 fi
 enabled=$(printf '%s' "$status" | /usr/bin/plutil -extract enabled raw -o - -)
-if [ "$enabled" = true ]; then printf 'Telegram notifier: ON\n'; else printf 'Telegram notifier: OFF\n'; fi
+effective=$(printf '%s' "$status" | /usr/bin/plutil -extract effective_enabled raw -o - - 2>/dev/null || printf '%s' "$enabled")
+if [ "$enabled" != true ]; then
+  printf 'Telegram notifier: OFF\n'
+elif [ "$effective" = true ]; then
+  printf 'Telegram notifier: ON\n'
+else
+  printf 'Telegram notifier: SNOOZED\n'
+fi

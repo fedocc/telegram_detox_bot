@@ -19,7 +19,7 @@ final class Notifier: NSObject, NSApplicationDelegate, UNUserNotificationCenterD
     var delivered = 0
     var generation = 0
     var timer: DispatchWorkItem?
-    var connections = 0
+    var connections = Set<ObjectIdentifier>()
     lazy var session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 10
@@ -101,6 +101,7 @@ final class Notifier: NSObject, NSApplicationDelegate, UNUserNotificationCenterD
         }.resume()
     }
     func notify(_ event: AttentionEvent) {
+        guard let identifier = notificationIdentifier(event.conversation_id) else { return }
         let content = UNMutableNotificationContent()
         content.title = "Telegram — " + plain(event.title, limit: 100)
         if event.unread_count > 1 {
@@ -113,11 +114,13 @@ final class Notifier: NSObject, NSApplicationDelegate, UNUserNotificationCenterD
             content.subtitle = "Упоминание"
         }
         if !event.topic_title.isEmpty { content.subtitle += " · " + plain(event.topic_title, limit: 60) }
-        content.body = plain(event.preview, limit: 240)
+        let preview = plain(event.preview, limit: event.unread_count > 1 ? 228 : 240)
+        content.body = event.unread_count > 1 ? "Последнее: \(preview)" : preview
         content.sound = .default
         content.userInfo = ["conversation": event.conversation_id]
-        let identifier = "conversation:\(event.conversation_id)"
         let center = UNUserNotificationCenter.current()
+        // The stable identifier replaces pending and delivered requests on macOS;
+        // explicit removal keeps the one-current-item invariant deterministic.
         center.removePendingNotificationRequests(withIdentifiers: [identifier])
         center.removeDeliveredNotifications(withIdentifiers: [identifier])
         center.add(UNNotificationRequest(
@@ -154,27 +157,38 @@ final class Notifier: NSObject, NSApplicationDelegate, UNUserNotificationCenterD
             if case .failed = state { self.log("Bridge bind failed"); exit(1) }
         }
         listener?.newConnectionHandler = { connection in
-            guard self.connections < 32 else { connection.cancel(); return }
-            self.connections += 1
+            guard self.connections.count < 32 else { connection.cancel(); return }
+            self.connections.insert(ObjectIdentifier(connection))
             connection.start(queue: .main)
-            let timeout = DispatchWorkItem { connection.cancel() }
+            let timeout = DispatchWorkItem { self.finish(connection) }
             DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: timeout)
             self.receive(connection, buffer: Data(), timeout: timeout)
         }
         listener?.start(queue: .main)
     }
+    func finish(_ connection: NWConnection) {
+        if connections.remove(ObjectIdentifier(connection)) != nil { connection.cancel() }
+    }
     func receive(_ connection: NWConnection, buffer: Data, timeout: DispatchWorkItem) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 8193 - buffer.count) { data, _, done, error in
             var accumulated = buffer; if let data { accumulated.append(data) }
-            if accumulated.count > 8192 || done || error != nil {
-                timeout.cancel(); connection.cancel(); self.connections -= 1; return
+            if accumulated.count > 8192 || error != nil {
+                timeout.cancel(); self.finish(connection); return
             }
-            guard accumulated.range(of: Data("\r\n\r\n".utf8)) != nil,
-                  let request = BridgeRequest.parse(accumulated) else {
-                self.receive(connection, buffer: accumulated, timeout: timeout); return
+            switch BridgeRequest.parseResult(accumulated) {
+            case let .request(request):
+                timeout.cancel()
+                self.respond(connection, request: request)
+            case .invalid:
+                timeout.cancel()
+                self.respond(connection, request: nil)
+            case .incomplete:
+                if done {
+                    timeout.cancel(); self.finish(connection)
+                } else {
+                    self.receive(connection, buffer: accumulated, timeout: timeout)
+                }
             }
-            timeout.cancel()
-            self.respond(connection, request: request)
         }
     }
     func respond(_ connection: NWConnection, request: BridgeRequest?) {
@@ -188,36 +202,47 @@ final class Notifier: NSObject, NSApplicationDelegate, UNUserNotificationCenterD
             code = 200
             if request.method == "POST" {
                 let previous = state
-                var valid = true
-                if request.path == "/enable" { state.setEnabled(true) }
-                else if request.path == "/disable" { state.setEnabled(false) }
-                else if request.path == "/snooze" {
-                    let seconds = request.json()?["seconds"] as? Int
+                let epoch = Date().timeIntervalSince1970
+                let json = request.json()
+                var valid = json != nil
+                if request.path == "/enable" {
+                    valid = valid && json?.isEmpty == true
+                    if valid { state.setEnabled(true, now: epoch) }
+                } else if request.path == "/disable" {
+                    valid = valid && json?.isEmpty == true
+                    if valid { state.setEnabled(false, now: epoch) }
+                } else if request.path == "/snooze" {
+                    valid = valid && json?.count == 1
+                    let seconds = json?["seconds"] as? Int
                     valid = seconds.map { state.snooze(seconds: $0,
-                        now: Date().timeIntervalSince1970) } ?? false
+                        now: epoch) } ?? false
                 } else if request.path == "/conversation-opened" {
-                    let conversation = request.json()?["conversation_id"] as? String ?? ""
-                    valid = conversation.range(of: "^[a-f0-9]{32}$", options: .regularExpression) != nil
-                    if valid {
-                        let identifier = "conversation:\(conversation)"
+                    valid = valid && json?.count == 1
+                    let conversation = json?["conversation_id"] as? String ?? ""
+                    if let identifier = notificationIdentifier(conversation), valid {
                         UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [identifier])
                         UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [identifier])
-                    }
+                    } else { valid = false }
                 }
                 if !valid { state = previous; code = 400 }
                 do {
                     if valid { try save() }
-                    if state.enabled != previous.enabled { generation += 1 }
+                    if valid && (state.enabled != previous.enabled
+                            || state.mute_until != previous.mute_until
+                            || state.bootstrap != previous.bootstrap) { generation += 1 }
                     if !state.enabled {
                         UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
                         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+                    } else if state.visibleMuteUntil(now: epoch) != nil {
+                        UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
                     }
                 } catch { state = previous; code = 503 }
             }
             refreshPermission()
             let epoch = Date().timeIntervalSince1970
             body = ["enabled": state.enabled, "effective_enabled": state.effectiveEnabled(now: epoch),
-                    "mute_until": state.mute_until ?? NSNull(), "csrf": token, "permission": permission,
+                    "mute_until": state.visibleMuteUntil(now: epoch) ?? NSNull(),
+                    "csrf": token, "permission": permission,
                     "connected": connected, "submitted": submitted, "delivered": delivered]
         }
         let payload = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
@@ -226,7 +251,7 @@ final class Notifier: NSObject, NSApplicationDelegate, UNUserNotificationCenterD
             + "X-Content-Type-Options: nosniff\r\nConnection: close\r\n"
             + cors + "Content-Length: \(payload.count)\r\n\r\n"
         connection.send(content: Data(headers.utf8) + payload, completion: .contentProcessed { _ in
-            connection.cancel(); self.connections -= 1
+            self.finish(connection)
         })
     }
 }

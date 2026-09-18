@@ -10,26 +10,30 @@ A SQLite AUTOINCREMENT event ID and unique `(peer_id, trigger_id)` constraint
 provide stable dedup across backend restarts. Closed, expired and ignored
 conversations are suppressed; the cursor still advances over them. Notification
 text is redacted after 24 hours; compact IDs remain as dedup tombstones. The feed
-contains only event ID, conversation ID, title, topic title, preview, reason and
-timestamp. Existing conversations do not produce historical notifications when
-this version is deployed.
+contains only event ID, conversation ID, title, topic title, preview, reason,
+local unread count and timestamp. Opening a conversation suppresses its already-seen
+rows without deleting notification history or moving the feed cursor.
 
 The Swift app uses AppKit, Network and UserNotifications from macOS, with no
 third-party runtime or Homebrew dependencies. It polls the fixed localhost feed
 using ephemeral URLSession, bypasses proxies, rejects redirects, and never loads
 Telegram sessions, environment files, Gmail tokens or SSH keys. It stores only
-cursor, bootstrap policy and enabled state in an atomically replaced mode-600
+cursor, bootstrap policy, enabled state and an optional snooze cutoff in an atomically replaced mode-600
 `~/Library/Application Support/TelegramMentionInbox/notifier_state.json`.
 A local flock prevents duplicate instances. The bridge token stays in memory.
 
-First launch bootstraps to the latest position. OFF continues consuming without
-banners. OFF→ON bootstraps again, including after an offline period, to avoid
-backlog floods. Normal reconnect resumes from the saved cursor; events older
-than 15 minutes are silently consumed. Requests time out and back off to at most
-60 seconds; logs record connection state changes rather than every failed poll.
+First launch bootstraps to the latest position. OFF and a 10-minute through
+12-hour snooze continue consuming without banners. OFF→ON bootstraps again;
+manual or natural snooze expiry retains a persisted cutoff, so neither restart,
+sleep nor an in-flight page can produce a muted backlog. Normal reconnect resumes
+from the saved cursor; events older than 15 minutes are silently consumed.
+Requests time out and back off to at most 60 seconds; logs record connection state
+changes rather than every failed poll.
 
 Delivery deliberately uses **at-most-once submission**: cursor is saved before
-submitting to UserNotifications, with a stable native request ID. A crash between
+submitting to UserNotifications, with one stable native request ID per conversation.
+Events in one fetched page are coalesced to the newest preview/count. Before a
+replacement the app removes pending and delivered items with that identifier. A crash between
 that save and OS submission can lose a banner; it cannot replay the event after
 restart. Exact-once display across SQLite, the Mac filesystem and macOS notification
 center is not transactional. Inbox pending attention and email delivery remain
@@ -85,8 +89,10 @@ Logs: `~/Library/Logs/telegram-inbox-notifier.log` and
 
 The sidebar control calls the Mac bridge at `127.0.0.1:8788`. Exact Host and Origin
 `http://127.0.0.1:8787` are required, with explicit CORS and no wildcard. A random
-process-scoped token from GET `/status` is required for JSON POST `/enable` and
-`/disable`. Other routes and methods are denied. The bridge has bounded request
+process-scoped token from GET `/status` is required for JSON POST `/enable`,
+`/disable`, `/snooze` and `/conversation-opened`. Snooze accepts only the six fixed
+durations; conversation IDs are validated before native removal. Other routes and
+methods are denied. The bridge has bounded request
 size, connection count and timeouts, and cannot execute commands or control launchd.
 CSP allows this one additional localhost origin. No public listeners are added.
 
