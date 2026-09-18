@@ -12,6 +12,11 @@ test -z "$(runuser -u telegram-detox -- git status --porcelain)"
 test "$(runuser -u telegram-detox -- git branch --show-current)" = main
 runuser -u telegram-detox -- git fetch origin
 test "$(runuser -u telegram-detox -- git rev-parse origin/main)" = "$expected"
+# The running revision owns the pre-migration schema. Execute the backup logic from
+# the already verified target SHA: on the first deploy the checkout still contains
+# the older hard-coded script until after this backup and the subsequent pull.
+runuser -u telegram-detox -- git show "${expected}:deploy/backup_sqlite.sh" \
+  | runuser -u telegram-detox -- bash -s -- /opt/telegram-detox
 runuser -u telegram-detox -- git pull --ff-only origin main
 test "$(runuser -u telegram-detox -- git rev-parse HEAD)" = "$expected"
 systemctl restart telegram-detox.service
@@ -33,6 +38,13 @@ print('birthdays=', s.birthday_reminders_enabled)
 PY
 curl --fail --silent --show-error http://127.0.0.1:8787/api/notifications
 echo
+curl --fail --silent --show-error http://127.0.0.1:8787/api/library | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+sources = payload.get("sources")
+assert isinstance(sources, list) and sources and sources[0].get("id") == "saved"
+print("library_ok=True; source_count=", len(sources))
+'
 listeners=$(ss -H -ltn 'sport = :8787' | awk '{print $4}')
 test "$listeners" = '127.0.0.1:8787'
 systemctl is-active telegram-detox.service

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import io
+import os
+import sqlite3
 import stat
+import subprocess
 from pathlib import Path
 
 from app.cli.healthcheck import run as run_healthcheck
@@ -78,6 +81,85 @@ def test_backup_script_exists_and_is_executable() -> None:
 
     assert script.is_file()
     assert stat.S_IMODE(script.stat().st_mode) & stat.S_IXUSR
+
+
+def test_backup_uses_runtime_sqlite_url_and_verifies_copy(tmp_path: Path) -> None:
+    project_root = Path.cwd().resolve()
+    runtime_root = tmp_path / "runtime"
+    database = runtime_root / "state" / "custom.sqlite"
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE durable (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO durable VALUES ('preserved')")
+
+    (runtime_root / ".venv").symlink_to(project_root / ".venv", target_is_directory=True)
+    environment = os.environ.copy()
+    environment.update({
+        "DATABASE_URL": "sqlite:///state/custom.sqlite",
+        "PYTHONPATH": str(project_root),
+    })
+    result = subprocess.run(  # noqa: S603 - absolute reviewed script and temp-only arguments
+        [str(project_root / "deploy/backup_sqlite.sh"), str(runtime_root)],
+        cwd=runtime_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    backups = list((runtime_root / "backups").glob("*.sqlite"))
+    assert len(backups) == 1
+    assert stat.S_IMODE((runtime_root / "backups").stat().st_mode) == 0o700
+    assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
+    with sqlite3.connect(backups[0]) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute("SELECT value FROM durable").fetchone() == ("preserved",)
+
+
+def test_backup_rejects_non_sqlite_database_url(tmp_path: Path) -> None:
+    project_root = Path.cwd().resolve()
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    (runtime_root / ".venv").symlink_to(project_root / ".venv", target_is_directory=True)
+    environment = os.environ.copy()
+    environment.update({
+        "DATABASE_URL": "postgresql://localhost/telegram",
+        "PYTHONPATH": str(project_root),
+    })
+
+    result = subprocess.run(  # noqa: S603 - absolute reviewed script and temp-only arguments
+        [str(project_root / "deploy/backup_sqlite.sh"), str(runtime_root)],
+        cwd=runtime_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "file-backed SQLite" in result.stderr
+    assert not (runtime_root / "backups").exists()
+
+
+def test_aeza_deploy_backs_up_database_before_pull_and_restart() -> None:
+    script = Path("tools/deploy_aeza.sh").read_text(encoding="utf-8")
+
+    verified = script.index('git rev-parse origin/main)" = "$expected"')
+    backup = script.index('git show "${expected}:deploy/backup_sqlite.sh"')
+    pull = script.index("git pull --ff-only")
+    restart = script.index("systemctl restart telegram-detox.service")
+    assert verified < backup < pull < restart
+
+
+def test_tailscale_setup_is_private_serve_only() -> None:
+    script = Path("deploy/configure_tailscale_serve.sh")
+    source = script.read_text(encoding="utf-8")
+
+    assert stat.S_IMODE(script.stat().st_mode) & stat.S_IXUSR
+    assert "tailscale serve --bg 8787" in source
+    assert "tailscale funnel " not in source
+    assert "http://127.0.0.1:8787" in source
 
 
 def test_healthcheck_requires_ai_key_only_in_legacy(settings, tmp_path):

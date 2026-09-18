@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Telegram Detox">
+  <rect width="512" height="512" rx="112" fill="#111417"/>
+  <path d="M111 154h290L256 402 111 154Z" fill="#2d3843" stroke="#bcc8d6" stroke-width="25" stroke-linejoin="round"/>
+  <path d="m164 184 92 169 92-169-92 70-92-70Z" fill="#dbc2a9"/>
+</svg>

@@ -1,15 +1,14 @@
 # Telegram Mention Inbox
 
-The inbox runs inside `telegram-detox.service`. The existing listener owns the
-only Telethon user session; aiohttp shares its client and asyncio event loop.
-It is enabled by default in mention-only mode (`INBOX_ENABLED=false` disables
-only the web interface). The email alert and retry path stays enabled. The
-runtime does not construct an LLM client or schedule digests in this mode. Birthday
-daily reminders and polling run independently when BIRTHDAY_REMINDERS_ENABLED is true.
+The inbox runs inside `telegram-detox.service`. The listener owns the only Telethon
+user session; aiohttp shares that client and event loop. Never start a second client
+against the production session. The web interface is enabled by default in mention-only
+mode (`INBOX_ENABLED=false` disables only the UI). LLM, digest and startup backfill stay
+disabled in that mode; birthday jobs remain independent.
 
-## Access
+## Private access
 
-Run this on the Mac and keep the SSH connection open:
+aiohttp always binds `127.0.0.1:8787`. The existing Mac path is an SSH tunnel:
 
 ```sh
 ssh -i ~/.ssh/aeza_tg_detox_ed25519 \
@@ -17,146 +16,171 @@ ssh -i ~/.ssh/aeza_tg_detox_ed25519 \
   root@45.80.228.215
 ```
 
-Open **http://127.0.0.1:8787**. Use this exact address: Host/Origin validation
-intentionally rejects `localhost`, custom domains and alternative ports.
-The backend binds only `127.0.0.1:8787`; no firewall or nginx changes are needed.
+Open **http://127.0.0.1:8787**. The configured Origin and Host must match exactly.
+Do not bind the service to `0.0.0.0`, expose port 8787, add a public reverse proxy, or
+enable Tailscale Funnel: the web UI acts through an already authenticated Telegram
+session and has no separate public login.
 
-## Conversation lifecycle
+For iPhone, install Tailscale on the VPS and phone, join the same tailnet, and run on
+the VPS:
 
-Only incoming, non-self messages matching the existing case-insensitive exact
-`@fedocc` matcher, or directly replying to a message authored by your account,
-activate a conversation. Reply parents are resolved only with real reply metadata;
-parent.out or parent.sender_id matching the connected account establishes authorship.
-A mention plus reply produces one alert, with mention taking precedence. Both
-trigger types use durable email delivery; legacy alerts remain excluded from retry. Ignored chats are excluded at ingestion
-and again on every API operation. Ordinary messages never activate a conversation.
+```sh
+cd /opt/telegram-detox
+sudo ./deploy/configure_tailscale_serve.sh
+```
 
-A `(peer, topic/thread)` conversation starts pending: it remains in the sidebar
-without a countdown until selected or manually closed. Listing and history reads
-do not open it. Explicit selection sends a CSRF/Origin-protected `POST /open`,
-which sets `opened_at` and a five-minute deadline exactly once. Repeated opens
-do not extend the deadline. There is no automatic selection on load or close.
+The script configures tailnet-only Serve, refuses Funnel, and prints the exact HTTPS
+origin. Add it without a wildcard and restart the service:
 
-A successful manual send or a new meaningful trigger while opened resets the
-deadline to five minutes from now. Triggers while pending update the preview and
-keep it pending. Ordinary messages and reads do not extend anything. Close works
-from the sidebar even for pending conversations. A new trigger after close or
-expiry creates a new pending cycle; replayed trigger IDs cannot reopen it.
+```env
+INBOX_ALLOWED_ORIGINS=http://127.0.0.1:8787,https://<node>.<tailnet>.ts.net
+```
 
-The nullable `opened_at` field identifies pending state. For compatibility with
-the existing SQLite NOT NULL column, pending rows store zero in `expires_at`;
-the API exposes it as null and expiry checks ignore it. The additive migration
-marks existing records opened at their original activation time, preserving
-their deadlines rather than resurrecting old expired conversations.
+On iPhone open that HTTPS URL in Safari, then choose **Share → Add to Home Screen**.
+The manifest uses standalone mode and the service worker caches only the static shell;
+`/api/*`, Telegram media, messages, pins and search results remain network-only and
+`no-store`. The local Mac bridge on `127.0.0.1:8788` is hidden on mobile and is never
+served over Tailscale.
 
-SQLite adds `inbox_conversations` (routing, timestamps, title, short preview) and
-`inbox_sends` (request ID and delivery status, no message bodies). Schema creation
-is additive through the existing `init_db`. Closed/expired metadata and media
-are cleaned every 30 seconds. Send receipts live for 24 hours to prevent retries
-from sending duplicates, including across restarts.
+## Canonical conversations and local read state
 
-## Context and media
+Inbox identity is `(peer_type, marked_peer_id, thread_id)`. A private peer always has
+`thread_id=0`; reply metadata in a private chat can never create a phantom conversation.
+Ordinary groups remain peer-wide, real forum topics retain their topic root, and
+discussion roots keep their existing semantics. SQLite enforces the identity and the
+idempotent migration merges legacy duplicates while repointing send/notification rows.
 
-Opening a conversation fetches up to 100 messages preceding/including the mention
-and up to 100 following it. Subsequent polling retrieves new messages, including
-messages sent from another Telegram client. History is held only in memory:
-maximum 500 messages per conversation and 20 recently opened conversations.
-Large backlogs catch up in batches of 100. History is never written to SQLite.
+An activation stores the event's peer type and access hash server-side. History, exact
+messages, search, pins, media and sends resolve an `InputPeer` from that identity. On a
+peer-invalid Telegram response the backend performs one bounded dialog re-resolution.
+A repeated permanent failure quarantines only that projection and returns 410; the
+frontend removes its selection and does not poll it every two seconds. Access hashes are
+never serialized to the browser or logs; browser routes resolve only server-allowlisted
+conversation/source identifiers.
 
-Forum topics use their root ID and server-side reply filtering, plus a local
-membership check. General topic filters out other topics and scans at most 2,000
-preceding messages to collect its context. Discussion replies use the root post
-in the discussion peer. Ordinary group replies stay peer-wide. When Telegram
-cannot provide the topic title, the UI shows its ID. Deleted/inaccessible messages
-or media may be unavailable. Message edits/deletions already in the memory snapshot
-are refreshed when that snapshot is discarded (restart or cache eviction).
+Each durable conversation records `latest_relevant_message_id`,
+`last_seen_message_id`, and `unread_count`. Sidebar/history/notification polling does
+not change them. Only the CSRF-protected `POST /open` caused by a user selection marks
+the current batch locally seen. This is app-local state: runtime code must never call
+`send_read_acknowledge`, `ReadHistoryRequest`, or another Telegram read-receipt API.
 
-Photos open larger; videos have native controls; voice/audio has play, seek and
-duration controls. Unsupported browser codecs can be downloaded. Files use a
-safe download response. Media loads only for active conversations and messages
-already opened in that conversation. Downloads are capped at 64 MiB per file and
-256 MiB total cache, stored in `data/media_cache` with generated filenames and
-mode 600. Nothing under this directory is committed.
+A new projection is pending without a countdown. Its first actual open starts the
+five-minute window; repeated opens do not extend it. A successful manual send or a new
+meaningful trigger while opened preserves the existing extension behavior. Close or
+expiry hides the projection but keeps its canonical row and dedup state, so a later
+message reuses the stable conversation ID.
 
-## Manual sending and security
+Incoming human private messages, exact configured mentions, and direct replies create
+Inbox attention. A selected Library source also creates one peer-wide temporary Inbox
+projection for its incoming messages. Ten messages still produce one row with a count,
+and opening it clears the local count; closing it never removes the Library source.
 
-The composer sends plain text or a still JPEG/PNG/WebP image on click or ⌘Enter
-(Ctrl+Enter also works). Enter alone inserts a newline. Image uploads are limited
-to 10 MiB/20 megapixels, decoded with an allowlist, then normalized to JPEG up to
-2560px; animations and other file types are rejected. Text is limited to 4096
-UTF-16 units, or 1024 with a photo. Text is not parsed as Markdown.
+## Library
 
-The server derives peer/thread from the active conversation; the browser cannot
-supply an arbitrary target. Telethon sends as the existing user account. There is
-no voice/video-send endpoint and no autonomous Telegram sending.
+The first source is always ☆ **Избранное** (Telegram Saved Messages). Other sources are
+selected in the Library management drawer. Telegram dialogs are fetched only when that
+drawer is explicitly opened. The browser receives short-lived opaque tokens; it cannot
+submit a peer ID or access hash.
 
-Write requests require the exact Origin, a session CSRF header and JSON. Host,
-Fetch Metadata, CSP, no-store and same-origin resource checks protect the interface.
-No permissive CORS or public listener is configured. HTTP access logs are disabled;
-API failures log only exception class names. The SSH tunnel is the access boundary.
+Selections, fixed order, local notification mute, bot-write permission,
+`digest_excluded`, and per-source seen state live in SQLite. The old
+`data/library_chats.json` is only an idempotent startup seed for compatibility; it is no
+longer the primary control surface and never triggers a Telegram dialog scan. Deselecting
+a source revokes its history/search/media routes and closes its Inbox projection.
 
-Draft text survives page reloads in tab-scoped sessionStorage; attachments remain
-in memory until removed/sent or the page closes. Telegram permission failures
-preserve the draft. Ambiguous network failures are never retried automatically:
-inspect the conversation before composing another send. Repeating the unchanged
-request ID returns its prior result or an explicit unknown-status error.
+Ordinary Library groups, channels and people are read-only. An explicitly selected peer
+may be writable only when Telegram currently resolves it as a bot and
+`allow_bot_write=true`; text, photo and generic-file sends still require a manual click.
+The Inbox projection route cannot bypass that check. Избранное remains writable and uses
+the existing delayed server scheduling.
 
-## Validation and operation
+Each source loads the latest 50 messages. “Загрузить предыдущие сообщения” sends the
+oldest loaded ID as exclusive `offset_id`, prepends the next page, deduplicates IDs and
+preserves the visible scroll anchor. The control disappears when Telegram returns no
+older page.
+
+Pins use Telegram's real pinned-message filter and a bounded 60-second cache, independent
+of the current history page. Search uses Telegram server-side search only for the current
+validated source/conversation, 30 results at a time; there is no global/local full-history
+index. Clicking a pin or result fetches that exact message if needed and updates the
+stable deep link:
+
+```text
+/?conversation=<32-hex-conversation-id>
+/?library=<opaque-source-id>
+/?library=<opaque-source-id>&message=<positive-telegram-message-id>
+```
+
+The backend verifies that the source is enabled and that an exact Inbox message belongs
+to its canonical peer/topic.
+
+## Rendering, history and media
+
+Telegram `MessageEntityTextUrl` and `MessageEntityUrl` offsets are decoded as UTF-16 code
+units. The API returns text/link segments; the frontend builds text nodes and anchors
+with only `http`/`https`, `target="_blank"`, and `rel="noopener noreferrer"`. Telegram
+HTML is never injected. The same renderer is used for Inbox, Library, Избранное, replies,
+pins and search results.
+
+Inbox context is held only in memory: up to 500 messages per conversation and 20 recently
+opened conversations. Library history is explicit and paged. Photos, supported video and
+audio render inline; other files download as attachments. A source/conversation must be
+allowlisted, exact messages are checked, individual downloads are capped at 64 MiB, cache
+size is capped at 256 MiB, partial files are removed, and generated cache files use mode
+600. Uploaded files are streamed into a private temporary directory with bounded size and
+concurrency and are removed after success or failure.
+
+## Manual sending and web security
+
+The server derives every target from an active Inbox conversation or enabled Library
+source. There is no arbitrary username, peer, New Chat, forward, reaction, edit, delete,
+pin/unpin, join/leave, or autonomous send endpoint. Request IDs make manual sends
+idempotent; ambiguous delivery is not retried automatically and drafts remain in
+`sessionStorage`.
+
+Mutating requests require the exact configured Origin, an in-memory session CSRF token,
+same-site Fetch Metadata, and JSON or bounded multipart content. Host is validated against
+the same exact origin set. CSP, no-store API responses, disabled access logs and sanitized
+exception logging prevent private payload leakage. Allowed HTTPS origins must be exact
+`.ts.net` names; wildcards and public HTTP origins are rejected.
+
+## Native Mac notifications
+
+The optional [Swift notifier](../tools/macos/notifier/README.md) works without an open
+browser. It polls while muted so its cursor advances, coalesces pending events by stable
+`conversation:<id>` identifier, removes a previously delivered item before submitting its
+replacement, and removes the item when the conversation opens. Notification history in
+SQLite is retained for cursor/dedup purposes.
+
+The loopback menu preserves permanent ON/OFF and adds persistent snooze for 10/30 minutes
+or 1/3/6/12 hours. During snooze it suppresses banners but continues polling; enable-now,
+restart and sleep/wake do not replay a backlog. The bridge remains bound to loopback with
+its existing Origin/token checks.
+
+## Database and operation
+
+Migrations are additive and idempotent. They preserve birthday/digest tables, pending and
+opened attention state, notification cursors, send idempotency, and Library preferences.
+Expired conversation identity and notification tombstones remain durable; old notification
+text is redacted. Before deploying a migration, create the restrictive SQLite backup. The
+script resolves the runtime `DATABASE_URL`, refuses ambiguous/non-SQLite targets, and only
+publishes the mode-`600` copy after both databases pass `integrity_check`:
+
+```sh
+sudo -u telegram-detox /opt/telegram-detox/deploy/backup_sqlite.sh
+```
+
+Validation is entirely mock-backed and must run without a second Telegram client:
 
 ```sh
 .venv/bin/python -m pytest
 .venv/bin/python -m ruff check .
+node --test tests/*.test.mjs
+tools/macos/notifier/test.sh
 git diff --check
 ```
 
-All Telegram sends in tests are mocks. The safety scanner permits only the two
-explicit send calls inside `InboxService.send`; other runtime writes remain banned.
-
-A synthetic local preview requires no Telegram login or credential files:
-
-```sh
-.venv/bin/python -m app.inbox.demo
-# Or: .venv/bin/python -m app.inbox.demo --empty
-```
-
-Stop the preview before opening the production SSH tunnel, since both use port 8787.
-The demo always rejects sending. Its video fixture checks the player layout only.
-
-On the VPS, run health/security/ignored-chat checks as the service user. Check
-`/api/health` for the running client's connection state, and summarize the JSON
-from `/api/conversations` without logging private conversation contents. Do not
-start a diagnostic TelegramClient against the live session.
-
-## Visual reference and checks
-
-The user's Stitch `screen.png`, `DESIGN.md` and `code.html` are the reference.
-The screenshot/prototype takes precedence where the design document differs.
-
-| Decision | Reference | Implementation |
-|---|---|---|
-| Pane sizes | Screenshot / prototype | 240px list, 44px conversation header |
-| Canvas and bubbles | Screenshot | Graphite canvas, slate incoming/own, amber mention |
-| Typography and density | DESIGN.md | System/Inter stack, 13px text, compact rounded bubbles |
-| Composer | Screenshot / user brief | Clip, text, send; selected-image chip above |
-| Empty state | User brief | Two lines of text; no illustration |
-
-Local browser QA at 1280×1024 covered active rows, context, photo enlargement,
-audio playback/progress, video/file layout, attachment preview/removal, retained
-text after a simulated send failure, manual close and the zero-conversation state.
-No real Telegram message was sent during validation.
-
-The active window is defined once by `app.inbox.store.ACTIVE_MINUTES`. Existing
-longer windows are capped at startup. Voice, audio, round video notes, ordinary
-video, photos and files are distinct. Starting playback pauses other media;
-removing or switching conversations stops their playback. Nothing autoplays.
-
-Playback regression checks: `node --test tests/inbox_playback.test.mjs`.
-
-## Native Mac notifications
-
-The optional [Swift notifier](../tools/macos/notifier/README.md) runs independently
-of the browser. Its sidebar switch controls only local Mac banners via a strict
-loopback bridge. Feed and status polling leave pending conversations unopened.
-A banner click supplies an explicit conversation link and starts the existing
-open action. The control reuses the existing muted sidebar palette, border tokens
-and focus styles; no new settings page or global header is introduced.
+On production, verify `/api/health`, `/api/notifications`, `/api/library`, the security
+check, `127.0.0.1:8787` listener, Telegram connection, Serve-without-Funnel status, and
+recent systemd logs. Do not print conversation content or credentials while inspecting
+the service.

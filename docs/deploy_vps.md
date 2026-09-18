@@ -145,6 +145,7 @@ ssh <VPS_HOST>
 cd /opt/telegram-detox
 systemctl stop telegram-detox || true
 runuser -u telegram-detox -- git pull
+runuser -u telegram-detox -- ./deploy/backup_sqlite.sh
 runuser -u telegram-detox -- .venv/bin/python -m pip install -e .
 runuser -u telegram-detox -- .venv/bin/python -m pytest
 runuser -u telegram-detox -- .venv/bin/python -m ruff check .
@@ -160,9 +161,58 @@ journalctl -u telegram-detox -n 120 --no-pager
 `alert_type AS kind` keeps the queue inspection output stable while using the actual
 database column name.
 
+## Private iPhone access with Tailscale Serve
+
+The inbox already contains an authenticated Telegram user session, so it must never be
+published as an unauthenticated public website. Keep aiohttp on `127.0.0.1:8787`; do not
+open that port in the VPS firewall, bind it to `0.0.0.0`, add public nginx, or enable
+Tailscale Funnel.
+
+Install Tailscale from its official Ubuntu packages and sign this VPS into the same tailnet
+as the iPhone. Once `tailscale status` reports `Running`, keep the service running locally
+and configure the private HTTPS proxy:
+
+```bash
+cd /opt/telegram-detox
+sudo ./deploy/configure_tailscale_serve.sh
+```
+
+The script verifies the loopback health endpoint, configures persistent background
+`tailscale serve`, rejects a config with `AllowFunnel`, and prints the exact private
+`https://<node>.<tailnet>.ts.net` origin. Add that exact origin alongside loopback in `.env`
+without a wildcard, for example:
+
+```env
+INBOX_ALLOWED_ORIGINS=http://127.0.0.1:8787,https://telegram-detox.example.ts.net
+```
+
+Restart the service, then verify all of the following on the VPS:
+
+```bash
+systemctl restart telegram-detox.service
+ss -H -ltn 'sport = :8787'
+tailscale serve status
+tailscale serve status --json
+curl --fail http://127.0.0.1:8787/api/health
+```
+
+The only backend listener must remain `127.0.0.1:8787`. The Serve status must show the
+loopback proxy and no `AllowFunnel: true` entry.
+
+On iPhone, install Tailscale, sign into the same tailnet, open the exact HTTPS URL in Safari,
+then use **Share → Add to Home Screen**. The PWA requires no separate Telegram login. The
+Mac notifier bridge remains local to the Mac on port 8788 and is never exposed through
+Tailscale.
+
 ## Backup
 
-Run the local SQLite backup as the service user. Backups stay in ignored `backups/`.
+Run the local SQLite backup as the service user. The script resolves the same
+`DATABASE_URL` as the running application, refuses non-file/non-SQLite URLs, checks both
+the source and copied database with SQLite `integrity_check`, and publishes only a verified
+mode-`600` file inside the mode-`700`, ignored `backups/` directory. The automated
+`tools/deploy_aeza.sh` workflow streams this script from the already verified target SHA
+before pulling, so the first deployment does not fall back to an older hard-coded backup
+path.
 
 ```bash
 sudo -u telegram-detox /opt/telegram-detox/deploy/backup_sqlite.sh

@@ -2,8 +2,15 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Telegram · Упоминания</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111417">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Telegram Detox">
+  <title>Telegram Detox</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/app-icon-180.png">
   <link rel="stylesheet" href="/static/style.css">
   <script type="module" src="/static/app.js"></script>
 </head>
@@ -13,20 +20,25 @@
       <header class="list-header"><strong>Входящие <span id="count" class="count">0</span></strong><span>активные</span></header>
       <nav id="conversations" aria-label="Активные разговоры"></nav>
       <section class="library">
-        <button id="library-toggle" type="button" aria-expanded="false">Библиотека <span>›</span></button>
+        <div class="library-heading">
+          <button id="library-toggle" type="button" aria-expanded="false">Библиотека <span>›</span></button>
+          <button id="library-manage" type="button" aria-label="Настроить библиотеку" title="Настроить библиотеку">⚙</button>
+        </div>
         <nav id="library-list" aria-label="Библиотека" hidden></nav>
       </section>
-      <div class="notifications-control">
+      <div id="notifications-control" class="notifications-control" hidden>
         <button id="notifications-toggle" type="button" aria-expanded="false" aria-controls="notifications-menu" disabled><span id="notifications-label">Уведомления</span><b>—</b></button>
         <div id="notifications-menu" hidden>
-          <button type="button" data-notification-action="enable">Включить</button>
-          <button type="button" data-notification-action="600">На 10 минут</button>
-          <button type="button" data-notification-action="1800">На 30 минут</button>
-          <button type="button" data-notification-action="3600">На 1 час</button>
-          <button type="button" data-notification-action="10800">На 3 часа</button>
-          <button type="button" data-notification-action="21600">На 6 часов</button>
-          <button type="button" data-notification-action="43200">На 12 часов</button>
-          <button type="button" data-notification-action="disable">Выключить</button>
+          <strong>Уведомления</strong>
+          <button type="button" data-notification-action="enable">Включить сейчас</button>
+          <span>Отключить на:</span>
+          <button type="button" data-notification-action="600">10 минут</button>
+          <button type="button" data-notification-action="1800">30 минут</button>
+          <button type="button" data-notification-action="3600">1 час</button>
+          <button type="button" data-notification-action="10800">3 часа</button>
+          <button type="button" data-notification-action="21600">6 часов</button>
+          <button type="button" data-notification-action="43200">12 часов</button>
+          <button type="button" data-notification-action="disable">Выключить полностью</button>
         </div>
         <small id="notifications-status" role="status">Недоступны</small>
       </div>
@@ -34,9 +46,28 @@
     <main>
       <section id="empty" class="empty"><h1 id="empty-title">Нет активных упоминаний</h1><p id="empty-description">Личные сообщения, @fedocc и ответы появятся здесь.</p><div id="open-error" class="error" role="status" hidden></div></section>
       <section id="conversation" hidden>
-        <header class="chat-header"><span id="chat-avatar" class="avatar"></span><h1 id="chat-title"></h1><span id="remaining" class="remaining"></span><button id="close" type="button">Закрыть</button></header>
+        <header class="chat-header">
+          <button id="mobile-back" class="mobile-back" type="button" aria-label="К списку">‹</button>
+          <span id="chat-avatar" class="avatar"></span><h1 id="chat-title"></h1>
+          <button id="search-toggle" class="header-icon" type="button" aria-label="Поиск в этом чате" aria-expanded="false">⌕</button>
+          <span id="remaining" class="remaining"></span><button id="close" type="button">Закрыть</button>
+        </header>
         <div id="load-error" class="error" role="status" hidden></div>
-        <button id="older" type="button" hidden>Загрузить ещё</button>
+        <section id="pinned-panel" class="pinned-panel" hidden>
+          <button id="pinned-toggle" type="button" aria-expanded="true"><span>📌 Закреплено</span><b id="pinned-count"></b></button>
+          <div id="pinned-list"></div>
+        </section>
+        <section id="search-panel" class="search-panel" hidden>
+          <form id="search-form" role="search">
+            <input id="search-input" type="search" minlength="3" maxlength="100" autocomplete="off" placeholder="Поиск в этом чате" aria-label="Поиск в этом чате">
+            <button type="submit">Найти</button>
+            <button id="search-close" type="button" aria-label="Закрыть поиск">×</button>
+          </form>
+          <div id="search-status" role="status"></div>
+          <div id="search-results"></div>
+          <button id="search-more" type="button" hidden>Ещё результаты</button>
+        </section>
+        <button id="older" type="button" hidden>Загрузить предыдущие сообщения</button>
         <div id="messages" tabindex="0" aria-label="Сообщения"></div>
         <div id="drop-zone" hidden>Отпустите файл для отправки</div>
         <footer>
@@ -54,6 +85,15 @@
       </section>
     </main>
   </div>
+  <dialog id="library-dialog" class="library-dialog" aria-labelledby="library-dialog-title">
+    <header>
+      <div><h2 id="library-dialog-title">Библиотека</h2><p>Выберите только нужные источники.</p></div>
+      <button id="library-dialog-close" type="button" aria-label="Закрыть">×</button>
+    </header>
+    <label class="management-search"><span>Поиск чатов</span><input id="dialog-search" type="search" maxlength="100" autocomplete="off" placeholder="Search chats..."></label>
+    <div id="dialog-status" role="status"></div>
+    <div id="dialog-list" class="dialog-list"></div>
+  </dialog>
   <dialog id="photo-dialog"><button id="dismiss-photo" aria-label="Закрыть фотографию">×</button><img id="large-photo" alt="Фотография из разговора"></dialog>
 </body>
 </html>
