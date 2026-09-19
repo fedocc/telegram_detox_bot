@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     digest_enabled: bool = True
     digest_time: str = "07:00"
     digest_model: str = "gemini-3.8-flash"
+    gemini_api_key: str = ""
     raw_retention_days: int = Field(default=14, ge=1)
     digest_retention_days: int = Field(default=90, ge=1)
     birthday_reminders_enabled: bool = False

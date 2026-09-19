@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
+from urllib.error import HTTPError
 
 from app.config import Settings
 from app.db.session import init_db
 from app.inbox.digest import (
     DigestItem,
     DigestPayload,
+    GeminiDigestProvider,
     latest_digest,
     preprocess,
     run_digest,
@@ -91,3 +95,57 @@ def test_digest_defaults():
     assert settings.digest_enabled is True
     assert settings.digest_time == "07:00"
     assert settings.digest_model == "gemini-3.8-flash"
+
+
+def test_direct_gemini_provider_uses_key_schema_and_low_thinking():
+    calls = []
+    response = BytesIO(b'{"candidates":[{"content":{"parts":[{"text":'
+                       b'"{\\"title\\":\\"Morning\\",\\"items\\":[]}"}]}}]}')
+
+    def opener(request, timeout):
+        calls.append((request, timeout))
+        response.seek(0)
+        return response
+
+    settings = Settings(_env_file=None, gemini_api_key="secret-test-value")
+    result = GeminiDigestProvider(settings, opener=opener).generate([{
+        "ref": "m_a", "refs": ["m_a"], "timestamp": "2026-09-19T04:00:00Z",
+        "source": "Course", "text": "Deadline at 18:00",
+    }])
+    assert result.title == "Morning"
+    request, timeout = calls[0]
+    assert timeout == 120 and settings.digest_model in request.full_url
+    assert request.headers["X-goog-api-key"] == "secret-test-value"
+    body = json.loads(request.data)
+    config = body["generationConfig"]
+    assert config["thinkingConfig"] == {"thinkingLevel": "low"}
+    assert config["responseFormat"]["text"]["mimeType"] == "application/json"
+    assert config["responseFormat"]["text"]["schema"]["properties"]["items"]["maxItems"] == 6
+
+
+def test_direct_gemini_provider_fails_closed_without_key():
+    settings = Settings(_env_file=None, gemini_api_key="")
+    try:
+        GeminiDigestProvider(settings).generate([{"ref": "m_a"}])
+    except RuntimeError as exc:
+        assert str(exc) == "Gemini API not configured"
+    else:
+        raise AssertionError("missing key must fail closed")
+
+
+def test_direct_gemini_429_retries_are_bounded():
+    attempts, sleeps = [], []
+
+    def opener(request, timeout):
+        attempts.append((request, timeout))
+        raise HTTPError(request.full_url, 429, "rate limit", {}, None)
+
+    settings = Settings(_env_file=None, gemini_api_key="secret-test-value")
+    provider = GeminiDigestProvider(settings, opener=opener, sleeper=sleeps.append)
+    try:
+        provider.generate([{"ref": "m_a"}])
+    except RuntimeError as exc:
+        assert str(exc) == "Gemini API request failed (HTTP 429)"
+    else:
+        raise AssertionError("429 must fail after bounded retries")
+    assert len(attempts) == 3 and sleeps == [1, 2]

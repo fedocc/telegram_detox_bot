@@ -8,8 +8,9 @@ import re
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
-from openai import OpenAI, RateLimitError
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
@@ -147,11 +148,13 @@ def validate_refs(payload: DigestPayload, allowed: set[str]) -> DigestPayload:
 
 
 class GeminiDigestProvider:
-    def __init__(self, settings, *, sleeper=time.sleep):
+    ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+    def __init__(self, settings, *, sleeper=time.sleep, opener=urlopen):
         self.model = settings.digest_model
-        self.client = OpenAI(api_key=settings.aitunnel_api_key,
-                             base_url=settings.aitunnel_base_url)
+        self.api_key = settings.gemini_api_key
         self.sleeper = sleeper
+        self.opener = opener
 
     def generate(self, context: list[dict], *, candidate_mode: bool = False) -> DigestPayload:
         instruction = FINAL_TASK
@@ -160,39 +163,60 @@ class GeminiDigestProvider:
                 "Return factual candidate items only; preserve every supporting source ref."
             )
         user = json.dumps(context, ensure_ascii=False, separators=(",", ":")) + "\n\n" + instruction
-        examples = []
+        if not self.api_key:
+            raise RuntimeError("Gemini API not configured")
+        contents = []
         for example_input, example_output in FEW_SHOTS:
-            examples.extend([
-                {"role": "user", "content": json.dumps(example_input, ensure_ascii=False)},
-                {"role": "assistant", "content": json.dumps(example_output, ensure_ascii=False)},
+            contents.extend([
+                {"role": "user", "parts": [{"text": json.dumps(
+                    example_input, ensure_ascii=False,
+                )}]},
+                {"role": "model", "parts": [{"text": json.dumps(
+                    example_output, ensure_ascii=False,
+                )}]},
             ])
+        contents.append({"role": "user", "parts": [{"text": user}]})
+        body = json.dumps({
+            "systemInstruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
+            "contents": contents,
+            "generationConfig": {
+                "temperature": 0,
+                "thinkingConfig": {"thinkingLevel": "low"},
+                "responseFormat": {"text": {
+                    "mimeType": "application/json",
+                    "schema": DigestPayload.model_json_schema(),
+                }},
+            },
+        }, ensure_ascii=False).encode()
+        request = Request(  # noqa: S310 - endpoint is a fixed HTTPS Gemini API URL.
+            self.ENDPOINT.format(model=self.model), data=body, method="POST",
+            headers={"Content-Type": "application/json", "x-goog-api-key": self.api_key},
+        )
         last_error = None
         for attempt in range(3):
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_INSTRUCTION},
-                        *examples,
-                        {"role": "user", "content": user},
-                    ],
-                    response_format={"type": "json_schema", "json_schema": {
-                        "name": "morning_digest", "strict": True,
-                        "schema": DigestPayload.model_json_schema(),
-                    }},
-                    temperature=0,
-                    extra_body={"thinking_level": "low"},
-                )
-                return DigestPayload.model_validate_json(response.choices[0].message.content)
-            except RateLimitError as exc:
+                with self.opener(request, timeout=120) as response:
+                    envelope = json.load(response)
+                parts = envelope["candidates"][0]["content"]["parts"]
+                text = "".join(part.get("text", "") for part in parts)
+                return DigestPayload.model_validate_json(text)
+            except HTTPError as exc:
+                last_error = exc
+                if exc.code in {429, 500, 502, 503, 504} and attempt < 2:
+                    self.sleeper(2 ** attempt)
+                    continue
+                raise RuntimeError(f"Gemini API request failed (HTTP {exc.code})") from None
+            except (URLError, TimeoutError) as exc:
                 last_error = exc
                 if attempt < 2:
                     self.sleeper(2 ** attempt)
-            except Exception as exc:
+                    continue
+                raise RuntimeError("Gemini API request failed (network)") from None
+            except (KeyError, IndexError, json.JSONDecodeError, ValueError) as exc:
                 raise RuntimeError(
                     f"Morning digest generation failed ({type(exc).__name__})"
                 ) from None
-        raise RuntimeError("Morning digest rate limit") from last_error
+        raise RuntimeError("Gemini API retry limit reached") from last_error
 
 
 def generate_payload(provider: Provider, context: list[dict]) -> DigestPayload:
