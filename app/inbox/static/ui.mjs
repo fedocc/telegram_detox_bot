@@ -69,6 +69,11 @@ export function incrementalGrouping(messages, insertedIds) {
   return updates;
 }
 
+export function nextAuxiliaryPanel(current, requested) {
+  if (!['library', 'notifications'].includes(requested)) return 'none';
+  return current === requested ? 'none' : requested;
+}
+
 export function retainFocusedMessage(messages, focusedId, focusedMessage) {
   const page = Array.isArray(messages) ? messages : [];
   const id = Number(focusedId);

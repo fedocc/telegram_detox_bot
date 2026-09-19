@@ -772,6 +772,41 @@ async def test_native_telethon_media_classification(service, kind):
         assert message.video and message.video_note  # Telethon overlaps these properties.
 
 
+@pytest.mark.parametrize(("mime", "attributes", "sticker_format"), [
+    ("image/webp", [], "static"),
+    ("application/x-tgsticker", ["animated"], "animated"),
+    ("video/webm", ["video"], "video"),
+    ("application/octet-stream", [], "unsupported"),
+])
+async def test_stickers_with_empty_text_are_preserved_by_document_attributes(
+        service, mime, attributes, sticker_format):
+    from telethon.tl import types
+
+    row = activate(service)
+    document_attributes = [
+        types.DocumentAttributeSticker("🙂", types.InputStickerSetEmpty()),
+        types.DocumentAttributeImageSize(512, 512),
+    ]
+    if "animated" in attributes:
+        document_attributes.append(types.DocumentAttributeAnimated())
+    if "video" in attributes:
+        document_attributes.append(types.DocumentAttributeVideo(2, 512, 512))
+    media = types.MessageMediaDocument(document=types.Document(
+        id=1, access_hash=0, file_reference=b'', date=datetime.now(UTC),
+        mime_type=mime, size=100, dc_id=1, attributes=document_attributes,
+    ))
+    message = types.Message(
+        id=100, peer_id=types.PeerUser(2), from_id=types.PeerUser(2),
+        date=datetime.now(UTC), message='', media=media,
+    )
+
+    result = await service.serialize(message, row, {})
+
+    assert result["text"] == ""
+    assert result["media"]["kind"] == "sticker"
+    assert result["media"]["sticker_format"] == sticker_format
+
+
 async def test_service_add_user_uses_batch_resolved_names(service):
     from telethon.tl import types
 

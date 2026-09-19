@@ -12,6 +12,7 @@ import {
   mergeMessagePages,
   newPageMessages,
   moveSelectedSource,
+  nextAuxiliaryPanel,
   normalizedSearchQuery,
   openedConversationIds,
   parseDeepLink,
@@ -55,6 +56,27 @@ test('empty messages are omitted while service rows remain renderable', () => {
   ]).map(message=>message.id),[2,3]);
 });
 
+test('captionless stickers and supported media are renderable while empty rows are not', () => {
+  const media = kind => ({kind, url:`/${kind}`});
+  assert.deepEqual(renderableMessages([
+    {id:1,text:'',media:media('sticker'),system:null},
+    {id:2,text:'',media:media('photo'),system:null},
+    {id:3,text:'',media:media('video'),system:null},
+    {id:4,text:'',media:media('voice'),system:null},
+    {id:5,text:'',media:media('file'),system:null},
+    {id:6,text:'',media:null,system:null},
+  ]).map(message=>message.id),[1,2,3,4,5]);
+});
+
+test('Library and Notifications share one mutually exclusive panel state', () => {
+  assert.equal(nextAuxiliaryPanel('none','library'),'library');
+  assert.equal(nextAuxiliaryPanel('library','notifications'),'notifications');
+  assert.equal(nextAuxiliaryPanel('notifications','library'),'library');
+  assert.equal(nextAuxiliaryPanel('library','library'),'none');
+  assert.equal(nextAuxiliaryPanel('notifications','notifications'),'none');
+  assert.equal(nextAuxiliaryPanel('library','unknown'),'none');
+});
+
 test('prepend planner returns only unique nodes absent from existing history', () => {
   const existing=new Set(['51','52']);
   const page=[{id:50,text:'old'},{id:49,text:'older'},{id:50,text:'duplicate'},
@@ -73,6 +95,21 @@ test('prepend insertion keeps existing node objects and inserts only missing nod
   assert.deepEqual(calls,[['new-b','old-b'],['new-a','old-a']]);
   assert.equal(entries.get('2').node,oldA);
   assert.equal(entries.get('4').node,oldB);
+});
+
+test('sticker pagination deduplicates and keeps existing message nodes', () => {
+  const oldSticker={node:{id:'old-sticker'}};
+  const entries=new Map([
+    ['10',{node:{id:'new-sticker'}}],['11',oldSticker],
+  ]), calls=[];
+  insertNewNodesInOrder({insertBefore:(item,next)=>calls.push([item.id,next?.id || null])},
+    ['10','11'],entries,new Set(['10']));
+  assert.deepEqual(calls,[['new-sticker','old-sticker']]);
+  assert.equal(entries.get('11'),oldSticker);
+  const sticker={id:11,text:'',media:{kind:'sticker',sticker_format:'static'}};
+  const signatures=new Map([['11',JSON.stringify(sticker)]]);
+  assert.equal(messagesChanged(signatures,[sticker]),false);
+  assert.deepEqual(newPageMessages(new Set(['11']),[sticker,sticker]),[]);
 });
 
 test('scroll restoration keeps the visual anchor offset exactly', () => {

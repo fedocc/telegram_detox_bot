@@ -1,3 +1,8 @@
+export function notificationMode({enabled = false, mute_until = null} = {}) {
+  if (!enabled) return 'disable';
+  return Number.isFinite(mute_until) ? 'pause' : 'enable';
+}
+
 export function createNotificationToggle({request, render}) {
   const durations = new Set([600, 1800, 3600, 10800, 21600, 43200]);
   let status={enabled:false,effective_enabled:false,mute_until:null,permission:'unknown'};

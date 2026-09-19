@@ -28,6 +28,10 @@ test('PWA PNG icons have the declared dimensions and stay compact', async () => 
 
 test('service worker explicitly bypasses every API request', async () => {
   const worker = await readFile(new URL('sw.js', root), 'utf8');
+  assert.match(worker, /telegram-detox-shell-v5/);
+  for (const asset of ['style.css', 'app.js', 'ui.mjs', 'notifications.mjs']) {
+    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=5`));
+  }
   assert.match(worker, /url\.pathname\.startsWith\('\/api\/'\)/);
   assert.doesNotMatch(worker, /SHELL[^;]*\/api\//s);
   assert.match(worker, /SHELL\.has\(url\.pathname\)/);
@@ -43,6 +47,8 @@ test('mobile shell declares safe-area and removes the legacy minimum width', asy
   ]);
   assert.match(page, /viewport-fit=cover/);
   assert.match(page, /manifest\.webmanifest/);
+  assert.match(page, /style\.css\?v=5/);
+  assert.match(page, /app\.js\?v=5/);
   assert.match(page, /rel="apple-touch-icon" sizes="180x180" href="\/static\/app-icon-180\.png"/);
   assert.match(style, /@media \(max-width:768px\)/);
   assert.match(style, /safe-area-inset-bottom/);
@@ -94,4 +100,36 @@ test('service messages use a separate control-free system row', async () => {
   assert.match(app, /if \(message\.system\)/);
   assert.match(app, /node\('div', 'system-message', message\.system\)/);
   assert.match(style, /\.system-message \{/);
+});
+
+test('notification UI exposes only compact ON PAUSE OFF primary controls', async () => {
+  const [page, app] = await Promise.all([
+    readFile(new URL('index.html', root), 'utf8'),
+    readFile(new URL('app.js', root), 'utf8'),
+  ]);
+  const primary = [...page.matchAll(/data-notification-action="([^"]+)"[^>]*>([^<]+)</g)]
+    .map(match => [match[1], match[2]]);
+  assert.deepEqual(primary,[['enable','ON'],['disable','OFF']]);
+  assert.match(page, /id="notifications-pause"[\s\S]*?>PAUSE<\/button>/);
+  assert.match(page, /data-notification-duration="600">10м/);
+  assert.match(page, /data-notification-duration="43200">12ч/);
+  assert.doesNotMatch(page, /Включить сейчас|Выключить полностью|● Включены/);
+  assert.match(app, /notificationMode\(\{enabled, mute_until\}\)/);
+  assert.match(app, /nextAuxiliaryPanel\(auxiliaryPanel, panel\)/);
+});
+
+test('stickers render as media or an explicit fallback outside ordinary bubbles', async () => {
+  const [app, style] = await Promise.all([
+    readFile(new URL('app.js', root), 'utf8'),
+    readFile(new URL('style.css', root), 'utf8'),
+  ]);
+  assert.match(app, /media\.sticker_format === 'static'/);
+  assert.match(app, /media\.sticker_format === 'video'/);
+  assert.match(app, /Не удалось загрузить стикер/);
+  assert.match(app, /'\[Стикер\]'/);
+  assert.match(app, /video\.muted = true/);
+  assert.match(app, /video\.loop = true/);
+  assert.match(app, /stickerObserver\?\.observe\(video\)/);
+  assert.match(style, /\.sticker-bubble \{/);
+  assert.match(style, /\.sticker-media \{/);
 });

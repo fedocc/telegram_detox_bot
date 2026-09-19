@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createNotificationToggle, linkedConversation} from '../app/inbox/static/notifications.mjs';
+import {
+  createNotificationToggle, linkedConversation, notificationMode,
+} from '../app/inbox/static/notifications.mjs';
 
 function fixture() {
   const renders = [], calls = [];
@@ -30,6 +32,12 @@ test('status then permanent OFF then ON uses only bridge state', async () => {
   await f.toggle.toggle(); assert.equal(f.renders.at(-1).effective_enabled, true);
   assert.deepEqual(f.calls.map(x => x[0]), ['/status', '/disable', '/enable']);
   assert.deepEqual(f.calls.slice(1).map(x => x[2]), [{}, {}]);
+});
+
+test('notification modes map exactly to ON, PAUSE and permanent OFF semantics', () => {
+  assert.equal(notificationMode({enabled:true, effective_enabled:true, mute_until:null}), 'enable');
+  assert.equal(notificationMode({enabled:true, effective_enabled:false, mute_until:2000}), 'pause');
+  assert.equal(notificationMode({enabled:false, effective_enabled:false, mute_until:null}), 'disable');
 });
 
 test('all snooze durations use an exact numeric JSON body and Enable Now clears pause', async () => {

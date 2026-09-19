@@ -11,8 +11,8 @@
   <title>Telegram Detox</title>
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="apple-touch-icon" sizes="180x180" href="/static/app-icon-180.png">
-  <link rel="stylesheet" href="/static/style.css">
-  <script type="module" src="/static/app.js"></script>
+  <link rel="stylesheet" href="/static/style.css?v=5">
+  <script type="module" src="/static/app.js?v=5"></script>
 </head>
 <body>
   <div class="shell">
@@ -37,20 +37,23 @@
         </section>
       </nav>
       <div id="notifications-control" class="notifications-control" hidden>
-        <button id="notifications-toggle" type="button" aria-expanded="false" aria-controls="notifications-menu" disabled><span id="notifications-label">Уведомления</span><b>—</b></button>
-        <div id="notifications-menu" hidden>
-          <strong>Уведомления</strong>
-          <button type="button" data-notification-action="enable">Включить сейчас</button>
-          <span>Отключить на:</span>
-          <button type="button" data-notification-action="600">10 минут</button>
-          <button type="button" data-notification-action="1800">30 минут</button>
-          <button type="button" data-notification-action="3600">1 час</button>
-          <button type="button" data-notification-action="10800">3 часа</button>
-          <button type="button" data-notification-action="21600">6 часов</button>
-          <button type="button" data-notification-action="43200">12 часов</button>
-          <button type="button" data-notification-action="disable">Выключить полностью</button>
+        <div class="notifications-heading">
+          <span>Уведомления</span><small id="notifications-status" role="status"></small>
         </div>
-        <small id="notifications-status" role="status">Недоступны</small>
+        <div class="notification-segments" role="group" aria-label="Режим уведомлений">
+          <button type="button" data-notification-action="enable" aria-pressed="false">ON</button>
+          <button id="notifications-pause" type="button" aria-pressed="false"
+                  aria-expanded="false" aria-controls="notifications-menu">PAUSE</button>
+          <button type="button" data-notification-action="disable" aria-pressed="false">OFF</button>
+        </div>
+        <div id="notifications-menu" role="menu" aria-label="Пауза уведомлений" hidden>
+          <button type="button" role="menuitem" data-notification-duration="600">10м</button>
+          <button type="button" role="menuitem" data-notification-duration="1800">30м</button>
+          <button type="button" role="menuitem" data-notification-duration="3600">1ч</button>
+          <button type="button" role="menuitem" data-notification-duration="10800">3ч</button>
+          <button type="button" role="menuitem" data-notification-duration="21600">6ч</button>
+          <button type="button" role="menuitem" data-notification-duration="43200">12ч</button>
+        </div>
       </div>
     </aside>
     <main>

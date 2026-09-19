@@ -255,6 +255,41 @@ main {
   text-align:center;
   overflow-wrap:anywhere;
   flex:none}
+.bubble.sticker-bubble {
+  min-width:0;
+  max-width:220px;
+  padding:3px;
+  border-color:transparent;
+  background:transparent}
+.bubble.sticker-bubble.own {
+  background:transparent}
+.sticker-wrap {
+  width:min(200px,46vw);
+  min-height:72px;
+  display:flex;
+  align-items:center;
+  justify-content:center}
+.sticker-media {
+  display:block;
+  width:100%;
+  max-height:200px;
+  aspect-ratio:1 / 1;
+  object-fit:contain;
+  contain-intrinsic-size:200px 200px}
+.sticker-fallback {
+  display:flex;
+  align-items:center;
+  gap:9px;
+  min-height:34px;
+  padding:6px 9px;
+  border:1px solid #44474b66;
+  border-radius:9px;
+  background:var(--incoming);
+  color:var(--muted);
+  font-size:11px}
+.sticker-fallback a {
+  padding-left:9px;
+  border-left:1px solid #44474b66}
 .bubble {
   position:relative;
   max-width:76%;
@@ -576,16 +611,16 @@ dialog img {
 .sidebar-item .chat-row { width:100%; padding-right:30px }
 .sidebar-close { position:absolute; right:4px; top:10px; font-size:18px; color:var(--muted) }
 
-.notifications-control { margin-top:auto; padding:12px; border-top:1px solid var(--border); display:flex; align-items:center; flex-wrap:wrap; gap:8px; color:var(--muted) }
-#notifications-toggle { margin-left:auto; min-width:42px; padding:4px 8px; border:1px solid var(--border); border-radius:12px; font-size:11px }
-#notifications-toggle[aria-checked="true"] { background:var(--border); color:var(--text) }
-#notifications-status { width:100%; font-size:10px }
+.notifications-control { position:relative; margin-top:auto; padding:10px 12px 12px; border-top:1px solid #44474b66; color:var(--muted) }
+.notifications-heading { display:flex; align-items:center; justify-content:space-between; min-height:20px; margin-bottom:6px; font-size:10px }
+#notifications-status { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:right }
 #notifications-status:empty { display:none }
-
-#notifications-menu { width:100%; padding:7px; border:1px solid var(--border); border-radius:8px; background:var(--canvas); box-shadow:0 8px 24px #0008 }
-#notifications-menu strong,#notifications-menu span { display:block; padding:4px 6px; font-size:11px }
-#notifications-menu span { color:var(--muted) }
-#notifications-menu button { display:block; width:100%; text-align:left; padding:7px 8px; border-radius:5px }
+.notification-segments { display:grid; grid-template-columns:1fr 1.35fr 1fr; padding:2px; border:1px solid #44474b80; border-radius:9px; background:#111417 }
+.notification-segments button { min-width:0; min-height:27px; padding:3px 5px; border-radius:6px; color:var(--muted); font-size:10px; font-weight:650; letter-spacing:.035em }
+.notification-segments button[aria-pressed="true"] { background:#353b42; color:var(--text); box-shadow:inset 0 1px #ffffff12 }
+#notifications-menu { position:absolute; z-index:12; left:12px; right:12px; bottom:54px; display:grid; grid-template-columns:repeat(3,1fr); gap:3px; padding:5px; border:1px solid #44474b99; border-radius:9px; background:#171a1e; box-shadow:0 10px 30px #0009 }
+#notifications-menu button { min-height:30px; border-radius:6px; color:var(--muted); font-size:11px }
+#notifications-menu button:hover,#notifications-menu button:focus-visible { color:var(--text); background:#ffffff0c }
 #mobile-dock { display:none }
 
 .pinned-panel { flex:none; border-bottom:1px solid #44474b66; background:#181b1e }
@@ -642,6 +677,8 @@ dialog img {
   #library-list { max-height:38vh }
   body.library-open #library-list { display:block!important; max-height:none; flex:1 }
   .notifications-control { display:none!important }
+  body.notifier-client.notifications-open .notifications-control { position:fixed; z-index:10; display:block!important; right:max(14px,env(safe-area-inset-right)); bottom:calc(72px + env(safe-area-inset-bottom)); width:min(290px,calc(100vw - 28px)); margin:0; padding:11px; border:1px solid #ffffff20; border-radius:15px; background:#20252bf5; box-shadow:0 18px 50px #000a }
+  body.notifier-client.notifications-open #notifications-menu { position:static; margin-top:7px }
   #mobile-dock { position:fixed; z-index:9; display:flex; align-items:center; justify-content:center; gap:10px; left:0; right:0; bottom:0; overflow:visible; padding:10px max(14px,env(safe-area-inset-right)) max(10px,env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left)); pointer-events:none }
   #mobile-dock>button { pointer-events:auto; min-height:48px; border:1px solid #ffffff20; background:#252a30f2; box-shadow:inset 0 1px #ffffff12,0 9px 30px #0007; color:var(--text) }
   #mobile-library { min-width:154px; padding:0 21px; border-radius:24px; font-weight:600 }
@@ -666,6 +703,9 @@ dialog img {
   #messages { padding:10px max(10px,env(safe-area-inset-right)) 18px max(10px,env(safe-area-inset-left)); -webkit-overflow-scrolling:touch }
   #older { min-height:44px; font-size:12px }
   .bubble { max-width:88%; min-width:80px }
+  .sticker-bubble { min-width:0; max-width:190px }
+  .sticker-wrap { width:min(176px,48vw) }
+  .sticker-media { max-height:176px; contain-intrinsic-size:176px 176px }
   .reply-action { opacity:1; right:-34px; min-width:34px; min-height:34px }
   .file { min-width:0; max-width:100% }
   .voice,.media-audio { width:min(245px,72vw) }

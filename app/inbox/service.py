@@ -956,7 +956,19 @@ class InboxService:
                                        reply_text, getattr(parent, "entities", None))}
         if file:
             kind = "file"
-            if message.photo:
+            sticker_format = None
+            if getattr(message, "sticker", None):
+                mime_type = (file.mime_type or "").lower()
+                kind = "sticker"
+                if mime_type.startswith("image/"):
+                    sticker_format = "static"
+                elif mime_type == "video/webm":
+                    sticker_format = "video"
+                elif mime_type == "application/x-tgsticker":
+                    sticker_format = "animated"
+                else:
+                    sticker_format = "unsupported"
+            elif message.photo:
                 kind = "photo"
             elif message.voice:
                 kind = "voice"
@@ -970,11 +982,13 @@ class InboxService:
             result["media"] = {
                 "kind": kind, "name": file.name or {"photo": "Фото", "voice": "Голосовое",
                     "audio": "Аудиофайл", "video_note": "Видеосообщение",
-                    "video": "Видео"}.get(kind, "Файл"),
+                    "video": "Видео", "sticker": "Стикер"}.get(kind, "Файл"),
                 "size": file.size or 0, "duration": file.duration or 0,
                 "url": f"/api/conversations/{row.id}/media/{message.id}",
                 "available": bool(file.size and file.size <= MAX_MEDIA),
             }
+            if sticker_format is not None:
+                result["media"]["sticker_format"] = sticker_format
         return result
 
     async def history(self, key):

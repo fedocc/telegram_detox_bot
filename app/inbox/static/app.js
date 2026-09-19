@@ -1,15 +1,15 @@
 'use strict';
 
-import {createPlaybackController} from './playback.mjs';
-import {createNotificationToggle} from './notifications.mjs';
-import {createPushController} from './push.mjs';
+import {createPlaybackController} from './playback.mjs?v=5';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=5';
+import {createPushController} from './push.mjs?v=5';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
-  messagesChanged, moveSelectedSource, newPageMessages, normalizedSearchQuery, parseDeepLink, renderableMessages,
-  restoreScrollAnchor,
+  messagesChanged, moveSelectedSource, newPageMessages, nextAuxiliaryPanel,
+  normalizedSearchQuery, parseDeepLink, renderableMessages, restoreScrollAnchor,
   openedConversationIds, preferencePayload, retainFocusedMessage, scopePath, uploadWithinLimit,
-} from './ui.mjs';
+} from './ui.mjs?v=5';
 
 const playback = createPlaybackController(document);
 const $ = id => document.getElementById(id);
@@ -31,12 +31,25 @@ let searchState = {query: '', results: [], next: null, loading: false};
 let managementDialogs = [], focusedMessageId = null;
 let libraryManagementEnabled = false;
 let pushController = null;
+let auxiliaryPanel = 'none';
 const drafts = new Map();
 
 window.addEventListener('pagehide', () => playback.stopAll());
+const stickerObserver = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
+  for (const entry of entries) {
+    if (entry.isIntersecting) entry.target.play().catch(() => {});
+    else entry.target.pause();
+  }
+}, {root: $('messages'), rootMargin: '120px'}) : null;
 new MutationObserver(records => {
   for (const record of records) for (const removed of record.removedNodes) {
-    if (removed.nodeType === 1 && !removed.isConnected) playback.pauseWithin(removed);
+    if (removed.nodeType === 1 && !removed.isConnected) {
+      playback.pauseWithin(removed);
+      if (removed.matches?.('.sticker-video')) stickerObserver?.unobserve(removed);
+      for (const video of removed.querySelectorAll?.('.sticker-video') || []) {
+        stickerObserver?.unobserve(video);
+      }
+    }
   }
 }).observe(document.body, {childList: true, subtree: true});
 
@@ -286,7 +299,7 @@ async function chooseLibrary(key, {updateHistory = true, messageId = null} = {})
     if (request !== choosing) return;
     if (opened.source) library = library.map(row => row.id === key ? {...row, ...opened.source} : row);
     const changed = prepareSelection('library', key);
-    document.body.classList.remove('library-open');
+    auxiliaryPanel = 'none'; syncAuxiliaryPanels();
     if (messageId === null) focusedMessageId = null;
     if (updateHistory) updateLocation(null);
     await Promise.all([loadLibrary(key, null, !changed), loadPins('library', key)]);
@@ -414,6 +427,32 @@ function videoNote(media) {
 
 function attachment(media) {
   const wrap = node('div');
+  if (media.kind === 'sticker') {
+    wrap.className = 'sticker-wrap';
+    const fallback = failed => {
+      const item = node('div', 'sticker-fallback', failed ? 'Не удалось загрузить стикер' : '[Стикер]');
+      if (media.available) {
+        const download = node('a', '', failed ? 'Повторить' : 'Скачать');
+        download.href = media.url; download.download = media.name; item.append(download);
+      }
+      return item;
+    };
+    if (!media.available) { wrap.append(fallback(true)); return wrap; }
+    if (media.sticker_format === 'static') {
+      const image = node('img', 'sticker-media');
+      image.src = media.url; image.alt = 'Стикер'; image.loading = 'lazy'; image.decoding = 'async';
+      image.onerror = () => image.replaceWith(fallback(true)); wrap.append(image);
+    } else if (media.sticker_format === 'video') {
+      const video = node('video', 'sticker-media sticker-video');
+      video.src = media.url; video.muted = true; video.defaultMuted = true;
+      video.loop = true; video.playsInline = true; video.preload = 'metadata';
+      video.setAttribute('aria-label', 'Стикер');
+      video.onerror = () => video.replaceWith(fallback(true));
+      wrap.append(video); stickerObserver?.observe(video);
+      if (!stickerObserver) { video.autoplay = true; video.play().catch(() => {}); }
+    } else wrap.append(fallback(false));
+    return wrap;
+  }
   if (!media.available) {
     wrap.append(node('div', 'media-note', `${media.name} · ${sizeLabel(media.size)} · превышает лимит загрузки 64 МБ`));
     return wrap;
@@ -454,7 +493,8 @@ function messageNode(message) {
     system.title = new Date(message.timestamp).toLocaleString('ru-RU');
     return system;
   }
-  const bubble = node('article', `bubble${message.own ? ' own' : ''}${message.mention ? ' mention' : ''}`);
+  const stickerOnly = message.media?.kind === 'sticker' && !message.text;
+  const bubble = node('article', `bubble${message.own ? ' own' : ''}${message.mention ? ' mention' : ''}${stickerOnly ? ' sticker-bubble' : ''}`);
   bubble.dataset.id = message.id;
   if (selectedMode === 'inbox' && !message.own) {
     const reply = node('button', 'reply-action', '↩');
@@ -1021,24 +1061,28 @@ $('composer').onsubmit = async event => {
 $('close').onclick = () => closeConversation(selected);
 $('mobile-back').onclick = () => deselect();
 $('reply-target').querySelector('button').onclick = () => { const value = draft(); value.reply = null; renderComposer(); };
-$('library-toggle').onclick = () => {
-  if (matchMedia('(max-width: 768px)').matches && document.body.classList.contains('library-open')) {
-    document.body.classList.remove('library-open');
-    $('mobile-library').setAttribute('aria-expanded', 'false');
-    $('library-toggle').setAttribute('aria-expanded', 'false');
-    $('library-list').hidden = true;
-    return;
-  }
-  const open = $('library-toggle').getAttribute('aria-expanded') !== 'true';
-  $('library-toggle').setAttribute('aria-expanded', String(open)); $('library-list').hidden = !open;
-};
-$('mobile-library').onclick = () => {
-  const open = !document.body.classList.contains('library-open');
-  document.body.classList.toggle('library-open', open);
-  $('mobile-library').setAttribute('aria-expanded', String(open));
-  $('library-toggle').setAttribute('aria-expanded', String(open));
-  $('library-list').hidden = !open;
-};
+let pauseMenuOpen = false;
+function syncAuxiliaryPanels() {
+  const libraryOpen = auxiliaryPanel === 'library';
+  const notificationsOpen = auxiliaryPanel === 'notifications';
+  document.body.classList.toggle('library-open', libraryOpen);
+  document.body.classList.toggle('notifications-open', notificationsOpen);
+  $('library-toggle').setAttribute('aria-expanded', String(libraryOpen));
+  $('mobile-library').setAttribute('aria-expanded', String(libraryOpen));
+  $('library-list').hidden = !libraryOpen;
+  $('mobile-push').setAttribute('aria-expanded', String(notificationsOpen));
+  $('push-panel').hidden = !(notificationsOpen
+    && !document.body.classList.contains('notifier-client'));
+  $('notifications-menu').hidden = !pauseMenuOpen;
+  $('notifications-pause').setAttribute('aria-expanded', String(pauseMenuOpen));
+}
+function toggleAuxiliaryPanel(panel) {
+  auxiliaryPanel = nextAuxiliaryPanel(auxiliaryPanel, panel);
+  if (auxiliaryPanel !== 'notifications') pauseMenuOpen = false;
+  syncAuxiliaryPanels();
+}
+$('library-toggle').onclick = () => toggleAuxiliaryPanel('library');
+$('mobile-library').onclick = () => toggleAuxiliaryPanel('library');
 $('library-manage').onclick = openLibraryManagement;
 $('library-dialog-close').onclick = () => $('library-dialog').close();
 $('library-dialog').addEventListener('click', event => {
@@ -1105,15 +1149,15 @@ const notificationToggle = createNotificationToggle({
     return response.json();
   },
   render({enabled, effective_enabled, mute_until, available, busy, error, permission}) {
-    const button = $('notifications-toggle');
-    button.disabled = !available || busy;
-    button.querySelector('b').textContent = available
-      ? (effective_enabled ? 'ON' : enabled ? 'Пауза' : 'OFF') : '—';
-    const until = mute_until
-      ? new Date(mute_until * 1000).toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'}) : '';
+    const state = notificationMode({enabled, mute_until});
+    for (const button of $('notifications-control').querySelectorAll('.notification-segments button')) {
+      const selectedState = button.id === 'notifications-pause'
+        ? 'pause' : button.dataset.notificationAction;
+      button.disabled = !available || busy;
+      button.setAttribute('aria-pressed', String(available && selectedState === state));
+    }
     $('notifications-status').textContent = error || (!available ? 'Недоступны на этом Mac'
-      : permission === 'denied' && enabled ? 'Разрешите в macOS'
-        : until ? `Выключены до ${until}` : effective_enabled ? '● Включены' : 'Выключены полностью');
+      : permission === 'denied' && enabled ? 'Разрешите в macOS' : '');
   },
 });
 
@@ -1123,16 +1167,23 @@ const notifierClient = isMacNotifierClient({
   maxTouchPoints: navigator.maxTouchPoints,
 });
 if (notifierClient) {
+  document.body.classList.add('notifier-client');
   $('notifications-control').hidden = false;
-  $('notifications-toggle').onclick = () => {
-    const menu = $('notifications-menu'), open = menu.hidden;
-    menu.hidden = !open; $('notifications-toggle').setAttribute('aria-expanded', String(open));
+  $('notifications-pause').onclick = () => {
+    const open = auxiliaryPanel !== 'notifications' || !pauseMenuOpen;
+    auxiliaryPanel = open ? 'notifications' : 'none'; pauseMenuOpen = open;
+    syncAuxiliaryPanels();
   };
   for (const button of document.querySelectorAll('[data-notification-action]')) {
     button.onclick = async () => {
+      auxiliaryPanel = 'none'; pauseMenuOpen = false; syncAuxiliaryPanels();
       await notificationToggle.action(button.dataset.notificationAction);
-      $('notifications-menu').hidden = true;
-      $('notifications-toggle').setAttribute('aria-expanded', 'false');
+    };
+  }
+  for (const button of document.querySelectorAll('[data-notification-duration]')) {
+    button.onclick = async () => {
+      await notificationToggle.action(button.dataset.notificationDuration);
+      auxiliaryPanel = 'none'; pauseMenuOpen = false; syncAuxiliaryPanels();
     };
   }
   notificationToggle.refresh(); setInterval(notificationToggle.refresh, 15000);
@@ -1165,11 +1216,9 @@ if ('serviceWorker' in navigator) {
   });
 }
 
-$('mobile-push').onclick = () => {
-  const panel = $('push-panel'), open = panel.hidden;
-  panel.hidden = !open; $('mobile-push').setAttribute('aria-expanded', String(open));
-};
+$('mobile-push').onclick = () => toggleAuxiliaryPanel('notifications');
 $('push-enable').onclick = () => pushController?.enable();
 $('push-disable').onclick = () => pushController?.disable();
 
+syncAuxiliaryPanels();
 poll();
