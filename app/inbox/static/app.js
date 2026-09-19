@@ -4,8 +4,10 @@ import {createPlaybackController} from './playback.mjs';
 import {createNotificationToggle} from './notifications.mjs';
 import {createPushController} from './push.mjs';
 import {
-  advanceOlderCursor, deepLinkFor, isMacNotifierClient, isTerminalConversationStatus,
-  isWritable, mergeMessagePages, messagesChanged, moveSelectedSource, normalizedSearchQuery, parseDeepLink,
+  advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
+  isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
+  messagesChanged, moveSelectedSource, newPageMessages, normalizedSearchQuery, parseDeepLink, renderableMessages,
+  restoreScrollAnchor,
   openedConversationIds, preferencePayload, retainFocusedMessage, scopePath, uploadWithinLimit,
 } from './ui.mjs';
 
@@ -446,6 +448,12 @@ function attachment(media) {
 }
 
 function messageNode(message) {
+  if (message.system) {
+    const system = node('div', 'system-message', message.system);
+    system.dataset.id = message.id;
+    system.title = new Date(message.timestamp).toLocaleString('ru-RU');
+    return system;
+  }
   const bubble = node('article', `bubble${message.own ? ' own' : ''}${message.mention ? ' mention' : ''}`);
   bubble.dataset.id = message.id;
   if (selectedMode === 'inbox' && !message.own) {
@@ -482,14 +490,81 @@ function messageNode(message) {
   return bubble;
 }
 
+function messageDate(message) {
+  const parsed = new Date(message.timestamp);
+  if (Number.isNaN(parsed.valueOf())) return {key: 'unknown', label: ''};
+  return {
+    key: parsed.toISOString().slice(0, 10),
+    label: parsed.toLocaleDateString('ru-RU', {day: 'numeric', month: 'long', year: 'numeric'}),
+  };
+}
+
+function dateSeparator(key, label) {
+  const separator = node('div', 'date', label);
+  separator.dataset.anchor = `day:${key}`;
+  return separator;
+}
+
 function visibleAnchor(list) {
   const bounds = list.getBoundingClientRect();
-  const hit = document.elementFromPoint(
-    Math.min(bounds.right - 1, bounds.left + 24), Math.min(bounds.bottom - 1, bounds.top + 1),
-  );
-  const element = hit?.closest?.('[data-id]');
-  if (!element || !list.contains(element)) return null;
-  return {id: element.dataset.id, top: element.getBoundingClientRect().top};
+  const xs = [bounds.left + bounds.width / 2, bounds.left + bounds.width / 4,
+    bounds.right - bounds.width / 4];
+  const ys = [bounds.top + 1, bounds.top + 10, bounds.top + 24];
+  for (const y of ys) for (const x of xs) {
+    const hit = document.elementFromPoint(x, Math.min(bounds.bottom - 1, y));
+    const element = hit?.closest?.('[data-id],[data-anchor]');
+    if (element && list.contains(element)) {
+      return {id: element.dataset.id || element.dataset.anchor,
+        top: element.getBoundingClientRect().top};
+    }
+  }
+  return null;
+}
+
+function incrementalMessagePage(messages, key, {preserveAnchor = false} = {}) {
+  if (shownKey !== key) return false;
+  const existingIds = new Set([...messageNodes.entries()]
+    .filter(([, value]) => value.message).map(([id]) => id));
+  const additions = newPageMessages(existingIds, messages);
+  if (!additions.length) return false;
+  const list = $('messages');
+  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 70;
+  const anchor = preserveAnchor ? visibleAnchor(list) : null, oldHeight = list.scrollHeight;
+  const current = [...messageNodes.values()].filter(value => value.message)
+    .map(value => value.message);
+  const combined = mergeMessagePages(additions, current);
+  const desired = [], inserted = new Set();
+  let day = '';
+  for (const message of combined) {
+    const date = messageDate(message);
+    if (date.key !== day) {
+      const separatorKey = `day:${date.key}`;
+      desired.push(separatorKey);
+      if (!messageNodes.has(separatorKey)) {
+        messageNodes.set(separatorKey, {node: dateSeparator(date.key, date.label)});
+        inserted.add(separatorKey);
+      }
+      day = date.key;
+    }
+    const id = String(message.id);
+    desired.push(id);
+    if (!messageNodes.has(id)) {
+      const signature = JSON.stringify(message), element = messageNode(message);
+      messageNodes.set(id, {node: element, signature, message});
+      inserted.add(id);
+    }
+  }
+  insertNewNodesInOrder(list, desired, messageNodes, inserted);
+  for (const [id, grouped] of incrementalGrouping(combined, inserted)) {
+    messageNodes.get(id).node.classList.toggle('grouped', grouped);
+  }
+  if (preserveAnchor) restoreScrollAnchor(list, messageNodes, anchor, oldHeight);
+  else if (atBottom) list.scrollTop = list.scrollHeight;
+  return true;
+}
+
+function prependMessagePage(messages, key) {
+  return incrementalMessagePage(messages, key, {preserveAnchor: true});
 }
 
 function focusLoadedMessage(messageId, {replaceUrl = false} = {}) {
@@ -505,25 +580,27 @@ function focusLoadedMessage(messageId, {replaceUrl = false} = {}) {
 
 function renderMessages(messages, key, {triggerId = null, prepend = false, merge = false, focusId = null} = {}) {
   const list = $('messages'), initial = shownKey !== key;
+  messages = renderableMessages(messages);
+  if (prepend && !initial) return prependMessagePage(messages, key);
   const current = [...messageNodes.values()].filter(value => value.message).map(value => value.message);
   const unique = merge ? mergeMessagePages(current, messages) : mergeMessagePages([], messages);
   const signatures = new Map([...messageNodes.entries()].filter(([, value]) => value.message)
     .map(([id, value]) => [id, value.signature]));
   if (!initial && !messagesChanged(signatures, unique)) return false;
+  if (!initial && !prepend && appendOnlyMessages(signatures, unique)) {
+    return incrementalMessagePage(unique, key);
+  }
   const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 70;
   const oldHeight = list.scrollHeight, anchor = prepend ? visibleAnchor(list) : null;
   const keep = new Set(), order = [];
   let date = '', previousMessage = null;
   for (const message of unique) {
-    const parsedDate = new Date(message.timestamp);
-    const dayKey = Number.isNaN(parsedDate.valueOf()) ? 'unknown' : parsedDate.toISOString().slice(0, 10);
-    const day = Number.isNaN(parsedDate.valueOf()) ? ''
-      : parsedDate.toLocaleDateString('ru-RU', {day: 'numeric', month: 'long', year: 'numeric'});
+    const parsedDate = messageDate(message), dayKey = parsedDate.key, day = parsedDate.label;
     if (dayKey !== date) {
       const separatorKey = `day:${dayKey}`;
       keep.add(separatorKey); order.push(separatorKey);
       if (!messageNodes.has(separatorKey)) {
-        const separator = node('div', 'date', day);
+        const separator = dateSeparator(dayKey, day);
         messageNodes.set(separatorKey, {node: separator}); list.append(separator);
       }
       date = dayKey; previousMessage = null;
@@ -540,6 +617,7 @@ function renderMessages(messages, key, {triggerId = null, prepend = false, merge
       messageNodes.set(id, {node: element, signature, message});
     }
     messageNodes.get(id).node.classList.toggle('grouped', Boolean(previousMessage)
+      && !message.system && !previousMessage.system
       && previousMessage.sender === message.sender && previousMessage.own === message.own);
     previousMessage = message;
   }
@@ -627,7 +705,7 @@ function renderPins(pins) {
   $('pinned-count').textContent = pins.length > 1 ? `· ${pins.length}` : '';
   $('pinned-list').replaceChildren(...pins.map(pin => {
     const item = node('article', 'pin-item'), preview = node('div', 'pin-preview');
-    appendSegments(preview, pin.segments, pin.text || pin.media?.name || 'Сообщение');
+    appendSegments(preview, pin.segments, pin.system || pin.text || pin.media?.name || 'Сообщение');
     const open = node('button', '', 'Открыть');
     open.type = 'button'; open.onclick = () => focusMessage(pin.id);
     item.append(preview, open); return item;
@@ -668,7 +746,8 @@ function renderSearchResults() {
     meta.append(node('span', '', new Date(message.timestamp).toLocaleDateString('ru-RU', {day: 'numeric', month: 'long'})),
       node('span', '', message.sender || ''));
     const text = node('div', 'search-result-text');
-    appendSegments(text, message.segments, message.text || message.media?.name || 'Вложение');
+    appendSegments(text, message.segments,
+      message.system || message.text || message.media?.name || 'Вложение');
     content.append(meta, text);
     const open = node('button', '', 'Открыть');
     open.type = 'button'; open.onclick = () => focusMessage(message.id);

@@ -2,17 +2,23 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   advanceOlderCursor,
+  appendOnlyMessages,
   deepLinkFor,
+  insertNewNodesInOrder,
+  incrementalGrouping,
   isMacNotifierClient,
   isTerminalConversationStatus,
   isWritable,
   mergeMessagePages,
+  newPageMessages,
   moveSelectedSource,
   normalizedSearchQuery,
   openedConversationIds,
   parseDeepLink,
   preferencePayload,
   retainFocusedMessage,
+  renderableMessages,
+  restoreScrollAnchor,
   scopePath,
   uploadWithinLimit,
   messagesChanged,
@@ -29,6 +35,68 @@ test('unchanged polling payload skips message reconciliation', () => {
   assert.equal(messagesChanged(signatures,messages),false);
   assert.equal(messagesChanged(signatures,[...messages,{id:3,text:'three'}]),true);
   assert.equal(messagesChanged(signatures,[{id:1,text:'changed'},messages[1]]),true);
+});
+
+test('append-only polling accepts new tail messages without hiding edits or removals', () => {
+  const current=[{id:1,text:'one'},{id:2,text:'two'}];
+  const signatures=new Map(current.map(message=>[String(message.id),JSON.stringify(message)]));
+  assert.deepEqual(appendOnlyMessages(signatures,[...current,{id:3,text:'three'}]),
+    [{id:3,text:'three'}]);
+  assert.equal(appendOnlyMessages(signatures,[current[0],{id:2,text:'changed'},{id:3,text:'three'}]),null);
+  assert.equal(appendOnlyMessages(signatures,[current[1],{id:3,text:'three'}]),null);
+  assert.equal(appendOnlyMessages(signatures,[{id:0,text:'older'},...current]),null);
+});
+
+test('empty messages are omitted while service rows remain renderable', () => {
+  assert.deepEqual(renderableMessages([
+    {id:1,text:'',media:null,system:null},
+    {id:2,text:'',media:null,system:'Участник присоединился'},
+    {id:3,text:'hello',media:null,system:null},
+  ]).map(message=>message.id),[2,3]);
+});
+
+test('prepend planner returns only unique nodes absent from existing history', () => {
+  const existing=new Set(['51','52']);
+  const page=[{id:50,text:'old'},{id:49,text:'older'},{id:50,text:'duplicate'},
+    {id:51,text:'overlap'},{id:48,text:'',media:null,system:null}];
+  assert.deepEqual(newPageMessages(existing,page).map(message=>message.id),[49,50]);
+});
+
+test('prepend insertion keeps existing node objects and inserts only missing nodes', () => {
+  const oldA={id:'old-a'},oldB={id:'old-b'},newA={id:'new-a'},newB={id:'new-b'};
+  const entries=new Map([
+    ['1',{node:newA}],['2',{node:oldA}],['3',{node:newB}],['4',{node:oldB}],
+  ]);
+  const calls=[];
+  insertNewNodesInOrder({insertBefore:(node,next)=>calls.push([node.id,next?.id || null])},
+    ['1','2','3','4'],entries,new Set(['1','3']));
+  assert.deepEqual(calls,[['new-b','old-b'],['new-a','old-a']]);
+  assert.equal(entries.get('2').node,oldA);
+  assert.equal(entries.get('4').node,oldB);
+});
+
+test('scroll restoration keeps the visual anchor offset exactly', () => {
+  const list={scrollTop:120,scrollHeight:900};
+  const entries=new Map([['anchor',{node:{getBoundingClientRect:()=>({top:73})}}]]);
+  restoreScrollAnchor(list,entries,{id:'anchor',top:41},500);
+  assert.equal(list.scrollTop,152);
+  restoreScrollAnchor(list,entries,null,800);
+  assert.equal(list.scrollTop,252);
+});
+
+test('incremental grouping updates inserted messages and the existing page boundary only', () => {
+  const messages=[
+    {id:1,timestamp:'2026-09-18T23:59:00Z',sender:'Ada',own:false},
+    {id:2,timestamp:'2026-09-19T08:00:00Z',sender:'Ada',own:false},
+    {id:3,timestamp:'2026-09-19T08:01:00Z',sender:'Ada',own:false},
+    {id:4,timestamp:'2026-09-19T08:02:00Z',sender:'Ada',own:false},
+  ];
+  assert.deepEqual(incrementalGrouping(messages,new Set(['1','2'])),[
+    ['1',false],['2',false],['3',true],
+  ]);
+  assert.deepEqual(incrementalGrouping([
+    messages[1],{...messages[2],system:'Ada закрепила сообщение'},messages[3],
+  ],new Set(['3'])),[['3',false],['4',false]]);
 });
 
 test('three 50-message history pages merge without gaps or duplicates', () => {

@@ -24,6 +24,7 @@ from telethon.errors import (
     RPCError,
     UserIdInvalidError,
 )
+from telethon.tl import types as tl_types
 from telethon.tl.types import (
     Channel,
     Chat,
@@ -77,6 +78,83 @@ class InboxError(Exception):
 
 class PeerRefreshUnavailable(Exception):
     """A transient Telegram failure, distinct from a completed no-match scan."""
+
+
+def _service_person(entity) -> str:
+    if entity is None:
+        return ""
+    return " ".join(display_name(entity).split())[:160]
+
+
+def _service_title(value) -> str:
+    return " ".join(str(value or "").split())[:300]
+
+
+def service_message_text(message) -> str | None:
+    """Render Telegram service actions using only entities resolved with the message batch."""
+    action = getattr(message, "action", None)
+    if action is None:
+        return None
+    actor = _service_person(getattr(message, "sender", None))
+    entities = [entity for entity in (getattr(message, "_action_entities", ()) or ())
+                if entity is not None]
+    people = [_service_person(entity) for entity in entities]
+    people = [name for name in people if name]
+
+    if isinstance(action, tl_types.MessageActionChatAddUser):
+        ids = list(getattr(action, "users", ()) or ())
+        if len(ids) == 1 and ids[0] == getattr(message, "sender_id", None):
+            return f"{actor or (people[0] if people else 'Участник')} присоединился к группе"
+        if people:
+            noun = "участника" if len(people) == 1 else "участников"
+            if actor:
+                return f"{actor} добавил {noun}: {', '.join(people)}"
+            return (f"Добавлен участник: {people[0]}" if len(people) == 1
+                    else f"Добавлены участники: {', '.join(people)}")
+        return f"{actor} добавил участника" if actor else "Добавлен участник"
+    if isinstance(action, tl_types.MessageActionChatJoinedByLink):
+        return f"{actor or 'Участник'} присоединился по ссылке"
+    if isinstance(action, tl_types.MessageActionChatJoinedByRequest):
+        return f"{actor or 'Участник'} присоединился по запросу"
+    if isinstance(action, tl_types.MessageActionChatDeleteUser):
+        target = people[0] if people else ""
+        if getattr(action, "user_id", None) == getattr(message, "sender_id", None):
+            return f"{target or actor or 'Участник'} покинул группу"
+        if actor and target:
+            return f"{actor} удалил участника: {target}"
+        if target:
+            return f"Участник удалён: {target}"
+        return f"{actor} удалил участника" if actor else "Участник покинул группу"
+    if isinstance(action, tl_types.MessageActionChatCreate):
+        title = _service_title(action.title)
+        return f"{actor or 'Создатель'} создал группу «{title}»" if title else "Группа создана"
+    if isinstance(action, tl_types.MessageActionChannelCreate):
+        title = _service_title(action.title)
+        return f"{actor or 'Создатель'} создал канал «{title}»" if title else "Канал создан"
+    if isinstance(action, tl_types.MessageActionChatEditTitle):
+        title = _service_title(action.title)
+        return (f"{actor} изменил название на «{title}»" if actor and title
+                else f"Название группы изменено на «{title}»" if title
+                else "Название группы изменено")
+    if isinstance(action, tl_types.MessageActionChatEditPhoto):
+        return f"{actor} изменил фото группы" if actor else "Фото группы изменено"
+    if isinstance(action, tl_types.MessageActionChatDeletePhoto):
+        return f"{actor} удалил фото группы" if actor else "Фото группы удалено"
+    if isinstance(action, tl_types.MessageActionPinMessage):
+        return f"{actor} закрепил сообщение" if actor else "Сообщение закреплено"
+    if isinstance(action, tl_types.MessageActionChatMigrateTo):
+        return "Группа преобразована в супергруппу"
+    if isinstance(action, tl_types.MessageActionChannelMigrateFrom):
+        return "История группы перенесена в супергруппу"
+    if isinstance(action, tl_types.MessageActionTopicCreate):
+        title = _service_title(action.title)
+        return f"Создана тема «{title}»" if title else "Создана тема"
+    if isinstance(action, tl_types.MessageActionTopicEdit):
+        title = _service_title(getattr(action, "title", None))
+        return f"Тема переименована в «{title}»" if title else "Настройки темы изменены"
+    if isinstance(action, tl_types.MessageActionCustomAction):
+        return _service_title(action.message) or "Системное событие"
+    return "Системное событие"
 
 
 def forum_thread(message):
@@ -505,8 +583,17 @@ class InboxService:
         row = type("LibraryRow", (), {"id": source_id, "is_forum": False,
                                       "thread_id": 0})()
         result = await self.serialize(message, row, by_id)
-        if result["media"]:
+        if result and result["media"]:
             result["media"]["url"] = f"/api/library/{source_id}/media/{message.id}"
+        return result
+
+    async def serialize_many(self, messages, row, by_id, *, source_id=None):
+        result = []
+        for message in messages:
+            item = (await self.serialize_library(message, source_id, by_id)
+                    if source_id is not None else await self.serialize(message, row, by_id))
+            if item is not None:
+                result.append(item)
         return result
 
     async def library_history(self, source_id, before=None):
@@ -529,8 +616,9 @@ class InboxService:
         by_id = {message.id: message for message in fetched}
         payload = {
             "source": self._source_json(source),
-            "messages": [await self.serialize_library(message, source_id, by_id)
-                         for message in fetched],
+            "messages": await self.serialize_many(
+                fetched, None, by_id, source_id=source_id
+            ),
             "next_before": min(by_id) if has_older and by_id else None,
         }
         self.library_snapshots[key] = {"fetched": self.clock(), "messages": by_id,
@@ -716,9 +804,9 @@ class InboxService:
         )))
         fetched.sort(key=lambda message: message.id)
         by_id = {message.id: message for message in fetched}
-        payload = {"pins": [
-            await self.serialize_library(message, source_id, by_id) for message in fetched
-        ]}
+        payload = {"pins": await self.serialize_many(
+            fetched, None, by_id, source_id=source_id
+        )}
         self.pin_snapshots[key] = {"fetched": self.clock(), "payload": payload}
         return payload
 
@@ -731,9 +819,10 @@ class InboxService:
         )
         if not message:
             raise InboxError("Сообщение не найдено в этом источнике.", 404)
-        return {"source": self._source_json(source), "message": await self.serialize_library(
-            message, source_id, {message.id: message}
-        )}
+        serialized = await self.serialize_library(message, source_id, {message.id: message})
+        if serialized is None:
+            raise InboxError("Сообщение не содержит отображаемых данных.", 404)
+        return {"source": self._source_json(source), "message": serialized}
 
     async def library_search(self, source_id, query, before=None):
         source = self.library_source(source_id)
@@ -752,8 +841,9 @@ class InboxService:
         fetched.sort(key=lambda message: message.id, reverse=True)
         by_id = {message.id: message for message in fetched}
         return {
-            "results": [await self.serialize_library(message, source_id, by_id)
-                        for message in fetched],
+            "results": await self.serialize_many(
+                fetched, None, by_id, source_id=source_id
+            ),
             "next_before": min(by_id) if has_more and by_id else None,
         }
 
@@ -774,8 +864,7 @@ class InboxService:
         self._allow_conversation_media(key, fetched)
         fetched.sort(key=lambda message: message.id)
         by_id = {message.id: message for message in fetched}
-        payload = {"pins": [await self.serialize(message, row, by_id)
-                            for message in fetched]}
+        payload = {"pins": await self.serialize_many(fetched, row, by_id)}
         self.pin_snapshots[cache_key] = {"fetched": self.clock(), "payload": payload}
         return payload
 
@@ -791,9 +880,10 @@ class InboxService:
         if not message or not await self.belongs(message, row):
             raise InboxError("Сообщение не принадлежит этому разговору.", 404)
         self._allow_conversation_media(key, [message])
-        return {"conversation": conversation_json(row), "message": await self.serialize(
-            message, row, {message.id: message}
-        )}
+        serialized = await self.serialize(message, row, {message.id: message})
+        if serialized is None:
+            raise InboxError("Сообщение не содержит отображаемых данных.", 404)
+        return {"conversation": conversation_json(row), "message": serialized}
 
     async def conversation_search(self, key, query, before=None):
         row = self.require(key)
@@ -816,7 +906,7 @@ class InboxService:
         fetched.sort(key=lambda message: message.id, reverse=True)
         by_id = {message.id: message for message in fetched}
         return {
-            "results": [await self.serialize(message, row, by_id) for message in fetched],
+            "results": await self.serialize_many(fetched, row, by_id),
             "next_before": min(by_id) if has_more and by_id else None,
         }
 
@@ -831,16 +921,27 @@ class InboxService:
         return thread == row.thread_id
 
     async def serialize(self, message, row, by_id):
-        sender = message.sender
+        sender = getattr(message, "sender", None)
+        raw_text = getattr(message, "raw_text", None) or ""
+        system = service_message_text(message)
+        if system is not None:
+            return {
+                "id": message.id, "text": "", "own": False, "segments": [],
+                "sender": "", "timestamp": message.date.isoformat(), "mention": False,
+                "reply": None, "media": None, "system": system,
+            }
+        file = getattr(message, "file", None)
+        if not raw_text and not file:
+            return None
         result = {
-            "id": message.id, "text": message.raw_text or "", "own": bool(message.out),
+            "id": message.id, "text": raw_text, "own": bool(message.out),
             "segments": safe_link_segments(
-                message.raw_text or "", getattr(message, "entities", None)
+                raw_text, getattr(message, "entities", None)
             ),
             "sender": display_name(sender) if sender else "Неизвестный отправитель",
             "timestamp": message.date.isoformat(),
-            "mention": has_exact_fedocc_mention(message.raw_text) and not message.out,
-            "reply": None, "media": None,
+            "mention": has_exact_fedocc_mention(raw_text) and not message.out,
+            "reply": None, "media": None, "system": None,
         }
         reply_id = getattr(message, "reply_to_msg_id", None)
         if reply_id:
@@ -853,7 +954,6 @@ class InboxService:
                                    "text": reply_text,
                                    "segments": safe_link_segments(
                                        reply_text, getattr(parent, "entities", None))}
-        file = message.file
         if file:
             kind = "file"
             if message.photo:
@@ -937,9 +1037,9 @@ class InboxService:
         cursor = max([m.id for m in fetched if m] + [snapshot.get("cursor", 0)
                      if snapshot else row.trigger_id])
         by_id = dict(sorted(by_id.items())[-500:])
-        payload = {"conversation": conversation_json(row), "messages": [
-            await self.serialize(message, row, by_id) for message in by_id.values()
-        ]}
+        payload = {"conversation": conversation_json(row), "messages": (
+            await self.serialize_many(by_id.values(), row, by_id)
+        )}
         self.require(key)  # Never return data after a concurrent close/expiry.
         self.snapshots[key] = {"fetched": self.clock(), "messages": by_id,
             "payload": payload, "trigger": row.trigger_id, "cursor": cursor}

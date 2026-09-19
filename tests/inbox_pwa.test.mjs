@@ -73,9 +73,25 @@ test('mobile dock has safe-area, glass fallback and compact pinned/search layout
   assert.match(style, /#search-input \{ min-height:44px/);
 });
 
-test('history polling fast path avoids layout work and anchor uses one hit test', async () => {
+test('history polling fast paths and pagination preserve existing message nodes', async () => {
   const app = await readFile(new URL('app.js', root), 'utf8');
   assert.match(app, /if \(!initial && !messagesChanged\(signatures, unique\)\) return false/);
+  assert.match(app, /if \(prepend && !initial\) return prependMessagePage\(messages, key\)/);
+  assert.match(app, /appendOnlyMessages\(signatures, unique\)/);
+  assert.match(app, /return incrementalMessagePage\(unique, key\)/);
+  assert.match(app, /const additions = newPageMessages\(existingIds, messages\)/);
+  assert.match(app, /insertNewNodesInOrder\(list, desired, messageNodes, inserted\)/);
+  assert.match(app, /restoreScrollAnchor\(list, messageNodes, anchor, oldHeight\)/);
   assert.match(app, /document\.elementFromPoint/);
   assert.doesNotMatch(app, /\.\.\.list\.querySelectorAll\('\[data-id\]'\)/);
+});
+
+test('service messages use a separate control-free system row', async () => {
+  const [app, style] = await Promise.all([
+    readFile(new URL('app.js', root), 'utf8'),
+    readFile(new URL('style.css', root), 'utf8'),
+  ]);
+  assert.match(app, /if \(message\.system\)/);
+  assert.match(app, /node\('div', 'system-message', message\.system\)/);
+  assert.match(style, /\.system-message \{/);
 });

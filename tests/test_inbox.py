@@ -772,6 +772,105 @@ async def test_native_telethon_media_classification(service, kind):
         assert message.video and message.video_note  # Telethon overlaps these properties.
 
 
+async def test_service_add_user_uses_batch_resolved_names(service):
+    from telethon.tl import types
+
+    row = activate(service)
+    message = Message(101, "", action=types.MessageActionChatAddUser([3]))
+    message._action_entities = [SimpleNamespace(first_name="Пётр", last_name="Петров")]
+
+    result = await service.serialize(message, row, {})
+
+    assert result["system"] == "Никита добавил участника: Пётр Петров"
+    assert result["text"] == "" and result["media"] is None
+
+
+@pytest.mark.parametrize(("action", "expected"), [
+    ("link", "Пётр присоединился по ссылке"),
+    ("request", "Пётр присоединился по запросу"),
+])
+async def test_service_join_events_are_readable(service, action, expected):
+    from telethon.tl import types
+
+    row = activate(service)
+    kind = (types.MessageActionChatJoinedByLink(inviter_id=9) if action == "link"
+            else types.MessageActionChatJoinedByRequest())
+    message = Message(101, "", action=kind, sender_id=3,
+                      sender=SimpleNamespace(first_name="Пётр", last_name=""))
+
+    assert (await service.serialize(message, row, {}))["system"] == expected
+
+
+@pytest.mark.parametrize(("sender_id", "sender", "expected"), [
+    (3, "Пётр", "Пётр покинул группу"),
+    (2, "Иван", "Иван удалил участника: Пётр"),
+])
+async def test_service_leave_and_remove_events_are_readable(
+        service, sender_id, sender, expected):
+    from telethon.tl import types
+
+    row = activate(service)
+    message = Message(
+        101, "", action=types.MessageActionChatDeleteUser(user_id=3),
+        sender_id=sender_id, sender=SimpleNamespace(first_name=sender, last_name=""),
+    )
+    message._action_entities = [SimpleNamespace(first_name="Пётр", last_name="")]
+
+    assert (await service.serialize(message, row, {}))["system"] == expected
+
+
+@pytest.mark.parametrize(("action", "expected"), [
+    pytest.param("title", "Никита изменил название на «Новый проект»", id="title"),
+    pytest.param("photo", "Никита удалил фото группы", id="photo"),
+    pytest.param("pin", "Никита закрепил сообщение", id="pin"),
+])
+async def test_service_title_photo_and_pin_events_are_system_rows(
+        service, action, expected):
+    from telethon.tl import types
+
+    row = activate(service)
+    actions = {
+        "title": types.MessageActionChatEditTitle("Новый проект"),
+        "photo": types.MessageActionChatDeletePhoto(),
+        "pin": types.MessageActionPinMessage(),
+    }
+    result = await service.serialize(Message(101, "", action=actions[action]), row, {})
+
+    assert result["system"] == expected
+
+
+async def test_unknown_service_action_never_becomes_empty_bubble(service):
+    from telethon.tl import types
+
+    row = activate(service)
+    result = await service.serialize(
+        Message(101, "", action=types.MessageActionEmpty()), row, {}
+    )
+
+    assert result["system"] == "Системное событие"
+    assert result["text"] == ""
+
+
+async def test_normal_empty_message_is_not_serialized(service):
+    row = activate(service)
+
+    assert await service.serialize(Message(101, ""), row, {}) is None
+
+
+async def test_history_omits_blank_content_but_keeps_service_rows(service):
+    from telethon.tl import types
+
+    row = activate(service, trigger=100)
+    service_message = Message(100, "", action=types.MessageActionPinMessage())
+    service.client.messages = [Message(99, ""), service_message]
+
+    result = await service.history(row.id)
+
+    assert [(item["id"], item["system"]) for item in result["messages"]] == [
+        (100, "Никита закрепил сообщение")
+    ]
+
+
 async def test_meaningful_triggers_reset_window_only(service):
     row = activate(service)
     assert row.expires_at - service.clock() == LIFETIME == 300

@@ -3,9 +3,70 @@ export function mergeMessagePages(older, current) {
     .values()].sort((a, b) => a.id - b.id);
 }
 
+export function renderableMessages(messages) {
+  return (Array.isArray(messages) ? messages : []).filter(message => message
+    && (typeof message.system === 'string' && message.system.trim()
+      || typeof message.text === 'string' && message.text.length
+      || message.media));
+}
+
+export function newPageMessages(existingIds, messages) {
+  const known = existingIds instanceof Set ? existingIds : new Set();
+  return [...new Map(renderableMessages(messages).map(message => [String(message.id), message]))
+    .entries()].filter(([id]) => !known.has(id)).map(([, message]) => message)
+    .sort((a, b) => a.id - b.id);
+}
+
+export function insertNewNodesInOrder(list, orderedIds, entries, insertedIds) {
+  let next = null;
+  for (let index = orderedIds.length - 1; index >= 0; index -= 1) {
+    const id = orderedIds[index], element = entries.get(id).node;
+    if (insertedIds.has(id)) list.insertBefore(element, next);
+    next = element;
+  }
+}
+
+export function restoreScrollAnchor(list, entries, anchor, oldHeight) {
+  const anchored = anchor && entries.get(anchor.id)?.node;
+  if (anchored) list.scrollTop += anchored.getBoundingClientRect().top - anchor.top;
+  else list.scrollTop += list.scrollHeight - oldHeight;
+}
+
 export function messagesChanged(signatures, messages) {
   if (!(signatures instanceof Map) || signatures.size !== messages.length) return true;
   return messages.some(message => signatures.get(String(message.id)) !== JSON.stringify(message));
+}
+
+export function appendOnlyMessages(signatures, messages) {
+  if (!(signatures instanceof Map) || !signatures.size) return null;
+  const incoming = new Map(messages.map(message => [String(message.id), message]));
+  for (const [id, signature] of signatures) {
+    const message = incoming.get(id);
+    if (!message || JSON.stringify(message) !== signature) return null;
+  }
+  const currentIds = [...signatures.keys()].map(Number);
+  if (currentIds.some(id => !Number.isSafeInteger(id))) return null;
+  const lastCurrentId = Math.max(...currentIds);
+  const additions = messages.filter(message => !signatures.has(String(message.id)));
+  if (!additions.length || additions.some(message => Number(message.id) <= lastCurrentId)) return null;
+  return additions;
+}
+
+export function incrementalGrouping(messages, insertedIds) {
+  const updates = [];
+  let previous = null, previousDay = '', previousInserted = false;
+  for (const message of messages) {
+    const parsed = new Date(message.timestamp);
+    const currentDay = Number.isNaN(parsed.valueOf()) ? 'unknown' : parsed.toISOString().slice(0, 10);
+    if (currentDay !== previousDay) previous = null;
+    const id = String(message.id), isInserted = insertedIds.has(id);
+    if (isInserted || previousInserted) {
+      updates.push([id, Boolean(previous) && !message.system && !previous.system
+        && previous.sender === message.sender && previous.own === message.own]);
+    }
+    previous = message; previousDay = currentDay; previousInserted = isInserted;
+  }
+  return updates;
 }
 
 export function retainFocusedMessage(messages, focusedId, focusedMessage) {
