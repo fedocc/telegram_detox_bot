@@ -114,12 +114,21 @@ def test_direct_gemini_provider_uses_key_schema_and_low_thinking():
     }])
     assert result.title == "Morning"
     request, timeout = calls[0]
-    assert timeout == 120 and settings.digest_model in request.full_url
+    assert timeout == 120
+    assert request.full_url == (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "gemini-3.8-flash:generateContent"
+    )
     assert request.headers["X-goog-api-key"] == "secret-test-value"
+    assert "Authorization" not in request.headers
+    assert request.headers["Content-type"] == "application/json"
     body = json.loads(request.data)
     config = body["generationConfig"]
     assert config["thinkingConfig"] == {"thinkingLevel": "low"}
-    assert config["responseFormat"]["text"]["mimeType"] == "application/json"
+    assert not {"temperature", "topP", "topK"} & set(config)
+    assert config["responseFormat"]["text"]["mimeType"] == "APPLICATION_JSON"
+    assert config["responseFormat"]["text"]["schema"]
+    assert '"mimeType": "application/json"' not in json.dumps(config)
     assert config["responseFormat"]["text"]["schema"]["properties"]["items"]["maxItems"] == 6
 
 
@@ -145,7 +154,38 @@ def test_direct_gemini_429_retries_are_bounded():
     try:
         provider.generate([{"ref": "m_a"}])
     except RuntimeError as exc:
-        assert str(exc) == "Gemini API request failed (HTTP 429)"
+        assert str(exc) == (
+            "Gemini API request failed: HTTP 429 UNKNOWN: Request rejected"
+        )
     else:
         raise AssertionError("429 must fail after bounded retries")
     assert len(attempts) == 3 and sleeps == [1, 2]
+
+
+def test_direct_gemini_error_is_sanitized_without_key_prompt_or_logs(caplog):
+    secret = "-".join(("test", "credential"))
+
+    def opener(request, timeout):
+        del timeout
+        body = json.loads(request.data)
+        prompt = body["contents"][-1]["parts"][0]["text"]
+        error = json.dumps({"error": {
+            "code": 400,
+            "status": "INVALID_ARGUMENT",
+            "message": f"Rejected {secret} and {prompt}",
+        }}).encode()
+        raise HTTPError(request.full_url, 400, "bad request", {}, BytesIO(error))
+
+    settings = Settings(_env_file=None, gemini_api_key=secret)
+    provider = GeminiDigestProvider(settings, opener=opener)
+    try:
+        provider.generate([{"ref": "m_private", "text": "private prompt marker"}])
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("HTTP 400 must fail")
+    assert message.startswith("Gemini API request failed: HTTP 400 INVALID_ARGUMENT:")
+    assert secret not in message
+    assert "private prompt marker" not in message
+    assert "[redacted]" in message
+    assert not caplog.records

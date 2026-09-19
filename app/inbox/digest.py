@@ -149,12 +149,104 @@ def validate_refs(payload: DigestPayload, allowed: set[str]) -> DigestPayload:
 
 class GeminiDigestProvider:
     ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    # SDK examples use application/json, but this v1beta REST enum requires APPLICATION_JSON.
+    JSON_MIME_TYPE = "APPLICATION_JSON"
 
     def __init__(self, settings, *, sleeper=time.sleep, opener=urlopen):
         self.model = settings.digest_model
         self.api_key = settings.gemini_api_key
         self.sleeper = sleeper
         self.opener = opener
+
+    @staticmethod
+    def _response_text(envelope: dict) -> str:
+        parts = envelope["candidates"][0]["content"]["parts"]
+        return "".join(part.get("text", "") for part in parts)
+
+    def _safe_http_error(self, exc: HTTPError, sensitive: tuple[str, ...]) -> str:
+        code, status, message = exc.code, "UNKNOWN", "Request rejected"
+        try:
+            envelope = json.loads(exc.read(65_536))
+            error = envelope.get("error", {}) if isinstance(envelope, dict) else {}
+            code = int(error.get("code", code))
+            candidate_status = str(error.get("status", status))
+            if re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", candidate_status):
+                status = candidate_status
+            message = str(error.get("message", message))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            pass
+        for value in (self.api_key, *sensitive):
+            if value:
+                message = message.replace(value, "[redacted]")
+        message = " ".join(message.split())[:1000] or "Request rejected"
+        return f"Gemini API request failed: HTTP {code} {status}: {message}"
+
+    def _post(self, payload: dict, *, sensitive: tuple[str, ...] = ()) -> dict:
+        if not self.api_key:
+            raise RuntimeError("Gemini API not configured")
+        request = Request(  # noqa: S310 - endpoint is a fixed HTTPS Gemini API URL.
+            self.ENDPOINT.format(model=self.model),
+            data=json.dumps(payload, ensure_ascii=False).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json", "x-goog-api-key": self.api_key},
+        )
+        last_error = None
+        for attempt in range(3):
+            try:
+                with self.opener(request, timeout=120) as response:
+                    return json.load(response)
+            except HTTPError as exc:
+                last_error = exc
+                if exc.code in {429, 500, 502, 503, 504} and attempt < 2:
+                    self.sleeper(2 ** attempt)
+                    continue
+                raise RuntimeError(self._safe_http_error(exc, sensitive)) from None
+            except (URLError, TimeoutError) as exc:
+                last_error = exc
+                if attempt < 2:
+                    self.sleeper(2 ** attempt)
+                    continue
+                raise RuntimeError("Gemini API request failed (network)") from None
+        raise RuntimeError("Gemini API retry limit reached") from last_error
+
+    def smoke_text(self) -> str:
+        prompt = "Return OK"
+        envelope = self._post({
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"thinkingConfig": {"thinkingLevel": "low"}},
+        }, sensitive=(prompt,))
+        try:
+            result = self._response_text(envelope).strip()
+        except (KeyError, IndexError, TypeError):
+            raise RuntimeError("Gemini API smoke response was malformed") from None
+        if not result:
+            raise RuntimeError("Gemini API smoke response was empty")
+        return result
+
+    def smoke_structured(self) -> dict:
+        prompt = "Return an object whose status is OK."
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"status": {"type": "string", "enum": ["OK"]}},
+            "required": ["status"],
+        }
+        envelope = self._post({
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "thinkingConfig": {"thinkingLevel": "low"},
+                "responseFormat": {"text": {
+                    "mimeType": self.JSON_MIME_TYPE, "schema": schema,
+                }},
+            },
+        }, sensitive=(prompt,))
+        try:
+            result = json.loads(self._response_text(envelope))
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+            raise RuntimeError("Gemini structured-output smoke response was malformed") from None
+        if result != {"status": "OK"}:
+            raise RuntimeError("Gemini structured-output smoke response failed validation")
+        return result
 
     def generate(self, context: list[dict], *, candidate_mode: bool = False) -> DigestPayload:
         instruction = FINAL_TASK
@@ -163,8 +255,6 @@ class GeminiDigestProvider:
                 "Return factual candidate items only; preserve every supporting source ref."
             )
         user = json.dumps(context, ensure_ascii=False, separators=(",", ":")) + "\n\n" + instruction
-        if not self.api_key:
-            raise RuntimeError("Gemini API not configured")
         contents = []
         for example_input, example_output in FEW_SHOTS:
             contents.extend([
@@ -176,47 +266,24 @@ class GeminiDigestProvider:
                 )}]},
             ])
         contents.append({"role": "user", "parts": [{"text": user}]})
-        body = json.dumps({
+        body = {
             "systemInstruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
             "contents": contents,
             "generationConfig": {
-                "temperature": 0,
                 "thinkingConfig": {"thinkingLevel": "low"},
                 "responseFormat": {"text": {
-                    "mimeType": "application/json",
+                    "mimeType": self.JSON_MIME_TYPE,
                     "schema": DigestPayload.model_json_schema(),
                 }},
             },
-        }, ensure_ascii=False).encode()
-        request = Request(  # noqa: S310 - endpoint is a fixed HTTPS Gemini API URL.
-            self.ENDPOINT.format(model=self.model), data=body, method="POST",
-            headers={"Content-Type": "application/json", "x-goog-api-key": self.api_key},
-        )
-        last_error = None
-        for attempt in range(3):
-            try:
-                with self.opener(request, timeout=120) as response:
-                    envelope = json.load(response)
-                parts = envelope["candidates"][0]["content"]["parts"]
-                text = "".join(part.get("text", "") for part in parts)
-                return DigestPayload.model_validate_json(text)
-            except HTTPError as exc:
-                last_error = exc
-                if exc.code in {429, 500, 502, 503, 504} and attempt < 2:
-                    self.sleeper(2 ** attempt)
-                    continue
-                raise RuntimeError(f"Gemini API request failed (HTTP {exc.code})") from None
-            except (URLError, TimeoutError) as exc:
-                last_error = exc
-                if attempt < 2:
-                    self.sleeper(2 ** attempt)
-                    continue
-                raise RuntimeError("Gemini API request failed (network)") from None
-            except (KeyError, IndexError, json.JSONDecodeError, ValueError) as exc:
-                raise RuntimeError(
-                    f"Morning digest generation failed ({type(exc).__name__})"
-                ) from None
-        raise RuntimeError("Gemini API retry limit reached") from last_error
+        }
+        try:
+            envelope = self._post(body, sensitive=(user, SYSTEM_INSTRUCTION))
+            return DigestPayload.model_validate_json(self._response_text(envelope))
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Morning digest generation failed ({type(exc).__name__})"
+            ) from None
 
 
 def generate_payload(provider: Provider, context: list[dict]) -> DigestPayload:
