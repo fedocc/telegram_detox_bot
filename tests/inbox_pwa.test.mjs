@@ -28,9 +28,9 @@ test('PWA PNG icons have the declared dimensions and stay compact', async () => 
 
 test('service worker explicitly bypasses every API request', async () => {
   const worker = await readFile(new URL('sw.js', root), 'utf8');
-  assert.match(worker, /telegram-detox-shell-v5/);
+  assert.match(worker, /telegram-detox-shell-v6/);
   for (const asset of ['style.css', 'app.js', 'ui.mjs', 'notifications.mjs']) {
-    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=5`));
+    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=6`));
   }
   assert.match(worker, /url\.pathname\.startsWith\('\/api\/'\)/);
   assert.doesNotMatch(worker, /SHELL[^;]*\/api\//s);
@@ -47,8 +47,8 @@ test('mobile shell declares safe-area and removes the legacy minimum width', asy
   ]);
   assert.match(page, /viewport-fit=cover/);
   assert.match(page, /manifest\.webmanifest/);
-  assert.match(page, /style\.css\?v=5/);
-  assert.match(page, /app\.js\?v=5/);
+  assert.match(page, /style\.css\?v=6/);
+  assert.match(page, /app\.js\?v=6/);
   assert.match(page, /rel="apple-touch-icon" sizes="180x180" href="\/static\/app-icon-180\.png"/);
   assert.match(style, /@media \(max-width:768px\)/);
   assert.match(style, /safe-area-inset-bottom/);
@@ -132,4 +132,19 @@ test('stickers render as media or an explicit fallback outside ordinary bubbles'
   assert.match(app, /stickerObserver\?\.observe\(video\)/);
   assert.match(style, /\.sticker-bubble \{/);
   assert.match(style, /\.sticker-media \{/);
+});
+
+test('custom emoji and morning digest render inline without replacing stable message nodes', async () => {
+  const app = await readFile(new URL('app.js', root), 'utf8');
+  const style = await readFile(new URL('style.css', root), 'utf8');
+  const page = await readFile(new URL('index.html', root), 'utf8');
+  assert.match(app, /custom\?\.available && custom\.format === 'static'/);
+  assert.match(app, /custom\?\.available && custom\.format === 'video'/);
+  assert.match(app, /image\.alt = text/);
+  assert.match(app, /video\.replaceWith\(document\.createTextNode\(text\)\)/);
+  assert.match(app, /stickerObserver\?\.observe\(video\)/);
+  assert.match(style, /\.custom-emoji \{/);
+  assert.match(page, /id="morning-digest"/);
+  assert.match(app, /\/?library=|item\.links\?\.\[0\]/);
+  assert.match(app, /incrementalMessagePage/);
 });

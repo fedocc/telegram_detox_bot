@@ -134,6 +134,7 @@ async def run_listener(
     settings: Settings,
     session_factory,
     on_connected=None,
+    on_inbox_ready=None,
     *,
     ignored_chat_ids: frozenset[str] | set[str] | None = None,
     enable_inbox: bool = False,
@@ -173,6 +174,8 @@ async def run_listener(
             settings.inbox_upload_stale_hours,
             settings.web_push_vapid_private_key, settings.web_push_vapid_subject,
         )
+        if on_inbox_ready is not None:
+            on_inbox_ready(inbox)
 
     ingestion_lock = asyncio.Lock()
 

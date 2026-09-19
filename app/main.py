@@ -121,12 +121,24 @@ async def main() -> None:
             replace_existing=True,
         )
 
-    if not settings.mention_only_mode:
-        scheduler.add_job(daily_job, "cron", hour=hour, minute=minute)
+    def register_morning_digest(inbox) -> None:
+        async def morning_digest_job() -> None:
+            from app.inbox.digest import run_digest
+
+            now = datetime.now(ZoneInfo(settings.timezone)).replace(second=0, microsecond=0)
+            try:
+                await run_digest(inbox, session_factory, settings, now)
+            except Exception:
+                logger.exception("Morning digest generation failed")
+
+        if settings.digest_enabled:
+            scheduler.add_job(
+                morning_digest_job, "cron", hour=hour, minute=minute,
+                id="morning_digest", replace_existing=True,
+            )
+
     scheduler.add_job(cleanup_job, "cron", hour=3, minute=10)
     scheduler.add_job(retry_alerts_job, "interval", minutes=1)
-    if not settings.mention_only_mode:
-        scheduler.add_job(retry_digests_job, "interval", minutes=5)
     if settings.birthday_reminders_enabled:
         birthday_hour, birthday_minute = [
             int(part) for part in settings.birthday_reminder_time.split(":", 1)
@@ -151,6 +163,7 @@ async def main() -> None:
             if settings.birthday_reminders_enabled
             else None
         ),
+        on_inbox_ready=register_morning_digest,
         ignored_chat_ids=ignored_chat_ids,
         enable_inbox=settings.inbox_enabled and settings.mention_only_mode,
     )

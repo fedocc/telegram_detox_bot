@@ -14,10 +14,23 @@ from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
 from PIL import Image
 from telethon.errors import ChatWriteForbiddenError
-from telethon.tl.types import PeerChannel
+from telethon.tl.types import (
+    DocumentAttributeCustomEmoji,
+    InputStickerSetEmpty,
+    MessageEntityCustomEmoji,
+    MessageEntityTextUrl,
+    PeerChannel,
+)
 
 from app.db.session import init_db
-from app.inbox.service import MAX_CACHE, MAX_MEDIA, InboxError, InboxService, normalize_image
+from app.inbox.service import (
+    MAX_CACHE,
+    MAX_MEDIA,
+    InboxError,
+    InboxService,
+    normalize_image,
+    rich_text_segments,
+)
 from app.inbox.store import LIFETIME
 from app.inbox.web import HOST, PORT, create_app, serve_inbox
 
@@ -46,6 +59,13 @@ class FakeTelegram:
         self.send_message = AsyncMock(return_value=SimpleNamespace(id=901))
         self.send_file = AsyncMock(return_value=SimpleNamespace(id=902))
         self.downloads = 0
+        self.custom_emoji_calls = []
+
+    async def __call__(self, request):
+        self.custom_emoji_calls.append(list(request.document_id))
+        return [SimpleNamespace(id=value, mime_type="video/webm", size=100,
+            attributes=[DocumentAttributeCustomEmoji("🔥", InputStickerSetEmpty())])
+            for value in request.document_id]
 
     def is_connected(self):
         return self.connected
@@ -96,6 +116,44 @@ def image_bytes():
     stream = io.BytesIO()
     Image.new("RGB", (10, 10)).save(stream, format="PNG")
     return stream.getvalue()
+
+
+def test_custom_emoji_segments_are_utf16_safe_and_preserve_links():
+    text = "👨‍💻 🔥 hello https://example.com"
+    # The custom entity begins after the five UTF-16 code units in 👨‍💻 plus a space.
+    entities = [MessageEntityCustomEmoji(offset=6, length=2, document_id=42),
+                MessageEntityTextUrl(offset=9, length=5, url="https://example.org")]
+    segments = rich_text_segments(text, entities, {42: {
+        "document_id": "42", "format": "video", "available": True,
+        "url": "/api/custom-emoji/42", "text_color": False,
+    }})
+    assert "".join(item["text"] for item in segments) == text
+    custom = next(item for item in segments if "custom_emoji" in item)
+    assert custom["text"] == "🔥" and custom["custom_emoji"]["document_id"] == "42"
+    assert next(item for item in segments if item.get("url"))["text"] == "hello"
+
+
+def test_unresolved_and_multiple_custom_emoji_keep_unicode_fallback():
+    text = "🔥 hello 🫠 world"
+    segments = rich_text_segments(text, [
+        MessageEntityCustomEmoji(offset=0, length=2, document_id=1),
+        MessageEntityCustomEmoji(offset=9, length=2, document_id=2),
+    ])
+    assert "".join(item["text"] for item in segments) == text
+    assert [item["text"] for item in segments if "custom_emoji" in item] == ["🔥", "🫠"]
+    assert all(not item["custom_emoji"]["available"] for item in segments
+               if "custom_emoji" in item)
+
+
+async def test_custom_emoji_documents_are_batch_resolved_and_cached(service):
+    messages = [Message(1, "🔥", entities=[MessageEntityCustomEmoji(0, 2, 11)]),
+                Message(2, "🫠", entities=[MessageEntityCustomEmoji(0, 2, 12)])]
+    row = activate(service)
+    first = await service.serialize_many(messages, row, {item.id: item for item in messages})
+    second = await service.serialize_many(messages, row, {item.id: item for item in messages})
+    assert service.client.custom_emoji_calls == [[11, 12]]
+    assert first == second
+    assert all(item["segments"][0]["custom_emoji"]["format"] == "video" for item in first)
 
 
 def test_library_config_is_static_ordered_and_fail_closed(tmp_path):

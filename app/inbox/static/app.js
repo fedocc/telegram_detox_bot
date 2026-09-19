@@ -1,15 +1,15 @@
 'use strict';
 
-import {createPlaybackController} from './playback.mjs?v=5';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=5';
-import {createPushController} from './push.mjs?v=5';
+import {createPlaybackController} from './playback.mjs?v=6';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=6';
+import {createPushController} from './push.mjs?v=6';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
   messagesChanged, moveSelectedSource, newPageMessages, nextAuxiliaryPanel,
   normalizedSearchQuery, parseDeepLink, renderableMessages, restoreScrollAnchor,
   openedConversationIds, preferencePayload, retainFocusedMessage, scopePath, uploadWithinLimit,
-} from './ui.mjs?v=5';
+} from './ui.mjs?v=6';
 
 const playback = createPlaybackController(document);
 const $ = id => document.getElementById(id);
@@ -46,7 +46,8 @@ new MutationObserver(records => {
     if (removed.nodeType === 1 && !removed.isConnected) {
       playback.pauseWithin(removed);
       if (removed.matches?.('.sticker-video')) stickerObserver?.unobserve(removed);
-      for (const video of removed.querySelectorAll?.('.sticker-video') || []) {
+      if (removed.matches?.('.custom-emoji-video')) stickerObserver?.unobserve(removed);
+      for (const video of removed.querySelectorAll?.('.sticker-video,.custom-emoji-video') || []) {
         stickerObserver?.unobserve(video);
       }
     }
@@ -165,6 +166,25 @@ function renderLibrary() {
     button.onclick = () => chooseLibrary(row.id);
     return button;
   }));
+}
+
+function renderMorningDigest(digest) {
+  const card = $('morning-digest');
+  if (!digest) { card.hidden = true; card.replaceChildren(); return; }
+  const date = new Date(digest.period_end).toLocaleDateString('ru-RU', {day: 'numeric', month: 'short'});
+  const heading = node('strong', 'digest-heading', `☀️ Утро · ${date}`);
+  const items = Array.isArray(digest.items) ? digest.items : [];
+  const icons = {action: '⚡', study: '🎓', news: '📰', other: '•'};
+  const content = items.length ? items.map(item => {
+    const link = node('a', 'digest-item');
+    link.href = item.links?.[0] || '#';
+    link.append(node('span', 'digest-icon', icons[item.category] || '•'));
+    const copy = node('span');
+    copy.append(node('b', '', item.title), node('small', '', `${item.summary}  ↗`));
+    link.append(copy);
+    return link;
+  }) : [node('p', 'digest-empty', 'Ничего важного с прошлой сводки.')];
+  card.replaceChildren(heading, ...content); card.hidden = false;
 }
 
 function renderHeader() {
@@ -369,11 +389,30 @@ function appendSegments(parent, segments, fallback, mention = false) {
   for (const segment of segments) {
     const text = String(segment?.text || '');
     const href = segment?.url ? safeHref(segment.url) : null;
+    const custom = segment?.custom_emoji;
+    let content = null;
+    if (custom?.available && custom.format === 'static') {
+      const image = node('img', `custom-emoji${custom.text_color ? ' text-color' : ''}`);
+      image.src = custom.url; image.alt = text; image.loading = 'lazy'; image.decoding = 'async';
+      image.onerror = () => image.replaceWith(document.createTextNode(text));
+      content = image;
+    } else if (custom?.available && custom.format === 'video') {
+      const video = node('video', 'custom-emoji custom-emoji-video');
+      video.src = custom.url; video.muted = true; video.defaultMuted = true;
+      video.loop = true; video.playsInline = true; video.preload = 'metadata';
+      video.setAttribute('aria-label', text); video.setAttribute('role', 'img');
+      video.onerror = () => video.replaceWith(document.createTextNode(text));
+      stickerObserver?.observe(video);
+      if (!stickerObserver) { video.autoplay = true; video.play().catch(() => {}); }
+      content = video;
+    }
     if (href) {
-      const link = node('a', '', text);
+      const link = node('a', '', content ? undefined : text);
       link.href = href; link.target = '_blank'; link.rel = 'noopener noreferrer';
+      if (content) link.append(content);
       parent.append(link);
-    } else if (mention) parent.append(highlight(text, true));
+    } else if (content) parent.append(content);
+    else if (mention) parent.append(highlight(text, true));
     else parent.append(document.createTextNode(text));
   }
 }
@@ -834,6 +873,8 @@ function toggleSearch(open = $('search-panel').hidden) {
 
 async function loadLibrarySources() {
   library = (await api('/api/library')).sources || [];
+  const digest = await api('/api/digest/latest').catch(() => ({digest: null}));
+  renderMorningDigest(digest.digest);
   libraryLoaded = true;
   renderLibrary();
   if (selectedMode === 'library' && !library.some(row => row.id === selected)) deselect();

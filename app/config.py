@@ -37,7 +37,9 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///data/telegram_digest.db"
     timezone: str = "Europe/Moscow"
-    digest_time: str = "20:30"
+    digest_enabled: bool = True
+    digest_time: str = "07:00"
+    digest_model: str = "gemini-3.8-flash"
     raw_retention_days: int = Field(default=14, ge=1)
     digest_retention_days: int = Field(default=90, ge=1)
     birthday_reminders_enabled: bool = False

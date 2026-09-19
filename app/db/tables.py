@@ -81,6 +81,22 @@ class DigestRecord(Base):
     claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
+class MorningDigest(Base):
+    __tablename__ = "morning_digests"
+    __table_args__ = (
+        UniqueConstraint("period_start", "period_end", name="uq_morning_digest_period"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    model: Mapped[str] = mapped_column(String(128))
+    prompt_version: Mapped[str] = mapped_column(String(32))
+    payload_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+
+
 class BackfillState(Base):
     __tablename__ = "backfill_states"
     __table_args__ = (UniqueConstraint("chat_id", name="uq_backfill_state_chat"),)

@@ -25,6 +25,7 @@ from telethon.errors import (
     UserIdInvalidError,
 )
 from telethon.tl import types as tl_types
+from telethon.tl.functions.messages import GetCustomEmojiDocumentsRequest
 from telethon.tl.types import (
     Channel,
     Chat,
@@ -32,6 +33,7 @@ from telethon.tl.types import (
     InputPeerChannel,
     InputPeerChat,
     InputPeerUser,
+    MessageEntityCustomEmoji,
     MessageEntityTextUrl,
     MessageEntityUrl,
     PeerChannel,
@@ -228,22 +230,29 @@ def conversation_json(row):
           "expires_at": row.expires_at if row.opened_at is not None else None}
 
 
-def safe_link_segments(text, entities):
-    """Split Telegram UTF-16 entities into text/link segments safe for DOM rendering."""
+def rich_text_segments(text, entities, custom_emoji=None):
+    """Split Telegram UTF-16 entities without disturbing overlapping entity offsets."""
     if not text:
         return []
     encoded = text.encode("utf-16-le")
-    links = []
+    spans = []
     for entity in entities or ():
-        if not isinstance(entity, (MessageEntityTextUrl, MessageEntityUrl)):
+        if not isinstance(entity, (MessageEntityTextUrl, MessageEntityUrl,
+                                   MessageEntityCustomEmoji)):
             continue
         start, end = entity.offset * 2, (entity.offset + entity.length) * 2
         if start < 0 or end > len(encoded) or start >= end:
             continue
         try:
             label = encoded[start:end].decode("utf-16-le")
-            prefix = encoded[:start].decode("utf-16-le")
         except UnicodeDecodeError:
+            continue
+        if isinstance(entity, MessageEntityCustomEmoji):
+            document_id = int(entity.document_id)
+            detail = (custom_emoji or {}).get(document_id)
+            spans.append((start, end, {"text": label, "custom_emoji": detail or {
+                "document_id": str(document_id), "available": False,
+            }}))
             continue
         url = entity.url if isinstance(entity, MessageEntityTextUrl) else label
         if not isinstance(url, str):
@@ -254,24 +263,35 @@ def safe_link_segments(text, entities):
             continue
         if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
             continue
-        links.append((len(prefix), len(prefix) + len(label), url))
-    links.sort()
-    if not links:
-        # Let the frontend render its plain-text fallback when Telegram supplied
-        # no usable link entity (including malformed or unsafe URLs).
+        spans.append((start, end, {"text": label, "url": url}))
+    if not spans:
         return []
-    segments, cursor = [], 0
-    for start, end, url in links:
-        if start < cursor:
-            continue
-        if start > cursor:
-            segments.append({"text": text[cursor:start]})
-        segments.append({"text": text[start:end], "url": url})
-        cursor = end
-    if cursor < len(text):
-        segments.append({"text": text[cursor:]})
-    # An empty list deliberately lets the frontend's plain-URL fallback run.
+    boundaries = {0, len(encoded)}
+    for start, end, _ in spans:
+        boundaries.update((start, end))
+    points = sorted(boundaries)
+    segments = []
+    for start, end in zip(points, points[1:], strict=False):
+        try:
+            label = encoded[start:end].decode("utf-16-le")
+        except UnicodeDecodeError:
+            return []
+        segment = {"text": label}
+        covering = [value for left, right, value in spans if left <= start and end <= right]
+        emoji = next((value.get("custom_emoji") for value in covering
+                      if value.get("custom_emoji") is not None), None)
+        link = next((value.get("url") for value in covering if value.get("url")), None)
+        if emoji is not None:
+            segment["custom_emoji"] = emoji
+        if link is not None:
+            segment["url"] = link
+        segments.append(segment)
     return segments
+
+
+def safe_link_segments(text, entities):
+    """Compatibility wrapper used by callers and tests."""
+    return rich_text_segments(text, entities)
 
 
 class InboxService:
@@ -297,6 +317,8 @@ class InboxService:
         self.media_allowances = OrderedDict()
         self.dialog_tokens = OrderedDict()
         self.peer_failures = {}
+        self.custom_emoji_documents = {}
+        self.custom_emoji_failures = {}
         self.telegram_blocked_until = 0.0
         self.upload_max = upload_max_mb * 1024 * 1024
         self.upload_stale = upload_stale_hours * 3600
@@ -588,12 +610,64 @@ class InboxService:
         return result
 
     async def serialize_many(self, messages, row, by_id, *, source_id=None):
+        await self._resolve_custom_emoji(messages)
         result = []
         for message in messages:
             item = (await self.serialize_library(message, source_id, by_id)
                     if source_id is not None else await self.serialize(message, row, by_id))
             if item is not None:
                 result.append(item)
+        return result
+
+    async def _resolve_custom_emoji(self, messages):
+        ids = {int(entity.document_id) for message in messages
+               for entity in (getattr(message, "entities", None) or ())
+               if isinstance(entity, MessageEntityCustomEmoji)}
+        now = self.clock()
+        unknown = sorted(value for value in ids
+                         if value not in self.custom_emoji_documents
+                         and self.custom_emoji_failures.get(value, 0) <= now)
+        if not unknown:
+            return
+        try:
+            documents = await self.client(GetCustomEmojiDocumentsRequest(unknown))
+        except (RPCError, ValueError, TypeError):
+            for value in unknown:
+                self.custom_emoji_failures[value] = now + 300
+            return
+        found = {int(document.id): document for document in documents}
+        self.custom_emoji_documents.update(found)
+        for value in unknown:
+            if value not in found:
+                self.custom_emoji_failures[value] = now + 300
+
+    def _custom_emoji_payloads(self, entities):
+        result = {}
+        for entity in entities or ():
+            if not isinstance(entity, MessageEntityCustomEmoji):
+                continue
+            document_id = int(entity.document_id)
+            document = self.custom_emoji_documents.get(document_id)
+            if document is None:
+                continue
+            mime = (getattr(document, "mime_type", "") or "").lower()
+            if mime.startswith("image/"):
+                kind = "static"
+            elif mime == "video/webm":
+                kind = "video"
+            elif mime == "application/x-tgsticker":
+                kind = "animated"
+            else:
+                kind = "unsupported"
+            attribute = next((item for item in getattr(document, "attributes", ())
+                              if isinstance(item, tl_types.DocumentAttributeCustomEmoji)), None)
+            size = int(getattr(document, "size", 0) or 0)
+            result[document_id] = {
+                "document_id": str(document_id), "format": kind,
+                "available": bool(size and size <= MAX_MEDIA and kind != "unsupported"),
+                "text_color": bool(getattr(attribute, "text_color", False)),
+                "url": f"/api/custom-emoji/{document_id}",
+            }
         return result
 
     async def library_history(self, source_id, before=None):
@@ -627,6 +701,41 @@ class InboxService:
         while len(self.library_snapshots) > 40:
             self.library_snapshots.popitem(last=False)
         return payload
+
+    async def digest_rows(self, start, end):
+        """Read only explicitly selected, digest-eligible Library sources."""
+        rows = []
+        sources = [source for source in self.store.library_sources()
+                   if source.library_enabled and not source.digest_excluded
+                   and source.peer_id not in self.store.ignored()]
+        for source in sources:
+            messages = list(await self._peer_call(source, lambda peer: self.client.get_messages(
+                peer, limit=5000, offset_date=end,
+            )))
+            for message in messages:
+                date = getattr(message, "date", None)
+                if date is None or not (start <= date <= end):
+                    continue
+                action = getattr(message, "action", None)
+                file = getattr(message, "file", None)
+                raw_text = getattr(message, "raw_text", None) or ""
+                sender = getattr(message, "sender", None)
+                forwarded = getattr(message, "fwd_from", None)
+                forward_identity = None
+                if forwarded is not None:
+                    origin = getattr(forwarded, "from_id", None)
+                    original_id = getattr(forwarded, "channel_post", None)
+                    if origin is not None and original_id is not None:
+                        forward_identity = f"{origin!s}:{original_id}"
+                rows.append({
+                    "source_id": source.id, "source_title": source.display_title,
+                    "message_id": int(message.id), "timestamp": date.isoformat(),
+                    "sender": display_name(sender) if sender else "", "text": raw_text,
+                    "caption": raw_text if file else "", "service": action is not None,
+                    "sticker_only": bool(getattr(message, "sticker", None) and not raw_text),
+                    "forward_identity": forward_identity,
+                })
+        return rows
 
     async def library_dialogs(self, query=""):
         """Load Telegram dialogs only for an explicit management request.
@@ -935,9 +1044,9 @@ class InboxService:
             return None
         result = {
             "id": message.id, "text": raw_text, "own": bool(message.out),
-            "segments": safe_link_segments(
-                raw_text, getattr(message, "entities", None)
-            ),
+            "segments": rich_text_segments(raw_text, getattr(message, "entities", None),
+                                            self._custom_emoji_payloads(
+                                                getattr(message, "entities", None))),
             "sender": display_name(sender) if sender else "Неизвестный отправитель",
             "timestamp": message.date.isoformat(),
             "mention": has_exact_fedocc_mention(raw_text) and not message.out,
@@ -1443,6 +1552,32 @@ class InboxService:
                 inline,
             )
 
+    async def custom_emoji_media(self, document_id):
+        document = self.custom_emoji_documents.get(int(document_id))
+        if document is None:
+            raise InboxError("Emoji недоступен.", 404)
+        mime = (getattr(document, "mime_type", "") or "").lower()
+        suffix = {"image/png": ".png", "image/webp": ".webp", "image/jpeg": ".jpg",
+                  "video/webm": ".webm", "application/x-tgsticker": ".tgs"}.get(mime)
+        size = int(getattr(document, "size", 0) or 0)
+        if suffix is None or not size or size > MAX_MEDIA:
+            raise InboxError("Emoji недоступен.", 404)
+        path = self.cache_dir / f"custom-emoji-{int(document_id)}{suffix}"
+        async with self.media_lock:
+            if not path.exists():
+                await self.cleanup(reserve=size)
+                temporary = path.with_suffix(path.suffix + ".part")
+                try:
+                    with temporary.open("xb") as output:
+                        temporary.chmod(0o600)
+                        async with asyncio.timeout(30):
+                            await self.client.download_media(document, file=output)
+                    temporary.replace(path)
+                except BaseException:
+                    temporary.unlink(missing_ok=True)
+                    raise
+        return path, mime, path.name, mime != "application/x-tgsticker"
+
     async def cleanup(self, reserve=0):
         self.store.cleanup()
         for partial in self.cache_dir.glob("*.part"):
@@ -1457,11 +1592,18 @@ class InboxService:
         for token, expires in list(self.media_allowances.items()):
             if token[0] not in active or expires <= self.clock():
                 del self.media_allowances[token]
-        files = sorted(self.cache_dir.glob("*.bin"), key=lambda p: p.stat().st_mtime)
+        files = sorted(
+            (path for path in self.cache_dir.iterdir()
+             if path.is_file() and not path.name.endswith(".part")),
+            key=lambda path: path.stat().st_mtime,
+        )
         total = sum(p.stat().st_size for p in files)
         for path in files:
-            if (not path.stem.startswith("library_")
-                    and path.stem.split("_")[0] not in active) or total + reserve > MAX_CACHE:
+            scoped_inactive = (
+                not path.stem.startswith(("library_", "custom-emoji-"))
+                and path.stem.split("_")[0] not in active
+            )
+            if scoped_inactive or total + reserve > MAX_CACHE:
                 total -= path.stat().st_size
                 path.unlink(missing_ok=True)
         with self.store.factory() as session:

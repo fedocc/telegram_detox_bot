@@ -153,6 +153,11 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
     async def library(request):
         return web.json_response({"sources": service.library_json()})
 
+    async def morning_digest(request):
+        from app.inbox.digest import latest_digest
+
+        return web.json_response({"digest": latest_digest(service.store.factory)})
+
     async def library_dialogs(request):
         if not library_management_enabled:
             raise InboxError("Управление библиотекой временно отключено.", 404)
@@ -389,6 +394,18 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         )
         return response
 
+    async def custom_emoji_media(request):
+        path, mime, name, inline = await service.custom_emoji_media(
+            int(request.match_info["document_id"])
+        )
+        response = web.FileResponse(path)
+        response.content_type = mime
+        response.headers["Content-Disposition"] = (
+            f"{'inline' if inline else 'attachment'}; filename*=UTF-8''{quote(name, safe='')}"
+        )
+        response.headers["Cache-Control"] = "private, max-age=31536000, immutable"
+        return response
+
     app = web.Application(middlewares=[security], client_max_size=service.upload_max + 1024 * 1024)
     app.add_routes([
         web.get("/", index), web.get("/static/{name}", asset),
@@ -400,6 +417,7 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         web.post("/api/push/unsubscribe", push_unsubscribe),
         web.get("/api/conversations", conversations),
         web.get("/api/library", library),
+        web.get("/api/digest/latest", morning_digest),
         web.get("/api/library/dialogs", library_dialogs),
         web.post("/api/library/preferences", library_preferences),
         web.post("/api/library/reorder", library_reorder),
@@ -413,6 +431,7 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         web.post(r"/api/library/{source:[A-Za-z0-9_-]{1,64}}/send", send_library),
         web.get(r"/api/library/{source:[A-Za-z0-9_-]{1,64}}/media/"
                 r"{message_id:[1-9][0-9]*}", library_media),
+        web.get(r"/api/custom-emoji/{document_id:[1-9][0-9]*}", custom_emoji_media),
         web.get(r"/api/conversations/{key:[a-f0-9]{32}}/messages", history),
         web.get(r"/api/conversations/{key:[a-f0-9]{32}}/pins", conversation_pins),
         web.get(r"/api/conversations/{key:[a-f0-9]{32}}/messages/"
