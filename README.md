@@ -2,7 +2,8 @@
 
 Production работает в `MENTION_ONLY_MODE=true`: точное входящее `@fedocc` вызывает
 email alert и открывает разговор в приватном [Telegram Mention Inbox](docs/mention_inbox.md).
-Доступ — через SSH-туннель или private Tailscale Serve; сам backend всегда слушает только
+Доступ — через SSH-туннель, private Tailscale Serve или Cloudflare Tunnel, закрытый
+Cloudflare Access policy для одного оператора; сам backend всегда слушает только
 `127.0.0.1:8787`. Текст и файлы отправляются только вручную, от существующего Telegram
 user account. В этом режиме LLM, digest и startup backfill отключены. Direct replies к вашим сообщениям
 также вызывают alert; birthday reminders работают независимо по своему config.

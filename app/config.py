@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     inbox_upload_concurrency: int = Field(default=2, ge=1, le=8)
     inbox_upload_stale_hours: int = Field(default=24, ge=1, le=168)
     inbox_allowed_origins: str = "http://127.0.0.1:8787"
+    inbox_cloudflare_origin: str = ""
+    inbox_library_management_enabled: bool = False
+    web_push_vapid_private_key: str = ""
+    web_push_vapid_subject: str = "mailto:fnikonov999@gmail.com"
     inbox_enabled: bool = True
     mention_only_mode: bool = False
     p0_classify_private_text: bool = True
@@ -117,8 +121,6 @@ class Settings(BaseSettings):
                 raise ValueError("INBOX_ALLOWED_ORIGINS must contain exact origins")
             if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost"}:
                 raise ValueError("HTTP inbox origins must be loopback")
-            if parsed.scheme == "https" and not parsed.hostname.endswith(".ts.net"):
-                raise ValueError("HTTPS inbox origins must be private Tailscale origins")
             origins.append(origin)
         if not origins or len(origins) != len(set(origins)):
             raise ValueError("INBOX_ALLOWED_ORIGINS must contain unique exact origins")
@@ -147,6 +149,27 @@ class Settings(BaseSettings):
         # Existing deployments used EMAIL_TO for both Gmail API and SMTP.
         if not self.gmail_recipient_email and self.email_to:
             self.gmail_recipient_email = self.email_to
+        return self
+
+    @model_validator(mode="after")
+    def validate_cloudflare_origin(self):
+        cloudflare = self.inbox_cloudflare_origin.strip().rstrip("/")
+        if cloudflare:
+            parsed = urlsplit(cloudflare)
+            if (parsed.scheme != "https" or not parsed.hostname or parsed.username
+                    or parsed.password or parsed.path or parsed.query or parsed.fragment
+                    or "*" in cloudflare or parsed.hostname.endswith(".trycloudflare.com")):
+                raise ValueError("INBOX_CLOUDFLARE_ORIGIN must be an exact custom HTTPS origin")
+        for origin in self.allowed_inbox_origins:
+            parsed = urlsplit(origin)
+            if (parsed.scheme == "https" and not parsed.hostname.endswith(".ts.net")
+                    and origin != cloudflare):
+                raise ValueError(
+                    "Public HTTPS inbox origin must equal INBOX_CLOUDFLARE_ORIGIN"
+                )
+        if cloudflare and cloudflare not in self.allowed_inbox_origins:
+            raise ValueError("INBOX_CLOUDFLARE_ORIGIN must be included in INBOX_ALLOWED_ORIGINS")
+        self.inbox_cloudflare_origin = cloudflare
         return self
 
     def ensure_runtime_dirs(self) -> None:

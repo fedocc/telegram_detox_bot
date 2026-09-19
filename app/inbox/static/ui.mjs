@@ -3,6 +3,11 @@ export function mergeMessagePages(older, current) {
     .values()].sort((a, b) => a.id - b.id);
 }
 
+export function messagesChanged(signatures, messages) {
+  if (!(signatures instanceof Map) || signatures.size !== messages.length) return true;
+  return messages.some(message => signatures.get(String(message.id)) !== JSON.stringify(message));
+}
+
 export function retainFocusedMessage(messages, focusedId, focusedMessage) {
   const page = Array.isArray(messages) ? messages : [];
   const id = Number(focusedId);

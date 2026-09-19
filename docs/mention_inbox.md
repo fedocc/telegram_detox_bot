@@ -17,9 +17,9 @@ ssh -i ~/.ssh/aeza_tg_detox_ed25519 \
 ```
 
 Open **http://127.0.0.1:8787**. The configured Origin and Host must match exactly.
-Do not bind the service to `0.0.0.0`, expose port 8787, add a public reverse proxy, or
-enable Tailscale Funnel: the web UI acts through an already authenticated Telegram
-session and has no separate public login.
+Do not bind the service to `0.0.0.0`, expose port 8787, add an unauthenticated public
+reverse proxy, or enable Tailscale Funnel: the web UI acts through an already authenticated
+Telegram session and has no separate application login.
 
 For iPhone, install Tailscale on the VPS and phone, join the same tailnet, and run on
 the VPS:
@@ -41,6 +41,34 @@ The manifest uses standalone mode and the service worker caches only the static 
 `/api/*`, Telegram media, messages, pins and search results remain network-only and
 `no-store`. The local Mac bridge on `127.0.0.1:8788` is hidden on mobile and is never
 served over Tailscale.
+
+The alternative iPhone path uses a named Cloudflare Tunnel whose exact custom hostname is
+protected first by a deny-by-default Cloudflare Access application. Its only Allow include
+must be the operator's explicit email; never use Quick Tunnel, Everyone, Bypass, or a public
+policy. After the Access application and named tunnel exist, configure the server with:
+
+```sh
+sudo ./deploy/configure_cloudflare_tunnel.sh <hostname> <tunnel-uuid> <credentials-json>
+```
+
+Then set the exact values and restart:
+
+```env
+INBOX_CLOUDFLARE_ORIGIN=https://<hostname>
+INBOX_ALLOWED_ORIGINS=http://127.0.0.1:8787,https://<hostname>
+```
+
+Web Push requires a VAPID secret generated only on production:
+
+```sh
+sudo -u telegram-detox .venv/bin/python deploy/configure_web_push.py /opt/telegram-detox
+```
+
+The private key stays only in the mode-`600` production `.env`. The frontend receives the
+public key. Subscription endpoints and `auth`/`p256dh` keys are stored server-side and are
+never logged. iOS permission is requested only after the user opens the installed Home
+Screen app and taps the notification control. Each push shows a visible notification,
+groups by conversation, and deep-links only to a validated local conversation identifier.
 
 ## Canonical conversations and local read state
 

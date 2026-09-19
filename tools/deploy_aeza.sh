@@ -19,6 +19,9 @@ runuser -u telegram-detox -- git show "${expected}:deploy/backup_sqlite.sh" \
   | runuser -u telegram-detox -- bash -s -- /opt/telegram-detox
 runuser -u telegram-detox -- git pull --ff-only origin main
 test "$(runuser -u telegram-detox -- git rev-parse HEAD)" = "$expected"
+runuser -u telegram-detox -- .venv/bin/python -m pip install --disable-pip-version-check \
+  'pip>=26.2,<27'
+runuser -u telegram-detox -- .venv/bin/python -m pip install --disable-pip-version-check -e .
 systemctl restart telegram-detox.service
 curl --fail --silent --show-error --retry 15 --retry-delay 2 --retry-connrefused \
   http://127.0.0.1:8787/api/health

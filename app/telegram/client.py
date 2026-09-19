@@ -171,6 +171,7 @@ async def run_listener(
             load_library_chats(settings.library_chats_path),
             settings.inbox_upload_max_mb, settings.inbox_upload_concurrency,
             settings.inbox_upload_stale_hours,
+            settings.web_push_vapid_private_key, settings.web_push_vapid_subject,
         )
 
     ingestion_lock = asyncio.Lock()
@@ -203,7 +204,11 @@ async def run_listener(
         from app.inbox.web import serve_inbox
 
         try:
-            async with serve_inbox(inbox, allowed_origins=settings.allowed_inbox_origins):
+            async with serve_inbox(
+                inbox,
+                allowed_origins=settings.allowed_inbox_origins,
+                library_management_enabled=settings.inbox_library_management_enabled,
+            ):
                 await client.run_until_disconnected()
         finally:
             await client.disconnect()

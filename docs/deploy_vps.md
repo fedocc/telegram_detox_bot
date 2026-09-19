@@ -204,6 +204,54 @@ then use **Share → Add to Home Screen**. The PWA requires no separate Telegram
 Mac notifier bridge remains local to the Mac on port 8788 and is never exposed through
 Tailscale.
 
+## iPhone access with Cloudflare Access and Web Push
+
+Cloudflare Tunnel is the iPhone path that does not require Tailscale. It is acceptable only
+after a deny-by-default Cloudflare Access self-hosted application protects the exact custom
+hostname. The Allow policy must include only the operator's explicit email address. Never add
+an Everyone, Bypass, public Service Auth, or temporary Quick Tunnel policy.
+
+Create the Access application and named tunnel interactively in the Cloudflare dashboard
+first. Download the named tunnel credentials JSON to the server, then run:
+
+```bash
+cd /opt/telegram-detox
+sudo ./deploy/configure_cloudflare_tunnel.sh \
+  inbox.example.com \
+  00000000-0000-0000-0000-000000000000 \
+  /root/cloudflared-tunnel.json
+```
+
+Replace all three example values. The script rejects Quick Tunnel hostnames, stores tunnel
+credentials with mode `600`, proxies only to `http://127.0.0.1:8787`, and returns 404 for
+every unmatched ingress hostname. It does not create or weaken the Access policy.
+
+Add the exact protected origin to `.env`; do not add a wildcard:
+
+```env
+INBOX_CLOUDFLARE_ORIGIN=https://inbox.example.com
+INBOX_ALLOWED_ORIGINS=http://127.0.0.1:8787,https://telegram-detox.example.ts.net,https://inbox.example.com
+```
+
+Generate the VAPID secret directly in the production `.env` and restart the app:
+
+```bash
+sudo -u telegram-detox /opt/telegram-detox/.venv/bin/python \
+  /opt/telegram-detox/deploy/configure_web_push.py /opt/telegram-detox
+sudo systemctl restart telegram-detox.service
+```
+
+The generator prints only the public VAPID key. The private key remains in the mode-`600`
+`.env`; never copy it to frontend code, logs, shell history, or version control. On iPhone,
+open the protected HTTPS hostname in Safari, pass Access, choose **Share → Add to Home
+Screen**, open the installed app, tap the bell, and explicitly enable notifications. The
+browser subscription endpoint and `auth`/`p256dh` keys are stored server-side and are never
+logged.
+
+Before use, verify an unauthenticated private-browser request reaches Cloudflare Access and
+cannot reach the inbox, the allowed email can sign in, the VPS still listens only on
+`127.0.0.1:8787`, and SSH tunnel plus Tailscale Serve still work as fallback paths.
+
 ## Backup
 
 Run the local SQLite backup as the service user. The script resolves the same

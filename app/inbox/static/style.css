@@ -322,16 +322,21 @@ main {
   overflow:hidden}
 .photo-button img {
   display:block;
-  width:auto;
+  width:100%;
+  aspect-ratio:4/3;
   max-width:280px;
   max-width:100%;
   max-height:240px;
-  object-fit:contain}
+  object-fit:cover;
+  contain-intrinsic-size:320px 240px}
 .media-video {
   display:block;
   width:300px;
   max-width:100%;
   max-height:230px;
+  aspect-ratio:16/9;
+  object-fit:contain;
+  contain-intrinsic-size:320px 180px;
   border-radius:7px;
   margin-top:5px}
 .file {
@@ -568,6 +573,7 @@ dialog img {
 #notifications-menu strong,#notifications-menu span { display:block; padding:4px 6px; font-size:11px }
 #notifications-menu span { color:var(--muted) }
 #notifications-menu button { display:block; width:100%; text-align:left; padding:7px 8px; border-radius:5px }
+#mobile-dock { display:none }
 
 .pinned-panel { flex:none; border-bottom:1px solid #44474b66; background:#181b1e }
 #pinned-toggle { display:flex; justify-content:space-between; align-items:center; width:100%; padding:7px 14px; color:var(--muted); text-align:left }
@@ -616,9 +622,27 @@ dialog img {
   .list-header { min-height:50px; height:auto; padding-left:max(12px,env(safe-area-inset-left)); padding-right:max(12px,env(safe-area-inset-right)) }
   nav { -webkit-overflow-scrolling:touch }
   .chat-row,.library-row { min-height:48px }
-  .library { margin-top:auto }
+  #conversations { padding-bottom:calc(84px + env(safe-area-inset-bottom)) }
+  .library { display:none; position:absolute; z-index:7; inset:max(58px,env(safe-area-inset-top)) 10px calc(84px + env(safe-area-inset-bottom)); margin:0; border:1px solid #ffffff18; border-radius:20px; overflow:hidden; background:#1c2025f2; box-shadow:0 18px 55px #0008 }
+  body.library-open .library { display:flex; flex-direction:column }
+  body.library-open #conversations { opacity:.28; pointer-events:none }
   #library-list { max-height:38vh }
-  .notifications-control { padding-bottom:max(12px,env(safe-area-inset-bottom)) }
+  body.library-open #library-list { display:block!important; max-height:none; flex:1 }
+  .notifications-control { display:none!important }
+  #mobile-dock { position:fixed; z-index:9; display:flex; align-items:center; justify-content:center; gap:10px; left:0; right:0; bottom:0; overflow:visible; padding:10px max(14px,env(safe-area-inset-right)) max(10px,env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left)); pointer-events:none }
+  #mobile-dock>button { pointer-events:auto; min-height:48px; border:1px solid #ffffff20; background:#252a30f2; box-shadow:inset 0 1px #ffffff12,0 9px 30px #0007; color:var(--text) }
+  #mobile-library { min-width:154px; padding:0 21px; border-radius:24px; font-weight:600 }
+  #mobile-library span { display:inline-flex; margin-right:8px; color:var(--primary); vertical-align:middle }
+  #mobile-library svg { width:17px; height:17px }
+  #mobile-push { position:relative; width:50px; border-radius:50% }
+  #mobile-push span { display:inline-flex }
+  #mobile-push svg { width:21px; height:21px }
+  #mobile-push i { position:absolute; right:7px; top:7px; width:7px; height:7px; border-radius:50%; background:#7b8086 }
+  #mobile-push.active i { background:#8fb99a; box-shadow:0 0 0 2px #203027 }
+  #push-panel { pointer-events:auto; position:absolute; right:max(14px,env(safe-area-inset-right)); bottom:calc(72px + env(safe-area-inset-bottom)); width:min(290px,calc(100vw - 28px)); padding:16px; border:1px solid #ffffff20; border-radius:20px; background:#20252bec; box-shadow:0 18px 60px #000a; text-align:left }
+  #push-panel strong { display:block; font-size:15px }
+  #push-panel p { margin:5px 0 13px; color:var(--muted); font-size:12px }
+  #push-panel button { width:100%; min-height:42px; margin-top:6px; border:1px solid #ffffff1c; border-radius:12px; background:#ffffff09 }
   .chat-header { min-height:52px; height:auto; padding-top:env(safe-area-inset-top); padding-left:max(6px,env(safe-area-inset-left)); padding-right:max(8px,env(safe-area-inset-right)) }
   .mobile-back { display:block; width:40px; height:44px; padding:0!important; font-size:30px!important; color:var(--primary) }
   .chat-header .avatar { display:none }
@@ -637,7 +661,8 @@ dialog img {
   textarea { min-height:44px; padding-right:12px; font-size:16px }
   .shortcut { display:none }
   .pinned-panel { padding-left:env(safe-area-inset-left); padding-right:env(safe-area-inset-right) }
-  #pinned-list { max-height:112px }
+  #pinned-list { max-height:92px }
+  .pin-preview { -webkit-line-clamp:1 }
   .pin-item>button,.search-result>button,#search-form button,#search-more { min-height:44px }
   .search-panel { max-height:55%; padding-left:max(10px,env(safe-area-inset-left)); padding-right:max(10px,env(safe-area-inset-right)) }
   #search-input { min-height:44px; font-size:16px }
@@ -648,6 +673,20 @@ dialog img {
   .management-search input { width:100%; min-height:44px; font-size:16px }
   .dialog-list { padding-left:max(12px,env(safe-area-inset-left)); padding-right:max(12px,env(safe-area-inset-right)); padding-bottom:max(18px,env(safe-area-inset-bottom)) }
   .dialog-main { min-height:44px }
+}
+
+@media (max-width:768px) and (prefers-reduced-motion:no-preference) {
+  #mobile-dock>button,#push-panel,.library { transition:opacity .16s ease,transform .16s ease }
+}
+
+@supports ((backdrop-filter:blur(18px)) or (-webkit-backdrop-filter:blur(18px))) {
+  @media (max-width:768px) {
+    #mobile-dock>button,#push-panel,.library { background:#242a30b8; -webkit-backdrop-filter:blur(18px) saturate(125%); backdrop-filter:blur(18px) saturate(125%) }
+  }
+}
+
+@media (max-width:768px) and (prefers-reduced-transparency:reduce) {
+  #mobile-dock>button,#push-panel,.library { background:#252a30; -webkit-backdrop-filter:none; backdrop-filter:none }
 }
 
 @media (max-width:360px) {

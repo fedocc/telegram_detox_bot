@@ -15,11 +15,20 @@ import {
   retainFocusedMessage,
   scopePath,
   uploadWithinLimit,
+  messagesChanged,
 } from '../app/inbox/static/ui.mjs';
 
 test('library pages merge in chronological order without duplicates', () => {
   assert.deepEqual(mergeMessagePages([{id:2}, {id:1}], [{id:2}, {id:3}]).map(x => x.id),
     [1, 2, 3]);
+});
+
+test('unchanged polling payload skips message reconciliation', () => {
+  const messages=[{id:1,text:'one'},{id:2,text:'two'}];
+  const signatures=new Map(messages.map(message=>[String(message.id),JSON.stringify(message)]));
+  assert.equal(messagesChanged(signatures,messages),false);
+  assert.equal(messagesChanged(signatures,[...messages,{id:3,text:'three'}]),true);
+  assert.equal(messagesChanged(signatures,[{id:1,text:'changed'},messages[1]]),true);
 });
 
 test('three 50-message history pages merge without gaps or duplicates', () => {

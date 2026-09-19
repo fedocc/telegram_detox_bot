@@ -22,10 +22,20 @@
       <section class="library">
         <div class="library-heading">
           <button id="library-toggle" type="button" aria-expanded="false">Библиотека <span>›</span></button>
-          <button id="library-manage" type="button" aria-label="Настроить библиотеку" title="Настроить библиотеку">⚙</button>
+          <button id="library-manage" type="button" aria-label="Настроить библиотеку" title="Настроить библиотеку" hidden>⚙</button>
         </div>
         <nav id="library-list" aria-label="Библиотека" hidden></nav>
       </section>
+      <nav id="mobile-dock" aria-label="Основная навигация">
+        <button id="mobile-library" type="button" aria-expanded="false"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5.5h5v13H4zM9 5.5h5v13H9zM15.5 5l4.5 12.8-4.2 1.5-4.5-12.8z"/></svg></span> Библиотека</button>
+        <button id="mobile-push" type="button" aria-expanded="false" aria-controls="push-panel" aria-label="Уведомления"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg></span><i></i></button>
+        <section id="push-panel" hidden>
+          <strong>Уведомления</strong>
+          <p id="push-status">Проверяем доступность…</p>
+          <button id="push-enable" type="button">Включить уведомления</button>
+          <button id="push-disable" type="button" hidden>Выключить на этом устройстве</button>
+        </section>
+      </nav>
       <div id="notifications-control" class="notifications-control" hidden>
         <button id="notifications-toggle" type="button" aria-expanded="false" aria-controls="notifications-menu" disabled><span id="notifications-label">Уведомления</span><b>—</b></button>
         <div id="notifications-menu" hidden>

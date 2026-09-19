@@ -148,8 +148,10 @@ def test_aeza_deploy_backs_up_database_before_pull_and_restart() -> None:
     verified = script.index('git rev-parse origin/main)" = "$expected"')
     backup = script.index('git show "${expected}:deploy/backup_sqlite.sh"')
     pull = script.index("git pull --ff-only")
+    installer = script.index("'pip>=26.2,<27'")
+    dependencies = script.index("pip install --disable-pip-version-check -e .")
     restart = script.index("systemctl restart telegram-detox.service")
-    assert verified < backup < pull < restart
+    assert verified < backup < pull < installer < dependencies < restart
 
 
 def test_tailscale_setup_is_private_serve_only() -> None:
@@ -160,6 +162,61 @@ def test_tailscale_setup_is_private_serve_only() -> None:
     assert "tailscale serve --bg 8787" in source
     assert "tailscale funnel " not in source
     assert "http://127.0.0.1:8787" in source
+
+
+def test_cloudflare_tunnel_keeps_origin_private_and_denies_unmatched_hosts() -> None:
+    script = Path("deploy/configure_cloudflare_tunnel.sh")
+    source = script.read_text(encoding="utf-8")
+
+    assert stat.S_IMODE(script.stat().st_mode) & stat.S_IXUSR
+    assert "http://127.0.0.1:8787" in source
+    assert "http_status:404" in source
+    assert "trycloudflare.com" in source
+    assert "no-autoupdate: true" in source
+    assert ".".join(["0"] * 4) not in source
+    assert "tailscale funnel" not in source.lower()
+    assert "systemctl is-active cloudflared" in source
+
+
+def test_web_push_key_generator_keeps_private_key_in_mode_600_env(tmp_path: Path) -> None:
+    project_root = Path.cwd().resolve()
+    env_path = tmp_path / ".env"
+    env_path.write_text("WEB_PUSH_VAPID_PRIVATE_KEY=\nUNCHANGED=yes\n", encoding="utf-8")
+    env_path.chmod(0o644)
+
+    result = subprocess.run(  # noqa: S603 - reviewed script writes only to the temp root
+        [
+            str(project_root / ".venv/bin/python"),
+            str(project_root / "deploy/configure_web_push.py"),
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    lines = env_path.read_text(encoding="utf-8").splitlines()
+    private_key = next(line.split("=", 1)[1] for line in lines
+                       if line.startswith("WEB_PUSH_VAPID_PRIVATE_KEY="))
+    assert private_key and private_key not in result.stdout and private_key not in result.stderr
+    assert "Public VAPID key:" in result.stdout
+    assert "UNCHANGED=yes" in lines
+    assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+
+    repeated = subprocess.run(  # noqa: S603 - reviewed script reads the same temp root
+        [
+            str(project_root / ".venv/bin/python"),
+            str(project_root / "deploy/configure_web_push.py"),
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert repeated.returncode == 0
+    assert private_key not in repeated.stdout and private_key not in repeated.stderr
+    assert env_path.read_text(encoding="utf-8").splitlines() == lines
 
 
 def test_healthcheck_requires_ai_key_only_in_legacy(settings, tmp_path):

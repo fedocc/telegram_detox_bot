@@ -2,9 +2,10 @@
 
 import {createPlaybackController} from './playback.mjs';
 import {createNotificationToggle} from './notifications.mjs';
+import {createPushController} from './push.mjs';
 import {
   advanceOlderCursor, deepLinkFor, isMacNotifierClient, isTerminalConversationStatus,
-  isWritable, mergeMessagePages, moveSelectedSource, normalizedSearchQuery, parseDeepLink,
+  isWritable, mergeMessagePages, messagesChanged, moveSelectedSource, normalizedSearchQuery, parseDeepLink,
   openedConversationIds, preferencePayload, retainFocusedMessage, scopePath, uploadWithinLimit,
 } from './ui.mjs';
 
@@ -26,6 +27,8 @@ let libraryLoaded = false, routePending = true, routeWaitStarted = Date.now(), p
 let searchGeneration = 0, searchTimer = null;
 let searchState = {query: '', results: [], next: null, loading: false};
 let managementDialogs = [], focusedMessageId = null;
+let libraryManagementEnabled = false;
+let pushController = null;
 const drafts = new Map();
 
 window.addEventListener('pagehide', () => playback.stopAll());
@@ -281,6 +284,7 @@ async function chooseLibrary(key, {updateHistory = true, messageId = null} = {})
     if (request !== choosing) return;
     if (opened.source) library = library.map(row => row.id === key ? {...row, ...opened.source} : row);
     const changed = prepareSelection('library', key);
+    document.body.classList.remove('library-open');
     if (messageId === null) focusedMessageId = null;
     if (updateHistory) updateLocation(null);
     await Promise.all([loadLibrary(key, null, !changed), loadPins('library', key)]);
@@ -479,10 +483,13 @@ function messageNode(message) {
 }
 
 function visibleAnchor(list) {
-  const top = list.getBoundingClientRect().top;
-  const element = [...list.querySelectorAll('[data-id]')]
-    .find(value => value.getBoundingClientRect().bottom >= top);
-  return element ? {id: element.dataset.id, top: element.getBoundingClientRect().top} : null;
+  const bounds = list.getBoundingClientRect();
+  const hit = document.elementFromPoint(
+    Math.min(bounds.right - 1, bounds.left + 24), Math.min(bounds.bottom - 1, bounds.top + 1),
+  );
+  const element = hit?.closest?.('[data-id]');
+  if (!element || !list.contains(element)) return null;
+  return {id: element.dataset.id, top: element.getBoundingClientRect().top};
 }
 
 function focusLoadedMessage(messageId, {replaceUrl = false} = {}) {
@@ -498,10 +505,13 @@ function focusLoadedMessage(messageId, {replaceUrl = false} = {}) {
 
 function renderMessages(messages, key, {triggerId = null, prepend = false, merge = false, focusId = null} = {}) {
   const list = $('messages'), initial = shownKey !== key;
-  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 70;
-  const oldHeight = list.scrollHeight, anchor = prepend ? visibleAnchor(list) : null;
   const current = [...messageNodes.values()].filter(value => value.message).map(value => value.message);
   const unique = merge ? mergeMessagePages(current, messages) : mergeMessagePages([], messages);
+  const signatures = new Map([...messageNodes.entries()].filter(([, value]) => value.message)
+    .map(([id, value]) => [id, value.signature]));
+  if (!initial && !messagesChanged(signatures, unique)) return false;
+  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 70;
+  const oldHeight = list.scrollHeight, anchor = prepend ? visibleAnchor(list) : null;
   const keep = new Set(), order = [];
   let date = '', previousMessage = null;
   for (const message of unique) {
@@ -551,6 +561,7 @@ function renderMessages(messages, key, {triggerId = null, prepend = false, merge
     if (trigger) trigger.node.scrollIntoView({block: 'center'});
     else list.scrollTop = list.scrollHeight;
   } else if (atBottom) list.scrollTop = list.scrollHeight;
+  return true;
 }
 
 function pauseAutomaticHistory(error) {
@@ -801,6 +812,7 @@ async function loadManagementDialogs() {
 }
 
 async function openLibraryManagement() {
+  if (!libraryManagementEnabled) return;
   if (!$('library-dialog').open) $('library-dialog').showModal();
   $('dialog-status').textContent = 'Загружаю чаты…'; $('dialog-list').replaceChildren();
   try {
@@ -834,12 +846,17 @@ async function poll() {
     if (!csrf) {
       const session = await api('/api/session');
       csrf = session.csrf; uploadMax = session.upload_max_mb * 1024 * 1024;
+      libraryManagementEnabled = session.library_management_enabled === true;
+      $('library-manage').hidden = !libraryManagementEnabled;
       $('empty-description').textContent = `Личные сообщения, @fedocc и ответы ожидают без таймера; после открытия доступны ${session.active_minutes} мин.`;
     }
     if (!libraryLoaded) await loadLibrarySources();
     const result = await api('/api/conversations');
     serverOffset = result.now - Date.now() / 1000;
     conversations = (result.conversations || []).filter(visible);
+    pushController?.setBadge(conversations.reduce(
+      (total, row) => total + Math.max(0, Number(row.unread_count) || 0), 0,
+    ));
     if (selectedMode === 'inbox'
         && !conversations.some(row => row.id === selected && row.opened_at !== null)) {
       deselect({replaceUrl: true});
@@ -926,8 +943,22 @@ $('close').onclick = () => closeConversation(selected);
 $('mobile-back').onclick = () => deselect();
 $('reply-target').querySelector('button').onclick = () => { const value = draft(); value.reply = null; renderComposer(); };
 $('library-toggle').onclick = () => {
+  if (matchMedia('(max-width: 768px)').matches && document.body.classList.contains('library-open')) {
+    document.body.classList.remove('library-open');
+    $('mobile-library').setAttribute('aria-expanded', 'false');
+    $('library-toggle').setAttribute('aria-expanded', 'false');
+    $('library-list').hidden = true;
+    return;
+  }
   const open = $('library-toggle').getAttribute('aria-expanded') !== 'true';
   $('library-toggle').setAttribute('aria-expanded', String(open)); $('library-list').hidden = !open;
+};
+$('mobile-library').onclick = () => {
+  const open = !document.body.classList.contains('library-open');
+  document.body.classList.toggle('library-open', open);
+  $('mobile-library').setAttribute('aria-expanded', String(open));
+  $('library-toggle').setAttribute('aria-expanded', String(open));
+  $('library-list').hidden = !open;
 };
 $('library-manage').onclick = openLibraryManagement;
 $('library-dialog-close').onclick = () => $('library-dialog').close();
@@ -1029,7 +1060,37 @@ if (notifierClient) {
 }
 
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+  window.addEventListener('load', async () => {
+    try {
+      const registration = await navigator.serviceWorker.register('/sw.js');
+      pushController = createPushController({
+        registration,
+        request: (path, data) => api(path, data),
+        notificationApi: window.Notification,
+        badgeNavigator: navigator,
+        render({available, configured, enabled, busy, denied, error}) {
+          $('mobile-push').disabled = !available || busy;
+          $('mobile-push').classList.toggle('active', enabled);
+          $('push-enable').hidden = enabled || !available || !configured;
+          $('push-disable').hidden = !enabled;
+          $('push-status').textContent = error || (denied
+            ? 'Уведомления запрещены. Разрешите их в настройках iOS для этого приложения.'
+            : !available ? 'Установите приложение на экран «Домой» на поддерживаемой iOS.'
+              : !configured ? 'Push ещё не настроен на сервере.'
+                : enabled ? 'Уведомления включены на этом устройстве.'
+                  : 'Включение доступно только по вашему нажатию.');
+        },
+      });
+      await pushController.refresh();
+    } catch (_) { $('push-status').textContent = 'Push сейчас недоступен.'; }
+  });
 }
+
+$('mobile-push').onclick = () => {
+  const panel = $('push-panel'), open = panel.hidden;
+  panel.hidden = !open; $('mobile-push').setAttribute('aria-expanded', String(open));
+};
+$('push-enable').onclick = () => pushController?.enable();
+$('push-disable').onclick = () => pushController?.disable();
 
 poll();

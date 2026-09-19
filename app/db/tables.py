@@ -246,3 +246,30 @@ class LibrarySource(Base):
     is_bot: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[float] = mapped_column(Float)
     updated_at: Mapped[float] = mapped_column(Float)
+
+
+class WebPushSubscription(Base):
+    __tablename__ = "web_push_subscriptions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    endpoint: Mapped[str] = mapped_column(Text, unique=True)
+    p256dh: Mapped[str] = mapped_column(String(256))
+    auth: Mapped[str] = mapped_column(String(128))
+    device_label: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[float] = mapped_column(Float)
+    last_success_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    disabled_at: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
+
+
+class WebPushDelivery(Base):
+    __tablename__ = "web_push_deliveries"
+    __table_args__ = (
+        UniqueConstraint("subscription_id", "notification_id", name="uq_web_push_delivery"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    subscription_id: Mapped[str] = mapped_column(String(32), index=True)
+    notification_id: Mapped[int] = mapped_column(Integer, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[float] = mapped_column(Float, default=0)
+    completed_at: Mapped[float | None] = mapped_column(Float, nullable=True)

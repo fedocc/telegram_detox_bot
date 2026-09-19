@@ -18,6 +18,10 @@ def test_telegram_use_ipv6_defaults_to_false() -> None:
     assert Settings(_env_file=None).telegram_use_ipv6 is False
 
 
+def test_library_management_defaults_to_disabled() -> None:
+    assert Settings(_env_file=None).inbox_library_management_enabled is False
+
+
 def test_make_client_passes_telegram_ipv6_setting(monkeypatch, tmp_path) -> None:
     captured = {}
 
@@ -145,11 +149,24 @@ def test_inbox_origins_are_exact_loopback_and_private_tailscale() -> None:
     )
 
 
+def test_exact_declared_cloudflare_origin_is_allowed() -> None:
+    settings = Settings(
+        _env_file=None,
+        inbox_cloudflare_origin="https://telegram.example.com/",
+        inbox_allowed_origins=(
+            "http://127.0.0.1:8787,https://node.tailnet.ts.net,"
+            "https://telegram.example.com"
+        ),
+    )
+    assert settings.inbox_cloudflare_origin == "https://telegram.example.com"
+
+
 @pytest.mark.parametrize("value", [
     "*",
     "https://*.ts.net",
     "http://example.com",
     "https://example.com",
+    "https://name.trycloudflare.com",
     "https://node.tailnet.ts.net/path",
     "https://node.tailnet.ts.net,https://node.tailnet.ts.net",
 ])

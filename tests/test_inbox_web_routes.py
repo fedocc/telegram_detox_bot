@@ -78,7 +78,7 @@ async def csrf_headers(client):
 async def test_library_management_mutations_require_csrf_and_accept_digit_uuid(
         route_service):
     async with TestClient(
-        TestServer(create_app(route_service)),
+        TestServer(create_app(route_service, library_management_enabled=True)),
         headers={"Host": "127.0.0.1:8787"},
     ) as client:
         preference = {"source_id": SOURCE_ID, "notifications_muted": True}
@@ -125,6 +125,28 @@ async def test_library_management_mutations_require_csrf_and_accept_digit_uuid(
             headers=headers,
         )
         assert ambiguous.status == 400
+
+
+async def test_library_management_lock_preserves_selected_sources(route_service):
+    async with TestClient(
+        TestServer(create_app(route_service)),
+        headers={"Host": "127.0.0.1:8787"},
+    ) as client:
+        assert (await client.get("/api/library/dialogs")).status == 404
+        headers = await csrf_headers(client)
+        assert (await client.post(
+            "/api/library/preferences",
+            json={"source_id": SOURCE_ID, "notifications_muted": True},
+            headers=headers,
+        )).status == 404
+        assert (await client.post(
+            "/api/library/reorder", json={"source_ids": [SOURCE_ID]}, headers=headers,
+        )).status == 404
+        response = await client.get("/api/library")
+        assert response.status == 200
+        assert [row["id"] for row in (await response.json())["sources"]] == [
+            "saved", SOURCE_ID,
+        ]
 
 
 async def test_history_pins_exact_and_search_routes_forward_validated_arguments(
@@ -189,7 +211,7 @@ async def test_history_pins_exact_and_search_routes_forward_validated_arguments(
 
 async def test_generic_bot_multipart_send_and_disabled_source_authorization(route_service):
     async with TestClient(
-        TestServer(create_app(route_service)),
+        TestServer(create_app(route_service, library_management_enabled=True)),
         headers={"Host": "127.0.0.1:8787"},
     ) as client:
         headers = await csrf_headers(client)

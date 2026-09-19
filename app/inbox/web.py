@@ -22,7 +22,7 @@ STATIC = Path(__file__).parent / "static"
 logger = logging.getLogger(__name__)
 
 
-def create_app(service, *, port=PORT, allowed_origins=None):
+def create_app(service, *, port=PORT, allowed_origins=None, library_management_enabled=False):
     csrf = secrets.token_urlsafe(32)
     local_origin = f"http://127.0.0.1:{port}"
     allowed_origins = frozenset(allowed_origins or (local_origin,)) | {local_origin}
@@ -77,7 +77,8 @@ def create_app(service, *, port=PORT, allowed_origins=None):
 
     async def asset(request):
         name = request.match_info["name"]
-        if name not in {"app.js", "style.css", "playback.mjs", "notifications.mjs", "ui.mjs",
+        if name not in {"app.js", "style.css", "playback.mjs", "notifications.mjs",
+                        "push.mjs", "ui.mjs",
                         "app-icon.svg", "app-icon-180.png", "app-icon-512.png"}:
             raise web.HTTPNotFound()
         return web.FileResponse(STATIC / name)
@@ -90,7 +91,8 @@ def create_app(service, *, port=PORT, allowed_origins=None):
 
     async def session(request):
         return web.json_response({"csrf": csrf, "active_minutes": ACTIVE_MINUTES,
-                                  "upload_max_mb": service.upload_max // (1024 * 1024)})
+                                  "upload_max_mb": service.upload_max // (1024 * 1024),
+                                  "library_management_enabled": library_management_enabled})
 
     async def health(request):
         connected = service.client.is_connected()
@@ -105,6 +107,34 @@ def create_app(service, *, port=PORT, allowed_origins=None):
         if after is not None and after > 9223372036854775807:
             raise InboxError("Некорректный cursor.", 400)
         return web.json_response(service.store.notifications(after))
+
+    async def push_config(request):
+        return web.json_response({
+            "configured": service.push.configured,
+            "public_key": service.push.public_key if service.push.configured else "",
+        })
+
+    async def push_subscribe(request):
+        body = await request.json()
+        if not isinstance(body, dict) or set(body) - {"subscription", "device_label"}:
+            raise InboxError("Некорректная push-подписка.")
+        try:
+            return web.json_response(service.push.subscribe(
+                body.get("subscription"), body.get("device_label", "")
+            ))
+        except ValueError:
+            raise InboxError("Некорректная push-подписка.") from None
+        except RuntimeError:
+            raise InboxError("Push-уведомления ещё не настроены.", 503) from None
+
+    async def push_unsubscribe(request):
+        body = await request.json()
+        if not isinstance(body, dict) or set(body) != {"subscription"}:
+            raise InboxError("Некорректная push-подписка.")
+        try:
+            return web.json_response(service.push.unsubscribe(body["subscription"]))
+        except ValueError:
+            raise InboxError("Некорректная push-подписка.") from None
 
     def positive_query(request, name):
         raw = request.query.get(name)
@@ -124,10 +154,14 @@ def create_app(service, *, port=PORT, allowed_origins=None):
         return web.json_response({"sources": service.library_json()})
 
     async def library_dialogs(request):
+        if not library_management_enabled:
+            raise InboxError("Управление библиотекой временно отключено.", 404)
         async with asyncio.timeout(45):
             return web.json_response(await service.library_dialogs(request.query.get("q", "")))
 
     async def library_preferences(request):
+        if not library_management_enabled:
+            raise InboxError("Управление библиотекой временно отключено.", 404)
         body = await request.json()
         fields = {
             "token", "source_id", "library_enabled", "notifications_muted",
@@ -146,6 +180,8 @@ def create_app(service, *, port=PORT, allowed_origins=None):
         return web.json_response(await service.update_library(identifier, preferences))
 
     async def library_reorder(request):
+        if not library_management_enabled:
+            raise InboxError("Управление библиотекой временно отключено.", 404)
         body = await request.json()
         if not isinstance(body, dict) or set(body) != {"source_ids"}:
             raise InboxError("Некорректный порядок библиотеки.")
@@ -359,6 +395,9 @@ def create_app(service, *, port=PORT, allowed_origins=None):
         web.get("/manifest.webmanifest", manifest), web.get("/sw.js", service_worker),
         web.get("/api/session", session), web.get("/api/health", health),
         web.get("/api/notifications", notifications),
+        web.get("/api/push/config", push_config),
+        web.post("/api/push/subscriptions", push_subscribe),
+        web.post("/api/push/unsubscribe", push_unsubscribe),
         web.get("/api/conversations", conversations),
         web.get("/api/library", library),
         web.get("/api/library/dialogs", library_dialogs),
@@ -389,12 +428,17 @@ def create_app(service, *, port=PORT, allowed_origins=None):
 
 
 @contextlib.asynccontextmanager
-async def serve_inbox(service, *, port=PORT, allowed_origins=None):
-    runner = web.AppRunner(create_app(service, port=port, allowed_origins=allowed_origins),
+async def serve_inbox(service, *, port=PORT, allowed_origins=None,
+                      library_management_enabled=False):
+    runner = web.AppRunner(create_app(
+        service, port=port, allowed_origins=allowed_origins,
+        library_management_enabled=library_management_enabled,
+    ),
                            access_log=None, shutdown_timeout=100)
     await runner.setup()
     site = web.TCPSite(runner, HOST, port)
     cleanup_task = None
+    push_task = None
 
     async def maintenance():
         while True:
@@ -405,15 +449,26 @@ async def serve_inbox(service, *, port=PORT, allowed_origins=None):
             except Exception as exc:
                 logger.warning("Inbox cleanup failed (%s)", type(exc).__name__)
 
+    async def push_maintenance():
+        while True:
+            await asyncio.sleep(4)
+            try:
+                await service.push.deliver_pending()
+            except Exception as exc:
+                # Subscription material and delivery payloads are intentionally omitted.
+                logger.warning("Web Push delivery failed (%s)", type(exc).__name__)
+
     try:
         await service.cleanup()
         await site.start()
         logger.info("Mention inbox listening on http://127.0.0.1:%s", port)
         cleanup_task = asyncio.create_task(maintenance())
+        push_task = asyncio.create_task(push_maintenance())
         yield
     finally:
-        if cleanup_task:
-            cleanup_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await cleanup_task
+        for task in (cleanup_task, push_task):
+            if task:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         await runner.cleanup()

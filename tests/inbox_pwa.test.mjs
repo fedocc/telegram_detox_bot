@@ -48,3 +48,34 @@ test('mobile shell declares safe-area and removes the legacy minimum width', asy
   assert.match(style, /safe-area-inset-bottom/);
   assert.doesNotMatch(style, /min-width:780px/);
 });
+
+test('service worker push is visible, grouped and accepts only conversation deep links', async () => {
+  const worker = await readFile(new URL('sw.js', root), 'utf8');
+  assert.match(worker, /addEventListener\('push'/);
+  assert.match(worker, /showNotification/);
+  assert.match(worker, /conversation:\$\{conversation\}/);
+  assert.match(worker, /addEventListener\('notificationclick'/);
+  assert.doesNotMatch(worker, /payload\.url/);
+});
+
+test('mobile dock has safe-area, glass fallback and compact pinned/search layouts', async () => {
+  const [page, style] = await Promise.all([
+    readFile(new URL('index.html', root), 'utf8'),
+    readFile(new URL('style.css', root), 'utf8'),
+  ]);
+  for (const id of ['mobile-dock', 'mobile-library', 'mobile-push', 'push-panel']) {
+    assert.match(page, new RegExp(`id="${id}"`));
+  }
+  assert.match(style, /@supports \(\(backdrop-filter/);
+  assert.match(style, /prefers-reduced-transparency:reduce/);
+  assert.match(style, /prefers-reduced-motion:no-preference/);
+  assert.match(style, /#pinned-list \{ max-height:92px/);
+  assert.match(style, /#search-input \{ min-height:44px/);
+});
+
+test('history polling fast path avoids layout work and anchor uses one hit test', async () => {
+  const app = await readFile(new URL('app.js', root), 'utf8');
+  assert.match(app, /if \(!initial && !messagesChanged\(signatures, unique\)\) return false/);
+  assert.match(app, /document\.elementFromPoint/);
+  assert.doesNotMatch(app, /\.\.\.list\.querySelectorAll\('\[data-id\]'\)/);
+});

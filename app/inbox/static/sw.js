@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE = 'telegram-detox-shell-v2';
+const CACHE = 'telegram-detox-shell-v3';
 const SHELL = new Set([
   '/',
   '/manifest.webmanifest',
@@ -9,6 +9,7 @@ const SHELL = new Set([
   '/static/ui.mjs',
   '/static/playback.mjs',
   '/static/notifications.mjs',
+  '/static/push.mjs',
   '/static/app-icon-180.png',
   '/static/app-icon-512.png',
 ]);
@@ -16,6 +17,44 @@ const SHELL = new Set([
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll([...SHELL])));
   self.skipWaiting();
+});
+
+const validConversation = value => typeof value === 'string' && /^[a-f0-9]{32}$/.test(value);
+
+self.addEventListener('push', event => {
+  let payload = {};
+  try { payload = event.data?.json() || {}; } catch (_) {}
+  const conversation = validConversation(payload.conversation_id) ? payload.conversation_id : null;
+  const tag = conversation ? `conversation:${conversation}` : 'telegram-detox:attention';
+  const url = conversation ? `/?conversation=${conversation}` : '/';
+  const title = typeof payload.title === 'string' ? payload.title.slice(0, 100) : 'Telegram Detox';
+  const subtitle = typeof payload.subtitle === 'string' ? payload.subtitle.slice(0, 100) : 'Новое сообщение';
+  const body = typeof payload.body === 'string' ? payload.body.slice(0, 200) : subtitle;
+  const badge = Number.isSafeInteger(payload.badge) && payload.badge > 0 ? payload.badge : 0;
+  event.waitUntil(Promise.all([
+    self.registration.showNotification(title, {
+      body: `${subtitle}${body ? `\n${body}` : ''}`,
+      tag, renotify: true, icon: '/static/app-icon-180.png',
+      data: {url},
+    }),
+    typeof self.navigator?.setAppBadge === 'function'
+      ? self.navigator.setAppBadge(badge).catch(() => {}) : Promise.resolve(),
+  ]));
+});
+
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  const raw = event.notification.data?.url;
+  const match = typeof raw === 'string' ? raw.match(/^\/\?conversation=([a-f0-9]{32})$/) : null;
+  const url = match ? `/?conversation=${match[1]}` : '/';
+  event.waitUntil(self.clients.matchAll({type: 'window', includeUncontrolled: true}).then(async clients => {
+    if (clients.length) {
+      const client = clients[0];
+      if ('navigate' in client) await client.navigate(url);
+      return client.focus();
+    }
+    return self.clients.openWindow(url);
+  }));
 });
 
 self.addEventListener('activate', event => {
