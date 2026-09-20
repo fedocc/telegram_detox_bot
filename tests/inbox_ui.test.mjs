@@ -4,8 +4,12 @@ import {
   advanceOlderCursor,
   appendOnlyMessages,
   deepLinkFor,
+  digestIdentity,
+  digestTitle,
+  dismissDigest,
   insertNewNodesInOrder,
   incrementalGrouping,
+  isDigestDismissed,
   isMacNotifierClient,
   isTerminalConversationStatus,
   isWritable,
@@ -24,6 +28,12 @@ import {
   uploadWithinLimit,
   messagesChanged,
 } from '../app/inbox/static/ui.mjs';
+
+class MemoryStorage {
+  constructor() { this.values = new Map(); }
+  getItem(key) { return this.values.get(key) ?? null; }
+  setItem(key, value) { this.values.set(key, String(value)); }
+}
 
 test('library pages merge in chronological order without duplicates', () => {
   assert.deepEqual(mergeMessagePages([{id:2}, {id:1}], [{id:2}, {id:3}]).map(x => x.id),
@@ -51,6 +61,20 @@ test('reaction-only polling changes are meaningful without duplicating messages'
   assert.equal(messagesChanged(signatures,changed),true);
   assert.equal(signatures.get('2'),JSON.stringify(changed[1]));
   assert.equal(mergeMessagePages(changed,changed).length,2);
+});
+
+test('digest title and dismissal persist only for the current digest', () => {
+  const storage = new MemoryStorage();
+  const current = {period_end:'2026-09-20T04:00:00Z'};
+  const next = {period_end:'2026-09-21T04:00:00Z'};
+  assert.equal(digestTitle(current.period_end),'Сводка · 20 сент.');
+  assert.equal(digestIdentity(current),`|${current.period_end}`);
+  assert.equal(isDigestDismissed(storage,current),false);
+  assert.equal(dismissDigest(storage,current),true);
+  assert.equal(isDigestDismissed(storage,current),true);
+  assert.equal(isDigestDismissed(storage,{...current}),true);
+  assert.equal(isDigestDismissed(storage,next),false);
+  assert.equal(isDigestDismissed(storage,{...current,id:2}),false);
 });
 
 test('append-only polling accepts new tail messages without hiding edits or removals', () => {

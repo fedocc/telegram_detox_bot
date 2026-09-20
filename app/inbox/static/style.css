@@ -640,11 +640,13 @@ dialog img {
 .search-result-meta { display:flex; gap:7px; color:var(--muted); font-size:10px }
 .search-result-text { margin-top:2px; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere; white-space:pre-wrap }
 .custom-emoji { display:inline-block; width:1.2em; height:1.2em; object-fit:contain; vertical-align:-.22em; line-height:1; margin:0 .02em }
-.message-reactions { display:flex; flex-wrap:wrap; gap:3px 9px; margin-top:4px; color:var(--muted); font-size:11px; line-height:1.25 }
-.message-reaction { display:inline-flex; align-items:center; white-space:nowrap }
-.message-reaction .custom-emoji { width:1.1em; height:1.1em }
-.morning-digest { margin:4px 8px 8px; padding:10px; border:1px solid #ffffff12; border-radius:10px; background:#ffffff05 }
+.message-reactions { display:flex; flex-wrap:wrap; gap:5px 8px; margin-top:5px; color:#b5b8bc; font-size:12px; line-height:1.35 }
+.message-reaction { display:inline-flex; align-items:center; gap:4px; min-height:21px; padding:1px 6px; border:1px solid #ffffff0d; border-radius:7px; background:#ffffff07; white-space:nowrap }
+.message-reaction .custom-emoji { width:1.2em; height:1.2em; margin:0 }
+.morning-digest { position:relative; margin:4px 8px 8px; padding:10px 36px 10px 10px; border:1px solid #ffffff12; border-radius:10px; background:#ffffff05 }
 .digest-heading { display:block; margin-bottom:5px; color:var(--muted); font-size:11px }
+.digest-dismiss { position:absolute; top:3px; right:4px; width:30px; height:30px; border-radius:7px; color:var(--muted); font-size:18px; line-height:1 }
+.digest-dismiss:hover,.digest-dismiss:focus-visible { color:var(--text); background:#ffffff0b }
 .digest-item { display:grid; grid-template-columns:20px 1fr; gap:5px; padding:6px 0; color:var(--text); text-decoration:none; border-top:1px solid #ffffff0b }
 .digest-item b,.digest-item small { display:block }
 .digest-item b { font-size:12px }

@@ -1,15 +1,16 @@
 'use strict';
 
-import {createPlaybackController} from './playback.mjs?v=6';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=6';
-import {createPushController} from './push.mjs?v=6';
+import {createPlaybackController} from './playback.mjs?v=7';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=7';
+import {createPushController} from './push.mjs?v=7';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
   messagesChanged, moveSelectedSource, newPageMessages, nextAuxiliaryPanel,
   normalizedSearchQuery, parseDeepLink, renderableMessages, restoreScrollAnchor,
   openedConversationIds, preferencePayload, retainFocusedMessage, scopePath, uploadWithinLimit,
-} from './ui.mjs?v=6';
+  digestTitle, dismissDigest, isDigestDismissed,
+} from './ui.mjs?v=7';
 
 const playback = createPlaybackController(document);
 const $ = id => document.getElementById(id);
@@ -170,9 +171,18 @@ function renderLibrary() {
 
 function renderMorningDigest(digest) {
   const card = $('morning-digest');
-  if (!digest) { card.hidden = true; card.replaceChildren(); return; }
-  const date = new Date(digest.period_end).toLocaleDateString('ru-RU', {day: 'numeric', month: 'short'});
-  const heading = node('strong', 'digest-heading', `☀️ Утро · ${date}`);
+  let storage = null;
+  try { storage = window.localStorage; } catch (_) {}
+  if (!digest || isDigestDismissed(storage, digest)) {
+    card.hidden = true; card.replaceChildren(); return;
+  }
+  const heading = node('strong', 'digest-heading', digestTitle(digest.period_end));
+  const dismiss = node('button', 'digest-dismiss', '×');
+  dismiss.type = 'button'; dismiss.setAttribute('aria-label', 'Скрыть сводку');
+  dismiss.onclick = () => {
+    dismissDigest(storage, digest);
+    card.hidden = true; card.replaceChildren();
+  };
   const items = Array.isArray(digest.items) ? digest.items : [];
   const icons = {action: '⚡', study: '🎓', news: '📰', other: '•'};
   const content = items.length ? items.map(item => {
@@ -184,7 +194,7 @@ function renderMorningDigest(digest) {
     link.append(copy);
     return link;
   }) : [node('p', 'digest-empty', 'Ничего важного с прошлой сводки.')];
-  card.replaceChildren(heading, ...content); card.hidden = false;
+  card.replaceChildren(heading, dismiss, ...content); card.hidden = false;
 }
 
 function renderHeader() {
@@ -444,7 +454,7 @@ function reactionsNode(reactions) {
   for (const reaction of reactions || []) {
     if (!Number.isFinite(Number(reaction?.count)) || Number(reaction.count) <= 0) continue;
     const item = node('span', 'message-reaction');
-    item.append(reactionIcon(reaction), document.createTextNode(` ${Number(reaction.count)}`));
+    item.append(reactionIcon(reaction), document.createTextNode(String(Number(reaction.count))));
     wrap.append(item);
   }
   return wrap.childNodes.length ? wrap : null;

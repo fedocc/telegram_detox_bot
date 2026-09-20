@@ -1,15 +1,15 @@
 'use strict';
 
-const CACHE = 'telegram-detox-shell-v6';
+const CACHE = 'telegram-detox-shell-v7';
 const SHELL = new Set([
   '/',
   '/manifest.webmanifest',
-  '/static/style.css?v=6',
-  '/static/app.js?v=6',
-  '/static/ui.mjs?v=6',
-  '/static/playback.mjs?v=6',
-  '/static/notifications.mjs?v=6',
-  '/static/push.mjs?v=6',
+  '/static/style.css?v=7',
+  '/static/app.js?v=7',
+  '/static/ui.mjs?v=7',
+  '/static/playback.mjs?v=7',
+  '/static/notifications.mjs?v=7',
+  '/static/push.mjs?v=7',
   '/static/app-icon-180.png',
   '/static/app-icon-512.png',
 ]);
@@ -69,7 +69,9 @@ self.addEventListener('fetch', event => {
   const url = new URL(request.url);
   if (request.method !== 'GET' || url.origin !== self.location.origin) return;
   // API data, Telegram messages/media and search responses are always network-only.
-  if (url.pathname.startsWith('/api/') || !SHELL.has(url.pathname)) return;
+  const shellKey = `${url.pathname}${url.search}`;
+  if (url.pathname.startsWith('/api/')
+      || !(SHELL.has(shellKey) || SHELL.has(url.pathname))) return;
   event.respondWith(fetch(request).then(response => {
     if (response.ok) {
       const copy = response.clone();

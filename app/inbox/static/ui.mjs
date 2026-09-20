@@ -37,6 +37,36 @@ export function messagesChanged(signatures, messages) {
   return messages.some(message => signatures.get(String(message.id)) !== JSON.stringify(message));
 }
 
+export const DIGEST_DISMISSED_KEY = 'telegram-detox:dismissed-digest';
+
+export function digestIdentity(digest) {
+  if (!digest || typeof digest !== 'object') return '';
+  const id = digest.id == null ? '' : String(digest.id);
+  const periodEnd = digest.period_end == null ? '' : String(digest.period_end);
+  return id || periodEnd ? `${id}|${periodEnd}` : '';
+}
+
+export function digestTitle(periodEnd) {
+  const parsed = new Date(periodEnd);
+  if (Number.isNaN(parsed.valueOf())) return 'Сводка';
+  const date = parsed.toLocaleDateString('ru-RU', {
+    day: 'numeric', month: 'short', timeZone: 'Europe/Moscow',
+  });
+  return `Сводка · ${date}`;
+}
+
+export function isDigestDismissed(storage, digest) {
+  const identity = digestIdentity(digest);
+  if (!identity || !storage) return false;
+  try { return storage.getItem(DIGEST_DISMISSED_KEY) === identity; } catch (_) { return false; }
+}
+
+export function dismissDigest(storage, digest) {
+  const identity = digestIdentity(digest);
+  if (!identity || !storage) return false;
+  try { storage.setItem(DIGEST_DISMISSED_KEY, identity); return true; } catch (_) { return false; }
+}
+
 export function appendOnlyMessages(signatures, messages) {
   if (!(signatures instanceof Map) || !signatures.size) return null;
   const incoming = new Map(messages.map(message => [String(message.id), message]));

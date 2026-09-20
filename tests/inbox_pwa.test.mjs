@@ -28,13 +28,13 @@ test('PWA PNG icons have the declared dimensions and stay compact', async () => 
 
 test('service worker explicitly bypasses every API request', async () => {
   const worker = await readFile(new URL('sw.js', root), 'utf8');
-  assert.match(worker, /telegram-detox-shell-v6/);
+  assert.match(worker, /telegram-detox-shell-v7/);
   for (const asset of ['style.css', 'app.js', 'ui.mjs', 'notifications.mjs']) {
-    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=6`));
+    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=7`));
   }
   assert.match(worker, /url\.pathname\.startsWith\('\/api\/'\)/);
   assert.doesNotMatch(worker, /SHELL[^;]*\/api\//s);
-  assert.match(worker, /SHELL\.has\(url\.pathname\)/);
+  assert.match(worker, /SHELL\.has\(shellKey\)/);
   assert.match(worker, /\/static\/app-icon-180\.png/);
   assert.match(worker, /\/static\/app-icon-512\.png/);
   assert.doesNotMatch(worker, /\/static\/app-icon\.svg/);
@@ -47,8 +47,8 @@ test('mobile shell declares safe-area and removes the legacy minimum width', asy
   ]);
   assert.match(page, /viewport-fit=cover/);
   assert.match(page, /manifest\.webmanifest/);
-  assert.match(page, /style\.css\?v=6/);
-  assert.match(page, /app\.js\?v=6/);
+  assert.match(page, /style\.css\?v=7/);
+  assert.match(page, /app\.js\?v=7/);
   assert.match(page, /rel="apple-touch-icon" sizes="180x180" href="\/static\/app-icon-180\.png"/);
   assert.match(style, /@media \(max-width:768px\)/);
   assert.match(style, /safe-area-inset-bottom/);
@@ -145,8 +145,24 @@ test('custom emoji and morning digest render inline without replacing stable mes
   assert.match(app, /stickerObserver\?\.observe\(video\)/);
   assert.match(style, /\.custom-emoji \{/);
   assert.match(page, /id="morning-digest"/);
+  assert.match(app, /digestTitle\(digest\.period_end\)/);
+  assert.match(app, /'digest-dismiss', '×'/);
+  assert.match(app, /dismissDigest\(storage, digest\)/);
+  assert.doesNotMatch(app, /☀️ Утро/);
   assert.match(app, /\/?library=|item\.links\?\.\[0\]/);
   assert.match(app, /incrementalMessagePage/);
+});
+
+test('all frontend shell references use the same cache version', async () => {
+  const [page, app, worker] = await Promise.all([
+    readFile(new URL('index.html', root), 'utf8'),
+    readFile(new URL('app.js', root), 'utf8'),
+    readFile(new URL('sw.js', root), 'utf8'),
+  ]);
+  for (const source of [page, app, worker]) assert.doesNotMatch(source, /\?v=6|shell-v6/);
+  assert.match(worker, /telegram-detox-shell-v7/);
+  assert.match(page, /app\.js\?v=7/);
+  assert.match(app, /ui\.mjs\?v=7/);
 });
 
 test('aggregate reactions render compactly and message reconciliation replaces only changed nodes', async () => {
@@ -158,5 +174,5 @@ test('aggregate reactions render compactly and message reconciliation replaces o
   assert.match(app, /else if \(existing\.signature !== signature\)/);
   assert.match(app, /existing\.node\.replaceWith\(element\)/);
   assert.match(style, /\.message-reactions \{/);
-  assert.match(style, /font-size:11px/);
+  assert.match(style, /font-size:12px/);
 });
