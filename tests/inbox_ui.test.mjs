@@ -21,6 +21,7 @@ import {
   openedConversationIds,
   parseDeepLink,
   preferencePayload,
+  reactionEmojiPresentation,
   retainFocusedMessage,
   renderableMessages,
   restoreScrollAnchor,
@@ -61,6 +62,11 @@ test('reaction-only polling changes are meaningful without duplicating messages'
   assert.equal(messagesChanged(signatures,changed),true);
   assert.equal(signatures.get('2'),JSON.stringify(changed[1]));
   assert.equal(mergeMessagePages(changed,changed).length,2);
+});
+
+test('reaction emoji presentation colors a plain heart without changing other emoji order', () => {
+  const emoji = ['❤','❤️','👍','🙏','🔥','😂'];
+  assert.deepEqual(emoji.map(reactionEmojiPresentation), ['❤️','❤️','👍','🙏','🔥','😂']);
 });
 
 test('digest title and dismissal persist only for the current digest', () => {

@@ -1,16 +1,16 @@
 'use strict';
 
-import {createPlaybackController} from './playback.mjs?v=7';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=7';
-import {createPushController} from './push.mjs?v=7';
+import {createPlaybackController} from './playback.mjs?v=8';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=8';
+import {createPushController} from './push.mjs?v=8';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
   messagesChanged, moveSelectedSource, newPageMessages, nextAuxiliaryPanel,
   normalizedSearchQuery, parseDeepLink, renderableMessages, restoreScrollAnchor,
   openedConversationIds, preferencePayload, retainFocusedMessage, scopePath, uploadWithinLimit,
-  digestTitle, dismissDigest, isDigestDismissed,
-} from './ui.mjs?v=7';
+  digestTitle, dismissDigest, isDigestDismissed, reactionEmojiPresentation,
+} from './ui.mjs?v=8';
 
 const playback = createPlaybackController(document);
 const $ = id => document.getElementById(id);
@@ -433,7 +433,7 @@ function reactionIcon(reaction) {
   if (custom?.available && custom.format === 'static') {
     const image = node('img', 'custom-emoji');
     image.src = custom.url; image.alt = fallback; image.loading = 'lazy'; image.decoding = 'async';
-    image.onerror = () => image.replaceWith(document.createTextNode(fallback));
+    image.onerror = () => image.replaceWith(node('span', 'reaction-emoji', fallback));
     return image;
   }
   if (custom?.available && custom.format === 'video') {
@@ -441,12 +441,12 @@ function reactionIcon(reaction) {
     video.src = custom.url; video.muted = true; video.defaultMuted = true;
     video.loop = true; video.playsInline = true; video.preload = 'metadata';
     video.setAttribute('aria-label', fallback); video.setAttribute('role', 'img');
-    video.onerror = () => video.replaceWith(document.createTextNode(fallback));
+    video.onerror = () => video.replaceWith(node('span', 'reaction-emoji', fallback));
     stickerObserver?.observe(video);
     if (!stickerObserver) { video.autoplay = true; video.play().catch(() => {}); }
     return video;
   }
-  return document.createTextNode(fallback);
+  return node('span', 'reaction-emoji', reactionEmojiPresentation(fallback));
 }
 
 function reactionsNode(reactions) {
@@ -454,7 +454,8 @@ function reactionsNode(reactions) {
   for (const reaction of reactions || []) {
     if (!Number.isFinite(Number(reaction?.count)) || Number(reaction.count) <= 0) continue;
     const item = node('span', 'message-reaction');
-    item.append(reactionIcon(reaction), document.createTextNode(String(Number(reaction.count))));
+    item.append(reactionIcon(reaction),
+      node('span', 'reaction-count', String(Number(reaction.count))));
     wrap.append(item);
   }
   return wrap.childNodes.length ? wrap : null;
@@ -604,13 +605,15 @@ function messageNode(message) {
     appendSegments(paragraph, message.segments, message.text, message.mention); bubble.append(paragraph);
   }
   const reactions = reactionsNode(message.reactions);
-  if (reactions) bubble.append(reactions);
   const timestamp = node('time', 'timestamp',
     new Date(message.timestamp).toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'})
       + (message.own ? ' ✓' : ''));
   timestamp.dateTime = message.timestamp;
   timestamp.title = new Date(message.timestamp).toLocaleString('ru-RU');
-  bubble.append(timestamp);
+  if (reactions) {
+    const meta = node('div', 'message-meta');
+    meta.append(reactions, timestamp); bubble.append(meta);
+  } else bubble.append(timestamp);
   return bubble;
 }
 

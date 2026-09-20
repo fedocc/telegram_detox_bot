@@ -28,9 +28,9 @@ test('PWA PNG icons have the declared dimensions and stay compact', async () => 
 
 test('service worker explicitly bypasses every API request', async () => {
   const worker = await readFile(new URL('sw.js', root), 'utf8');
-  assert.match(worker, /telegram-detox-shell-v7/);
+  assert.match(worker, /telegram-detox-shell-v8/);
   for (const asset of ['style.css', 'app.js', 'ui.mjs', 'notifications.mjs']) {
-    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=7`));
+    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=8`));
   }
   assert.match(worker, /url\.pathname\.startsWith\('\/api\/'\)/);
   assert.doesNotMatch(worker, /SHELL[^;]*\/api\//s);
@@ -47,8 +47,8 @@ test('mobile shell declares safe-area and removes the legacy minimum width', asy
   ]);
   assert.match(page, /viewport-fit=cover/);
   assert.match(page, /manifest\.webmanifest/);
-  assert.match(page, /style\.css\?v=7/);
-  assert.match(page, /app\.js\?v=7/);
+  assert.match(page, /style\.css\?v=8/);
+  assert.match(page, /app\.js\?v=8/);
   assert.match(page, /rel="apple-touch-icon" sizes="180x180" href="\/static\/app-icon-180\.png"/);
   assert.match(style, /@media \(max-width:768px\)/);
   assert.match(style, /safe-area-inset-bottom/);
@@ -159,10 +159,10 @@ test('all frontend shell references use the same cache version', async () => {
     readFile(new URL('app.js', root), 'utf8'),
     readFile(new URL('sw.js', root), 'utf8'),
   ]);
-  for (const source of [page, app, worker]) assert.doesNotMatch(source, /\?v=6|shell-v6/);
-  assert.match(worker, /telegram-detox-shell-v7/);
-  assert.match(page, /app\.js\?v=7/);
-  assert.match(app, /ui\.mjs\?v=7/);
+  for (const source of [page, app, worker]) assert.doesNotMatch(source, /\?v=[67]|shell-v[67]/);
+  assert.match(worker, /telegram-detox-shell-v8/);
+  assert.match(page, /app\.js\?v=8/);
+  assert.match(app, /ui\.mjs\?v=8/);
 });
 
 test('aggregate reactions render compactly and message reconciliation replaces only changed nodes', async () => {
@@ -171,8 +171,19 @@ test('aggregate reactions render compactly and message reconciliation replaces o
   assert.match(app, /function reactionsNode\(reactions\)/);
   assert.match(app, /reactionIcon\(reaction\)/);
   assert.match(app, /reaction\?\.emoji \|\| '◉'/);
+  assert.match(app, /'reaction-emoji', reactionEmojiPresentation\(fallback\)/);
+  assert.match(app, /'reaction-count', String\(Number\(reaction\.count\)\)/);
+  assert.match(app, /const meta = node\('div', 'message-meta'\)/);
+  assert.match(app, /meta\.append\(reactions, timestamp\)/);
+  assert.match(app, /else bubble\.append\(timestamp\)/);
+  assert.match(app, /for \(const reaction of reactions \|\| \[\]\)/);
+  assert.match(app, /custom\?\.available && custom\.format === 'static'/);
+  assert.match(app, /custom\?\.available && custom\.format === 'video'/);
   assert.match(app, /else if \(existing\.signature !== signature\)/);
   assert.match(app, /existing\.node\.replaceWith\(element\)/);
   assert.match(style, /\.message-reactions \{/);
-  assert.match(style, /font-size:12px/);
+  assert.match(style, /\.reaction-emoji \{[^}]*Apple Color Emoji/);
+  assert.match(style, /\.reaction-count \{/);
+  assert.match(style, /\.message-meta \.timestamp \{[^}]*float:none/);
+  assert.match(style, /gap:6px/);
 });

@@ -67,6 +67,11 @@ export function dismissDigest(storage, digest) {
   try { storage.setItem(DIGEST_DISMISSED_KEY, identity); return true; } catch (_) { return false; }
 }
 
+export function reactionEmojiPresentation(value) {
+  const emoji = String(value || '◉');
+  return emoji === '\u2764' ? `${emoji}\uFE0F` : emoji;
+}
+
 export function appendOnlyMessages(signatures, messages) {
   if (!(signatures instanceof Map) || !signatures.size) return null;
   const incoming = new Map(messages.map(message => [String(message.id), message]));
