@@ -52,6 +52,11 @@ class InboxStore:
         with self.factory() as session:
             return session.get(InboxConversation, key)
 
+    def unread_total(self, rows=None):
+        return sum(max(0, int(row.unread_count or 0)) for row in (
+            self.active() if rows is None else rows
+        ))
+
     def activate(
         self,
         *,

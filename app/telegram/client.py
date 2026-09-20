@@ -173,6 +173,7 @@ async def run_listener(
             settings.inbox_upload_max_mb, settings.inbox_upload_concurrency,
             settings.inbox_upload_stale_hours,
             settings.web_push_vapid_private_key, settings.web_push_vapid_subject,
+            settings.timezone,
         )
         if on_inbox_ready is not None:
             on_inbox_ready(inbox)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -10,6 +12,7 @@ from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
 
 from app.db.session import init_db
+from app.db.tables import MorningDigest
 from app.inbox.service import InboxError, InboxService
 from app.inbox.web import create_app
 
@@ -73,6 +76,38 @@ async def csrf_headers(client):
         "Origin": ORIGIN,
         "X-Inbox-CSRF": (await response.json())["csrf"],
     }
+
+
+async def test_badge_and_digest_history_are_read_only_server_state(route_service):
+    row = route_service.store.activate(
+        peer_id="42", peer_type="user", thread_id=0, is_forum=False,
+        title="Nikita", trigger_id=9, preview="hello", reason="private_message",
+    )
+    end = datetime(2026, 9, 20, 4, tzinfo=UTC).replace(tzinfo=None)
+    with route_service.store.factory() as session:
+        session.add(MorningDigest(
+            period_start=datetime(2026, 9, 19, 4), period_end=end, generated_at=end,
+            model="gemini-3.8-flash", prompt_version="morning-v1",
+            payload_json=json.dumps({"title": "Главное", "items": []}), status="success",
+        ))
+        session.commit()
+    route_service.clock = lambda: datetime(2026, 9, 20, 12, tzinfo=UTC).timestamp()
+
+    async with TestClient(
+        TestServer(create_app(route_service)), headers={"Host": "127.0.0.1:8787"},
+    ) as client:
+        assert await (await client.get("/api/badge")).json() == {"badge": 1}
+        listing = await (await client.get("/api/conversations")).json()
+        assert listing["badge"] == 1
+        history = await (await client.get("/api/digest/history")).json()
+        assert history["digests"][0]["title"] == "Главное"
+        headers = await csrf_headers(client)
+        opened = await client.post(
+            f"/api/conversations/{row.id}/open", json={}, headers=headers,
+        )
+        assert opened.status == 200
+        assert (await opened.json())["conversation"]["unread_count"] == 0
+        assert await (await client.get("/api/badge")).json() == {"badge": 0}
 
 
 async def test_library_management_mutations_require_csrf_and_accept_digit_uuid(

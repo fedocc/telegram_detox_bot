@@ -297,12 +297,14 @@ def safe_link_segments(text, entities):
 class InboxService:
     def __init__(self, client, factory, ignored, cache_dir, self_id, clock=time.time,
                  library=None, upload_max_mb=100, upload_concurrency=2,
-                 upload_stale_hours=24, web_push_private_key="", web_push_subject=""):
+                 upload_stale_hours=24, web_push_private_key="", web_push_subject="",
+                 timezone="Europe/Moscow"):
         self.client = client
         self.store = InboxStore(factory, ignored, clock)
         self.store.clamp_existing_lifetimes()
         self.clock = clock
         self.self_id = self_id
+        self.timezone = timezone
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.snapshots = OrderedDict()

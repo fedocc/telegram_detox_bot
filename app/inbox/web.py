@@ -7,9 +7,11 @@ import contextlib
 import logging
 import os
 import secrets
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from aiohttp import web
 
@@ -146,9 +148,13 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         return int(raw)
 
     async def conversations(request):
-        return web.json_response({"conversations": [conversation_json(r) for r in
-            service.store.active()], "now": service.clock(),
-            "connected": service.client.is_connected()})
+        rows = service.store.active()
+        return web.json_response({"conversations": [conversation_json(row) for row in rows],
+            "now": service.clock(), "connected": service.client.is_connected(),
+            "badge": service.store.unread_total(rows)})
+
+    async def badge(request):
+        return web.json_response({"badge": service.store.unread_total()})
 
     async def library(request):
         return web.json_response({"sources": service.library_json()})
@@ -157,6 +163,14 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         from app.inbox.digest import latest_digest
 
         return web.json_response({"digest": latest_digest(service.store.factory)})
+
+    async def morning_digest_history(request):
+        from app.inbox.digest import digest_history
+
+        return web.json_response({"digests": digest_history(
+            service.store.factory, service.timezone,
+            now=datetime.fromtimestamp(service.clock(), ZoneInfo(service.timezone)),
+        )})
 
     async def library_dialogs(request):
         if not library_management_enabled:
@@ -416,8 +430,10 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         web.post("/api/push/subscriptions", push_subscribe),
         web.post("/api/push/unsubscribe", push_unsubscribe),
         web.get("/api/conversations", conversations),
+        web.get("/api/badge", badge),
         web.get("/api/library", library),
         web.get("/api/digest/latest", morning_digest),
+        web.get("/api/digest/history", morning_digest_history),
         web.get("/api/library/dialogs", library_dialogs),
         web.post("/api/library/preferences", library_preferences),
         web.post("/api/library/reorder", library_reorder),

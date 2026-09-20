@@ -123,6 +123,28 @@ async def test_burst_uses_latest_preview_and_one_push_per_conversation(push_fixt
     assert payload["body"] == "Последнее: message 12"
 
 
+async def test_real_push_uses_current_canonical_badge_after_other_chat_was_read(
+        push_fixture):
+    push_fixture.push.subscribe(subscription())
+    read = push_fixture.store.activate(
+        peer_id="2", peer_type="user", thread_id=0, is_forum=False,
+        title="Read on Mac", trigger_id=10, preview="done", reason="private_message",
+    )
+    push_fixture.store.open(read.id)
+    unread = push_fixture.store.activate(
+        peer_id="3", peer_type="user", thread_id=0, is_forum=False,
+        title="Still unread", trigger_id=11, preview="new", reason="private_message",
+    )
+
+    await push_fixture.push.deliver_pending()
+
+    assert push_fixture.store.unread_total() == 1
+    assert len(push_fixture.sent) == 1
+    payload = json.loads(push_fixture.sent[0]["data"])
+    assert payload["conversation_id"] == unread.id
+    assert payload["badge"] == 1
+
+
 async def test_unmuted_library_attention_pushes(push_fixture):
     push_fixture.push.subscribe(subscription())
     source = push_fixture.store.upsert_library_source(

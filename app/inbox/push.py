@@ -151,7 +151,7 @@ class WebPushService:
             return
         now = self.clock()
         active = {row.id: row for row in self.store.active()}
-        badge = sum(max(0, int(row.unread_count or 0)) for row in active.values())
+        badge = self.store.unread_total(active.values())
         with self.factory() as session:
             subscriptions = list(session.scalars(select(WebPushSubscription).where(
                 WebPushSubscription.disabled_at.is_(None)

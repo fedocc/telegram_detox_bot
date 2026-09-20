@@ -11,13 +11,13 @@
   <title>Telegram Detox</title>
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="apple-touch-icon" sizes="180x180" href="/static/app-icon-180.png">
-  <link rel="stylesheet" href="/static/style.css?v=9">
-  <script type="module" src="/static/app.js?v=9"></script>
+  <link rel="stylesheet" href="/static/style.css?v=10">
+  <script type="module" src="/static/app.js?v=10"></script>
 </head>
 <body>
   <div class="shell">
     <aside>
-      <header class="list-header"><strong>Входящие <span id="count" class="count">0</span></strong><button id="home" type="button" aria-label="На главный экран" title="На главный экран"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 10 8-7 8 7v10h-6v-6h-4v6H4z"/></svg></button></header>
+      <header class="list-header"><strong>Входящие <span id="count" class="count">0</span></strong><span class="list-actions"><button id="digest-history-button" class="nav-icon" type="button" aria-label="История сводок" title="История сводок"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v15H5zM8 8h8M8 11h8M8 14h5M2 8v10a2 2 0 0 0 2 2h1"/></svg></button><button id="home" class="nav-icon" type="button" aria-label="На главный экран" title="На главный экран"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 10 8-7 8 7v10h-6v-6h-4v6H4z"/></svg></button></span></header>
       <nav id="conversations" aria-label="Активные разговоры"></nav>
       <section class="library">
         <div class="library-heading">
@@ -59,9 +59,14 @@
     </aside>
     <main>
       <section id="empty" class="empty"><h1 id="empty-title">Нет активных упоминаний</h1><p id="empty-description">Личные сообщения, @fedocc и ответы появятся здесь.</p><div id="open-error" class="error" role="status" hidden></div></section>
+      <section id="digest-history" class="digest-history" aria-labelledby="digest-history-title" hidden>
+        <header><h1 id="digest-history-title">Сводки</h1></header>
+        <div id="digest-history-error" class="error" role="status" hidden></div>
+        <div id="digest-history-list"></div>
+      </section>
       <section id="conversation" hidden>
         <header class="chat-header">
-          <button id="mobile-back" class="mobile-back" type="button" aria-label="К списку">‹</button>
+          <button id="mobile-back" class="chat-back" type="button" aria-label="К списку">‹</button>
           <span id="chat-avatar" class="avatar"></span><h1 id="chat-title"></h1>
           <button id="search-toggle" class="header-icon" type="button" aria-label="Поиск в этом чате" aria-expanded="false">⌕</button>
           <span id="remaining" class="remaining"></span><button id="close" type="button">Закрыть</button>

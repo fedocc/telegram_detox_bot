@@ -260,6 +260,16 @@ export function deepLinkFor(mode, id, messageId = null) {
   return query ? `/?${query}` : '/';
 }
 
+export function isDigestHistoryRoute(search) {
+  const params = new URLSearchParams(search || '');
+  return params.get('view') === 'digests';
+}
+
+export function canonicalBadge(value) {
+  const count = Number(value);
+  return Number.isSafeInteger(count) && count > 0 ? count : 0;
+}
+
 export function isMacNotifierClient({platform = '', userAgent = '', maxTouchPoints = 0} = {}) {
   const looksMac = /mac/i.test(platform) || /macintosh/i.test(userAgent);
   const looksMobile = /iphone|ipad|ipod|android/i.test(userAgent)

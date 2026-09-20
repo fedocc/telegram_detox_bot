@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   advanceOlderCursor,
   appendOnlyMessages,
+  canonicalBadge,
   clipboardFile,
   createFileDragTracker,
   deepLinkFor,
@@ -13,6 +14,7 @@ import {
   incrementalGrouping,
   hasFileTransfer,
   isDigestDismissed,
+  isDigestHistoryRoute,
   isMacNotifierClient,
   isNearBottom,
   isTerminalConversationStatus,
@@ -88,6 +90,20 @@ test('digest title and dismissal persist only for the current digest', () => {
   assert.equal(isDigestDismissed(storage,{...current}),true);
   assert.equal(isDigestDismissed(storage,next),false);
   assert.equal(isDigestDismissed(storage,{...current,id:2}),false);
+  const serverHistory = [current, next];
+  assert.deepEqual(serverHistory,[current,next]);
+});
+
+test('digest history route and canonical badge values are strict', () => {
+  assert.equal(isDigestHistoryRoute('?view=digests'),true);
+  assert.equal(isDigestHistoryRoute('?view=other'),false);
+  assert.equal(isDigestHistoryRoute('?conversation=abc'),false);
+  assert.equal(canonicalBadge(4),4);
+  assert.equal(canonicalBadge('4'),4);
+  assert.equal(canonicalBadge(0),0);
+  assert.equal(canonicalBadge(-1),0);
+  assert.equal(canonicalBadge(1.5),0);
+  assert.equal(canonicalBadge('bad'),0);
 });
 
 test('append-only polling accepts new tail messages without hiding edits or removals', () => {

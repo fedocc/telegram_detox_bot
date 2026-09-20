@@ -28,9 +28,9 @@ test('PWA PNG icons have the declared dimensions and stay compact', async () => 
 
 test('service worker explicitly bypasses every API request', async () => {
   const worker = await readFile(new URL('sw.js', root), 'utf8');
-  assert.match(worker, /telegram-detox-shell-v9/);
+  assert.match(worker, /telegram-detox-shell-v10/);
   for (const asset of ['style.css', 'app.js', 'ui.mjs', 'notifications.mjs']) {
-    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=9`));
+    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=10`));
   }
   assert.match(worker, /url\.pathname\.startsWith\('\/api\/'\)/);
   assert.doesNotMatch(worker, /SHELL[^;]*\/api\//s);
@@ -47,8 +47,8 @@ test('mobile shell declares safe-area and removes the legacy minimum width', asy
   ]);
   assert.match(page, /viewport-fit=cover/);
   assert.match(page, /manifest\.webmanifest/);
-  assert.match(page, /style\.css\?v=9/);
-  assert.match(page, /app\.js\?v=9/);
+  assert.match(page, /style\.css\?v=10/);
+  assert.match(page, /app\.js\?v=10/);
   assert.match(page, /rel="apple-touch-icon" sizes="180x180" href="\/static\/app-icon-180\.png"/);
   assert.match(style, /@media \(max-width:768px\)/);
   assert.match(style, /safe-area-inset-bottom/);
@@ -126,7 +126,56 @@ test('desktop Home is navigation only and mobile back keeps its existing action'
   assert.match(app, /const url = selected \? deepLinkFor[\s\S]*?: '\/'/);
   assert.match(app, /if \(removeCurrent && previousMode === 'inbox'\)/);
   assert.doesNotMatch(app, /\$\('home'\)\.onclick\s*=\s*\(\)\s*=>\s*closeConversation/);
-  assert.match(style, /@media \(max-width:768px\)[\s\S]*?#home \{ display:none \}/);
+  assert.match(style, /@media \(max-width:768px\)[\s\S]*?\.list-actions \{ display:none \}/);
+});
+
+test('digest history navigation is desktop-only, ordered before Home and route-aware', async () => {
+  const [page, app, style] = await Promise.all([
+    readFile(new URL('index.html', root), 'utf8'),
+    readFile(new URL('app.js', root), 'utf8'),
+    readFile(new URL('style.css', root), 'utf8'),
+  ]);
+  const historyIndex = page.indexOf('id="digest-history-button"');
+  const homeIndex = page.indexOf('id="home"');
+  assert.ok(historyIndex > 0 && historyIndex < homeIndex);
+  assert.match(page, /id="digest-history-button"[^>]*aria-label="История сводок"[\s\S]*?<svg/);
+  assert.match(page, /id="digest-history"[^>]*hidden/);
+  assert.match(app, /\$\('digest-history-button'\)\.onclick = \(\) => showDigestHistory\(\)/);
+  assert.match(app, /api\('\/api\/digest\/history'\)/);
+  assert.match(app, /history\.pushState\(null, '', '\/\?view=digests'\)/);
+  assert.match(app, /if \(isDigestHistoryRoute\(location\.search\)\)/);
+  assert.match(app, /prepareSelection[\s\S]*?appView = 'home'/);
+  assert.match(app, /renderDigestHistory/);
+  assert.match(style, /@media \(max-width:768px\)[\s\S]*?\.list-actions \{ display:none \}/);
+});
+
+test('desktop and mobile chat back share navigation-only deselection', async () => {
+  const [page, app, style] = await Promise.all([
+    readFile(new URL('index.html', root), 'utf8'),
+    readFile(new URL('app.js', root), 'utf8'),
+    readFile(new URL('style.css', root), 'utf8'),
+  ]);
+  assert.match(page, /id="mobile-back" class="chat-back"[^>]*aria-label="К списку"/);
+  assert.match(style, /\.chat-back \{ display:block/);
+  assert.match(app, /\$\('mobile-back'\)\.onclick = \(\) => deselect\(\)/);
+  assert.doesNotMatch(app, /\$\('mobile-back'\)\.onclick\s*=\s*\(\)\s*=>\s*closeConversation/);
+  assert.match(app, /if \(removeCurrent && previousMode === 'inbox'\)/);
+});
+
+test('badge reconciles from canonical server state on foreground lifecycle events', async () => {
+  const [app, worker] = await Promise.all([
+    readFile(new URL('app.js', root), 'utf8'),
+    readFile(new URL('sw.js', root), 'utf8'),
+  ]);
+  assert.match(app, /async function syncBadge\(\)[\s\S]*?api\('\/api\/badge'\)[\s\S]*?setBadge\(canonicalBadge\(result\.badge\)\)/);
+  assert.match(app, /addEventListener\('pageshow', \(\) => syncBadge\(\)\)/);
+  assert.match(app, /addEventListener\('focus', \(\) => syncBadge\(\)\)/);
+  assert.match(app, /visibilityState === 'visible'\) syncBadge\(\)/);
+  assert.match(app, /await pushController\.refresh\(\);[\s\S]*?await syncBadge\(\)/);
+  assert.match(app, /prepareSelection\('inbox', key\);[\s\S]*?syncBadge\(\)/);
+  assert.match(worker, /showNotification/);
+  assert.match(worker, /clearAppBadge/);
+  assert.doesNotMatch(worker, /silent\s*:/);
 });
 
 test('paste and drag reuse the attachment path without intercepting ordinary text', async () => {
@@ -218,10 +267,10 @@ test('all frontend shell references use the same cache version', async () => {
     readFile(new URL('app.js', root), 'utf8'),
     readFile(new URL('sw.js', root), 'utf8'),
   ]);
-  for (const source of [page, app, worker]) assert.doesNotMatch(source, /\?v=[678]|shell-v[678]/);
-  assert.match(worker, /telegram-detox-shell-v9/);
-  assert.match(page, /app\.js\?v=9/);
-  assert.match(app, /ui\.mjs\?v=9/);
+  for (const source of [page, app, worker]) assert.doesNotMatch(source, /\?v=(?:[1-9])(?:\D|$)|shell-v[1-9](?:\D|$)/);
+  assert.match(worker, /telegram-detox-shell-v10/);
+  assert.match(page, /app\.js\?v=10/);
+  assert.match(app, /ui\.mjs\?v=10/);
 });
 
 test('aggregate reactions render compactly and message reconciliation replaces only changed nodes', async () => {

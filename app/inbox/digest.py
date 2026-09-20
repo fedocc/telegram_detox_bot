@@ -437,15 +437,46 @@ class MorningDigestReconciler:
             return "complete"
 
 
+def _digest_json(row):
+    payload = json.loads(row.payload_json)
+    for item in payload.get("items", []):
+        sources = item.pop("sources", [])
+        item["links"] = [f"/?library={source['source_id']}&message={source['message_id']}"
+                         for source in sources]
+    return {"period_end": row.period_end.isoformat(), **payload}
+
+
 def latest_digest(factory):
     with factory() as session:
         row = session.scalar(select(MorningDigest).where(MorningDigest.status == "success")
                              .order_by(MorningDigest.period_end.desc()))
-        if row is None:
-            return None
-        payload = json.loads(row.payload_json)
-        for item in payload.get("items", []):
-            sources = item.pop("sources", [])
-            item["links"] = [f"/?library={source['source_id']}&message={source['message_id']}"
-                             for source in sources]
-        return {"period_end": row.period_end.isoformat(), **payload}
+        return _digest_json(row) if row is not None else None
+
+
+def digest_history(factory, timezone, *, now=None):
+    zone = ZoneInfo(timezone)
+    local_now = now or datetime.now(zone)
+    if local_now.tzinfo is None:
+        local_now = local_now.replace(tzinfo=zone)
+    first_day = local_now.astimezone(zone).date() - timedelta(days=6)
+    start = datetime.combine(first_day, datetime.min.time(), zone).astimezone(UTC)
+    end = datetime.combine(
+        local_now.astimezone(zone).date() + timedelta(days=1), datetime.min.time(), zone,
+    ).astimezone(UTC)
+    with factory() as session:
+        rows = list(session.scalars(select(MorningDigest).where(
+            MorningDigest.status == "success",
+            MorningDigest.period_end >= start.replace(tzinfo=None),
+            MorningDigest.period_end < end.replace(tzinfo=None),
+        ).order_by(MorningDigest.period_end.desc())))
+    result = []
+    seen_days = set()
+    for row in rows:
+        local_day = row.period_end.replace(tzinfo=UTC).astimezone(zone).date()
+        if local_day in seen_days:
+            continue
+        seen_days.add(local_day)
+        result.append(_digest_json(row))
+        if len(result) == 7:
+            break
+    return result

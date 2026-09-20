@@ -73,9 +73,10 @@ aside {
 .list-header strong {
   font-size:14px;
   font-weight:600}
-#home { display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; padding:0; border-radius:6px; color:var(--muted) }
-#home svg { width:17px; height:17px }
-#home:hover,#home:focus-visible { color:var(--text) }
+.list-actions { display:flex; align-items:center; gap:2px }
+.nav-icon { display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; padding:0; border-radius:6px; color:var(--muted) }
+.nav-icon svg { width:17px; height:17px }
+.nav-icon:hover,.nav-icon:focus-visible { color:var(--text) }
 .count {
   font-size:11px;
   border-radius:20px;
@@ -221,7 +222,7 @@ main {
   font-size:11px;
   padding:5px 8px;
   border-radius:4px}
-.mobile-back { display:none }
+.chat-back { display:block; flex:none; width:32px; height:34px; padding:0!important; color:var(--muted); font-size:26px!important; line-height:1 }
 .header-icon { margin-left:auto; width:34px; height:34px; font-size:21px!important; color:var(--muted) }
 .header-icon + .remaining { margin-left:0 }
 #messages {
@@ -656,6 +657,15 @@ dialog img {
 .digest-item b,.digest-item small { display:block }
 .digest-item b { font-size:12px }
 .digest-item small,.digest-empty { margin:2px 0 0; color:var(--muted); font-size:11px; line-height:1.3 }
+.digest-history { height:100%; overflow-y:auto; padding:28px clamp(20px,5vw,64px) 48px }
+.digest-history>header { max-width:760px; margin:0 auto 14px }
+.digest-history>header h1 { font-size:20px; font-weight:600 }
+#digest-history-error { max-width:760px; margin:0 auto 12px }
+#digest-history-list { max-width:760px; margin:0 auto }
+.digest-history-card { padding:13px 0 15px; border-top:1px solid #ffffff14 }
+.digest-history-card:first-child { border-top:0 }
+.digest-history-card .digest-heading { margin-bottom:7px; font-size:12px }
+.digest-history-card .digest-item { grid-template-columns:22px minmax(0,1fr); padding:8px 0 }
 .search-result>button { align-self:center; min-height:32px; color:var(--primary); border-radius:5px; padding:5px 8px }
 
 .library-dialog { width:min(620px,calc(100vw - 30px)); height:min(720px,calc(100vh - 50px)); height:min(720px,calc(100dvh - 50px)); padding:0; color:var(--text); overflow:hidden }
@@ -685,7 +695,7 @@ dialog img {
   body.conversation-open aside { display:none }
   body.conversation-open main { display:block }
   .list-header { min-height:50px; height:auto; padding-left:max(12px,env(safe-area-inset-left)); padding-right:max(12px,env(safe-area-inset-right)) }
-  #home { display:none }
+  .list-actions { display:none }
   nav { -webkit-overflow-scrolling:touch }
   .chat-row,.library-row { min-height:48px }
   #conversations { padding-bottom:calc(84px + env(safe-area-inset-bottom)) }
@@ -712,7 +722,7 @@ dialog img {
   #push-panel p { margin:5px 0 13px; color:var(--muted); font-size:12px }
   #push-panel button { width:100%; min-height:42px; margin-top:6px; border:1px solid #ffffff1c; border-radius:12px; background:#ffffff09 }
   .chat-header { min-height:52px; height:auto; padding-top:env(safe-area-inset-top); padding-left:max(6px,env(safe-area-inset-left)); padding-right:max(8px,env(safe-area-inset-right)) }
-  .mobile-back { display:block; width:40px; height:44px; padding:0!important; font-size:30px!important; color:var(--primary) }
+  .chat-back { width:40px; height:44px; font-size:30px!important; color:var(--primary) }
   .chat-header .avatar { display:none }
   .chat-header h1 { flex:1 }
   .header-icon { margin-left:0; width:42px; height:44px }

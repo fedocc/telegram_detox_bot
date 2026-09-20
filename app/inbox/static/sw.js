@@ -1,15 +1,15 @@
 'use strict';
 
-const CACHE = 'telegram-detox-shell-v9';
+const CACHE = 'telegram-detox-shell-v10';
 const SHELL = new Set([
   '/',
   '/manifest.webmanifest',
-  '/static/style.css?v=9',
-  '/static/app.js?v=9',
-  '/static/ui.mjs?v=9',
-  '/static/playback.mjs?v=9',
-  '/static/notifications.mjs?v=9',
-  '/static/push.mjs?v=9',
+  '/static/style.css?v=10',
+  '/static/app.js?v=10',
+  '/static/ui.mjs?v=10',
+  '/static/playback.mjs?v=10',
+  '/static/notifications.mjs?v=10',
+  '/static/push.mjs?v=10',
   '/static/app-icon-180.png',
   '/static/app-icon-512.png',
 ]);
@@ -31,14 +31,17 @@ self.addEventListener('push', event => {
   const subtitle = typeof payload.subtitle === 'string' ? payload.subtitle.slice(0, 100) : 'Новое сообщение';
   const body = typeof payload.body === 'string' ? payload.body.slice(0, 200) : subtitle;
   const badge = Number.isSafeInteger(payload.badge) && payload.badge > 0 ? payload.badge : 0;
+  const badgeUpdate = badge > 0 && typeof self.navigator?.setAppBadge === 'function'
+    ? self.navigator.setAppBadge(badge).catch(() => {})
+    : typeof self.navigator?.clearAppBadge === 'function'
+      ? self.navigator.clearAppBadge().catch(() => {}) : Promise.resolve();
   event.waitUntil(Promise.all([
     self.registration.showNotification(title, {
       body: `${subtitle}${body ? `\n${body}` : ''}`,
       tag, renotify: true, icon: '/static/app-icon-180.png',
       data: {url},
     }),
-    typeof self.navigator?.setAppBadge === 'function'
-      ? self.navigator.setAppBadge(badge).catch(() => {}) : Promise.resolve(),
+    badgeUpdate,
   ]));
 });
 

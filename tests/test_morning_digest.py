@@ -20,6 +20,7 @@ from app.inbox.digest import (
     GeminiProviderError,
     MorningDigestReconciler,
     desired_digest_cutoff,
+    digest_history,
     latest_digest,
     preprocess,
     run_digest,
@@ -84,6 +85,52 @@ def test_preprocess_deduplicates_noise_and_keeps_stable_opaque_refs():
     assert context[0]["ref"] == stable_ref("course", 1)
     assert context[0]["refs"] == [stable_ref("course", 1), stable_ref("course", 2)]
     assert refs[context[0]["ref"]] == {"source_id": "course", "message_id": 1}
+
+
+def test_digest_history_returns_one_success_per_local_day_for_last_week(settings):
+    factory = init_db(settings)
+    zone = ZoneInfo(settings.timezone)
+    now = datetime(2026, 9, 20, 12, tzinfo=zone)
+    with factory() as session:
+        for days_ago in range(8):
+            end = (now.replace(hour=7, minute=0) - timedelta(days=days_ago)).astimezone(UTC)
+            payload = {"title": "Главное", "items": [{
+                "category": "news", "title": f"Day {days_ago}", "summary": "Факт.",
+                "source_refs": ["m_ref"],
+                "sources": [{"source_id": "course", "message_id": days_ago + 1}],
+            }]}
+            session.add(MorningDigest(
+                period_start=(end - timedelta(days=1)).replace(tzinfo=None),
+                period_end=end.replace(tzinfo=None), generated_at=end.replace(tzinfo=None),
+                model="gemini-3.8-flash", prompt_version="morning-v1",
+                payload_json=json.dumps(payload), status="success",
+            ))
+        failed_end = now.replace(hour=6, minute=30).astimezone(UTC)
+        session.add(MorningDigest(
+            period_start=(failed_end - timedelta(hours=23)).replace(tzinfo=None),
+            period_end=failed_end.replace(tzinfo=None),
+            generated_at=failed_end.replace(tzinfo=None), model="gemini-3.8-flash",
+            prompt_version="morning-v1", payload_json='{"items":[]}', status="failed",
+        ))
+        duplicate_end = now.replace(hour=8, minute=0).astimezone(UTC)
+        session.add(MorningDigest(
+            period_start=(duplicate_end - timedelta(hours=12)).replace(tzinfo=None),
+            period_end=duplicate_end.replace(tzinfo=None),
+            generated_at=duplicate_end.replace(tzinfo=None), model="gemini-3.8-flash",
+            prompt_version="morning-v1", payload_json=json.dumps({
+                "title": "Newest canonical", "items": [],
+            }), status="success",
+        ))
+        session.commit()
+
+    history = digest_history(factory, settings.timezone, now=now)
+    assert len(history) == 7
+    assert history[0]["title"] == "Newest canonical"
+    assert [item["period_end"] for item in history] == sorted(
+        [item["period_end"] for item in history], reverse=True,
+    )
+    assert history[1]["items"][0]["links"] == ["/?library=course&message=2"]
+    assert all(item.get("title") != "failed" for item in history)
 
 
 def test_unknown_refs_are_removed_and_empty_items_rejected():

@@ -1,18 +1,19 @@
 'use strict';
 
-import {createPlaybackController} from './playback.mjs?v=9';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=9';
-import {createPushController} from './push.mjs?v=9';
+import {createPlaybackController} from './playback.mjs?v=10';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=10';
+import {createPushController} from './push.mjs?v=10';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
   messagesChanged, moveSelectedSource, newPageMessages, nextAuxiliaryPanel,
   normalizedSearchQuery, parseDeepLink, renderableMessages, restoreScrollAnchor,
   openedConversationIds, preferencePayload, retainFocusedMessage, scopePath, uploadWithinLimit,
-  clipboardFile, createFileDragTracker, digestTitle, dismissDigest, hasFileTransfer,
-  isDigestDismissed, isNearBottom, localImageClipboardUri, maintainMessageViewport,
-  reactionEmojiPresentation, settleScrollBottom,
-} from './ui.mjs?v=9';
+  canonicalBadge, clipboardFile, createFileDragTracker, digestTitle, dismissDigest,
+  hasFileTransfer, isDigestDismissed, isDigestHistoryRoute, isNearBottom,
+  localImageClipboardUri, maintainMessageViewport, reactionEmojiPresentation,
+  settleScrollBottom,
+} from './ui.mjs?v=10';
 
 const playback = createPlaybackController(document);
 const $ = id => document.getElementById(id);
@@ -36,6 +37,7 @@ let libraryManagementEnabled = false;
 let pushController = null;
 let auxiliaryPanel = 'none';
 let fileDrag = null;
+let appView = 'home', digestHistoryGeneration = 0;
 const drafts = new Map();
 
 window.addEventListener('pagehide', () => playback.stopAll());
@@ -172,6 +174,20 @@ function renderLibrary() {
   }));
 }
 
+function digestNodes(digest, emptyText) {
+  const items = Array.isArray(digest.items) ? digest.items : [];
+  const icons = {action: '⚡', study: '🎓', news: '📰', other: '•'};
+  return items.length ? items.map(item => {
+    const link = node('a', 'digest-item');
+    link.href = item.links?.[0] || '#';
+    link.append(node('span', 'digest-icon', icons[item.category] || '•'));
+    const copy = node('span');
+    copy.append(node('b', '', item.title), node('small', '', `${item.summary}  ↗`));
+    link.append(copy);
+    return link;
+  }) : [node('p', 'digest-empty', emptyText)];
+}
+
 function renderMorningDigest(digest) {
   const card = $('morning-digest');
   let storage = null;
@@ -186,26 +202,31 @@ function renderMorningDigest(digest) {
     dismissDigest(storage, digest);
     card.hidden = true; card.replaceChildren();
   };
-  const items = Array.isArray(digest.items) ? digest.items : [];
-  const icons = {action: '⚡', study: '🎓', news: '📰', other: '•'};
-  const content = items.length ? items.map(item => {
-    const link = node('a', 'digest-item');
-    link.href = item.links?.[0] || '#';
-    link.append(node('span', 'digest-icon', icons[item.category] || '•'));
-    const copy = node('span');
-    copy.append(node('b', '', item.title), node('small', '', `${item.summary}  ↗`));
-    link.append(copy);
-    return link;
-  }) : [node('p', 'digest-empty', 'Ничего важного с прошлой сводки.')];
+  const content = digestNodes(digest, 'Ничего важного с прошлой сводки.');
   card.replaceChildren(heading, dismiss, ...content); card.hidden = false;
+}
+
+function renderDigestHistory(digests) {
+  const cards = (digests || []).map(digest => {
+    const card = node('article', 'digest-history-card');
+    card.append(node('strong', 'digest-heading', digestTitle(digest.period_end)),
+      ...digestNodes(digest, 'Ничего важного.'));
+    return card;
+  });
+  $('digest-history-list').replaceChildren(...(cards.length ? cards : [
+    node('p', 'digest-empty', 'За последнюю неделю сводок нет.'),
+  ]));
 }
 
 function renderHeader() {
   const row = selectedMode === 'library' ? library.find(value => value.id === selected)
     : conversations.find(value => value.id === selected);
-  $('empty').hidden = Boolean(row);
+  const history = appView === 'digests';
+  $('empty').hidden = Boolean(row) || history;
+  $('digest-history').hidden = !history;
   $('conversation').hidden = !row;
   document.body.classList.toggle('conversation-open', Boolean(row));
+  document.body.classList.toggle('digest-history-open', history);
   $('empty-title').textContent = conversations.length ? 'Выберите разговор' : 'Нет активных разговоров';
   if (!row) return;
   $('chat-title').textContent = row.title
@@ -286,6 +307,7 @@ function deselect({message = '', removeCurrent = false, replaceUrl = true} = {})
     conversations = conversations.filter(row => row.id !== previous);
   }
   selected = null; selectedMode = null;
+  appView = 'home'; digestHistoryGeneration += 1;
   resetConversationSurface();
   renderList(); renderLibrary(); renderHeader();
   showError('open-error', message); showError('load-error', '');
@@ -294,6 +316,7 @@ function deselect({message = '', removeCurrent = false, replaceUrl = true} = {})
 
 function prepareSelection(mode, key) {
   const changed = selected !== key || selectedMode !== mode;
+  appView = 'home'; digestHistoryGeneration += 1;
   selected = key; selectedMode = mode;
   if (changed) resetConversationSurface();
   selectedLoadPaused = false;
@@ -310,6 +333,7 @@ async function choose(key, {updateHistory = true, messageId = null} = {}) {
     if (request !== choosing) return;
     conversations = conversations.map(row => row.id === key ? result.conversation : row);
     prepareSelection('inbox', key);
+    syncBadge();
     if (messageId === null) focusedMessageId = null;
     if (updateHistory) updateLocation(null);
     await Promise.all([loadMessages(key), loadPins('inbox', key)]);
@@ -336,6 +360,7 @@ async function chooseLibrary(key, {updateHistory = true, messageId = null} = {})
     if (request !== choosing) return;
     if (opened.source) library = library.map(row => row.id === key ? {...row, ...opened.source} : row);
     const changed = prepareSelection('library', key);
+    syncBadge();
     auxiliaryPanel = 'none'; syncAuxiliaryPanels();
     if (messageId === null) focusedMessageId = null;
     if (updateHistory) updateLocation(null);
@@ -936,6 +961,36 @@ async function loadLibrarySources() {
   if (selectedMode === 'library' && !library.some(row => row.id === selected)) deselect();
 }
 
+async function showDigestHistory({updateHistory = true} = {}) {
+  if (!matchMedia('(min-width: 769px)').matches) {
+    deselect({replaceUrl: true}); return;
+  }
+  choosing += 1; pinsGeneration += 1;
+  selected = null; selectedMode = null; appView = 'digests';
+  const generation = ++digestHistoryGeneration;
+  resetConversationSurface(); renderList(); renderLibrary(); renderHeader();
+  showError('open-error', ''); showError('digest-history-error', '');
+  $('digest-history-list').replaceChildren(node('p', 'digest-empty', 'Загрузка…'));
+  if (updateHistory) history.pushState(null, '', '/?view=digests');
+  try {
+    const result = await api('/api/digest/history');
+    if (generation !== digestHistoryGeneration || appView !== 'digests') return;
+    renderDigestHistory(result.digests || []);
+  } catch (error) {
+    if (generation !== digestHistoryGeneration || appView !== 'digests') return;
+    $('digest-history-list').replaceChildren();
+    showError('digest-history-error', error.message);
+  }
+}
+
+async function syncBadge() {
+  if (!pushController) return;
+  try {
+    const result = await api('/api/badge');
+    await pushController.setBadge(canonicalBadge(result.badge));
+  } catch (_) {}
+}
+
 function managementRows() {
   const query = $('dialog-search').value.trim().toLocaleLowerCase('ru-RU');
   return query ? managementDialogs.filter(row => row.title.toLocaleLowerCase('ru-RU').includes(query))
@@ -1038,13 +1093,17 @@ async function openLibraryManagement() {
 }
 
 async function applyLocation() {
+  if (isDigestHistoryRoute(location.search)) {
+    routePending = false;
+    await showDigestHistory({updateHistory: false}); return;
+  }
   const route = parseDeepLink(location.search, conversations, library);
   if (!route) {
     const params = new URLSearchParams(location.search);
     const hasRoute = params.has('conversation') || params.has('library');
     if (!hasRoute) {
       routePending = false;
-      if (selected) deselect({replaceUrl: false});
+      if (selected || appView === 'digests') deselect({replaceUrl: false});
     } else if (Date.now() - routeWaitStarted > 30000 || params.has('library')) {
       routePending = false; deselect({message: 'Ссылка недоступна.', replaceUrl: true});
     }
@@ -1070,9 +1129,7 @@ async function poll() {
     const result = await api('/api/conversations');
     serverOffset = result.now - Date.now() / 1000;
     conversations = (result.conversations || []).filter(visible);
-    pushController?.setBadge(conversations.reduce(
-      (total, row) => total + Math.max(0, Number(row.unread_count) || 0), 0,
-    ));
+    pushController?.setBadge(canonicalBadge(result.badge));
     if (selectedMode === 'inbox'
         && !conversations.some(row => row.id === selected && row.opened_at !== null)) {
       deselect({replaceUrl: true});
@@ -1170,6 +1227,7 @@ $('composer').onsubmit = async event => {
 
 $('close').onclick = () => closeConversation(selected);
 $('home').onclick = () => deselect();
+$('digest-history-button').onclick = () => showDigestHistory();
 $('mobile-back').onclick = () => deselect();
 $('reply-target').querySelector('button').onclick = () => { const value = draft(); value.reply = null; renderComposer(); };
 let pauseMenuOpen = false;
@@ -1249,6 +1307,11 @@ $('photo-dialog').addEventListener('close', () => $('large-photo').removeAttribu
 
 window.addEventListener('popstate', () => {
   routePending = true; routeWaitStarted = Date.now(); applyLocation();
+});
+window.addEventListener('pageshow', () => syncBadge());
+window.addEventListener('focus', () => syncBadge());
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') syncBadge();
 });
 
 setInterval(() => {
@@ -1335,6 +1398,7 @@ if ('serviceWorker' in navigator) {
         },
       });
       await pushController.refresh();
+      await syncBadge();
     } catch (_) { $('push-status').textContent = 'Push сейчас недоступен.'; }
   });
 }
