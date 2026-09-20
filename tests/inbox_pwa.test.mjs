@@ -26,11 +26,29 @@ test('PWA PNG icons have the declared dimensions and stay compact', async () => 
   }
 });
 
+test('favicon, Apple touch, manifest and Web Push share the Detox icon artwork', async () => {
+  const [page, manifestText, worker] = await Promise.all([
+    readFile(new URL('index.html', root), 'utf8'),
+    readFile(new URL('manifest.webmanifest', root), 'utf8'),
+    readFile(new URL('sw.js', root), 'utf8'),
+  ]);
+  const manifest = JSON.parse(manifestText);
+  const canonical = '/static/app-icon-180.png';
+  assert.match(page, new RegExp(`rel="icon"[^>]*href="${canonical.replaceAll('/', '\\/')}"`));
+  assert.match(page, new RegExp(`rel="apple-touch-icon"[^>]*href="${canonical.replaceAll('/', '\\/')}"`));
+  assert.equal(manifest.icons[0].src,canonical);
+  assert.match(worker, /showNotification\(title, \{[\s\S]*?icon: '\/static\/app-icon-180\.png'/);
+  const notificationBlock = worker.match(/showNotification\(title, \{([\s\S]*?)\}\),/)[1];
+  assert.deepEqual([...notificationBlock.matchAll(/icon:\s*'([^']+)'/g)].map(match => match[1]),
+    [canonical]);
+  assert.match(worker, /SHELL[\s\S]*?'\/static\/app-icon-180\.png'/);
+});
+
 test('service worker explicitly bypasses every API request', async () => {
   const worker = await readFile(new URL('sw.js', root), 'utf8');
-  assert.match(worker, /telegram-detox-shell-v10/);
+  assert.match(worker, /telegram-detox-shell-v11/);
   for (const asset of ['style.css', 'app.js', 'ui.mjs', 'notifications.mjs']) {
-    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=10`));
+    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=11`));
   }
   assert.match(worker, /url\.pathname\.startsWith\('\/api\/'\)/);
   assert.doesNotMatch(worker, /SHELL[^;]*\/api\//s);
@@ -47,8 +65,8 @@ test('mobile shell declares safe-area and removes the legacy minimum width', asy
   ]);
   assert.match(page, /viewport-fit=cover/);
   assert.match(page, /manifest\.webmanifest/);
-  assert.match(page, /style\.css\?v=10/);
-  assert.match(page, /app\.js\?v=10/);
+  assert.match(page, /style\.css\?v=11/);
+  assert.match(page, /app\.js\?v=11/);
   assert.match(page, /rel="apple-touch-icon" sizes="180x180" href="\/static\/app-icon-180\.png"/);
   assert.match(style, /@media \(max-width:768px\)/);
   assert.match(style, /safe-area-inset-bottom/);
@@ -268,9 +286,9 @@ test('all frontend shell references use the same cache version', async () => {
     readFile(new URL('sw.js', root), 'utf8'),
   ]);
   for (const source of [page, app, worker]) assert.doesNotMatch(source, /\?v=(?:[1-9])(?:\D|$)|shell-v[1-9](?:\D|$)/);
-  assert.match(worker, /telegram-detox-shell-v10/);
-  assert.match(page, /app\.js\?v=10/);
-  assert.match(app, /ui\.mjs\?v=10/);
+  assert.match(worker, /telegram-detox-shell-v11/);
+  assert.match(page, /app\.js\?v=11/);
+  assert.match(app, /ui\.mjs\?v=11/);
 });
 
 test('aggregate reactions render compactly and message reconciliation replaces only changed nodes', async () => {
