@@ -32,6 +32,75 @@ export function restoreScrollAnchor(list, entries, anchor, oldHeight) {
   else list.scrollTop += list.scrollHeight - oldHeight;
 }
 
+export function isNearBottom(list, threshold = 70) {
+  return list.scrollHeight - list.scrollTop - list.clientHeight <= threshold;
+}
+
+export function maintainMessageViewport(list, entries, {atBottom, anchor, oldHeight}) {
+  if (atBottom) list.scrollTop = list.scrollHeight;
+  else if (anchor) restoreScrollAnchor(list, entries, anchor, oldHeight);
+}
+
+export function settleScrollBottom(list, scheduleFrame) {
+  list.scrollTop = list.scrollHeight;
+  scheduleFrame(() => {
+    list.scrollTop = list.scrollHeight;
+    scheduleFrame(() => { list.scrollTop = list.scrollHeight; });
+  });
+}
+
+export function clipboardFile(data) {
+  if (!data) return null;
+  for (const item of Array.from(data.items || [])) {
+    if (item?.kind !== 'file') continue;
+    try {
+      const file = item.getAsFile?.();
+      if (file) return file;
+    } catch (_) {}
+  }
+  return Array.from(data.files || []).find(Boolean) || null;
+}
+
+export function localImageClipboardUri(data) {
+  if (!data || clipboardFile(data)) return '';
+  let value = '';
+  try { value = data.getData?.('text/uri-list') || data.getData?.('text/plain') || ''; } catch (_) {}
+  value = String(value).trim();
+  if (!value || /[\r\n]/.test(value)) return '';
+  return /^file:\/\/\/[^?#]+\.(?:png|jpe?g|webp)(?:[?#].*)?$/i.test(value) ? value : '';
+}
+
+export function hasFileTransfer(data) {
+  if (!data) return false;
+  return Array.from(data.types || []).includes('Files') || Array.from(data.files || []).length > 0;
+}
+
+export function createFileDragTracker(onVisibilityChange) {
+  let depth = 0, visible = false;
+  const setVisible = value => {
+    if (visible === value) return;
+    visible = value; onVisibilityChange(value);
+  };
+  return {
+    enter(allowed) {
+      if (!allowed) return false;
+      depth += 1; setVisible(true); return true;
+    },
+    leave() {
+      if (depth <= 0) return false;
+      depth -= 1;
+      if (depth === 0) setVisible(false);
+      return true;
+    },
+    reset() {
+      const active = depth > 0 || visible;
+      depth = 0; setVisible(false); return active;
+    },
+    get depth() { return depth; },
+    get visible() { return visible; },
+  };
+}
+
 export function messagesChanged(signatures, messages) {
   if (!(signatures instanceof Map) || signatures.size !== messages.length) return true;
   return messages.some(message => signatures.get(String(message.id)) !== JSON.stringify(message));

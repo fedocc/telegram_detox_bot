@@ -3,16 +3,22 @@ import test from 'node:test';
 import {
   advanceOlderCursor,
   appendOnlyMessages,
+  clipboardFile,
+  createFileDragTracker,
   deepLinkFor,
   digestIdentity,
   digestTitle,
   dismissDigest,
   insertNewNodesInOrder,
   incrementalGrouping,
+  hasFileTransfer,
   isDigestDismissed,
   isMacNotifierClient,
+  isNearBottom,
   isTerminalConversationStatus,
   isWritable,
+  localImageClipboardUri,
+  maintainMessageViewport,
   mergeMessagePages,
   newPageMessages,
   moveSelectedSource,
@@ -25,6 +31,7 @@ import {
   retainFocusedMessage,
   renderableMessages,
   restoreScrollAnchor,
+  settleScrollBottom,
   scopePath,
   uploadWithinLimit,
   messagesChanged,
@@ -164,6 +171,91 @@ test('scroll restoration keeps the visual anchor offset exactly', () => {
   assert.equal(list.scrollTop,152);
   restoreScrollAnchor(list,entries,null,800);
   assert.equal(list.scrollTop,252);
+});
+
+test('ordinary chat settling reaches the final bottom after two layout frames', () => {
+  const list = {scrollTop:0, scrollHeight:500};
+  const frames = [];
+  settleScrollBottom(list, callback => frames.push(callback));
+  assert.equal(list.scrollTop,500);
+  list.scrollHeight = 560; frames.shift()();
+  assert.equal(list.scrollTop,560);
+  list.scrollHeight = 610; frames.shift()();
+  assert.equal(list.scrollTop,610);
+  assert.equal(frames.length,0);
+});
+
+test('polling follows the bottom but preserves an above-bottom visual anchor', () => {
+  assert.equal(isNearBottom({scrollHeight:1000,scrollTop:340,clientHeight:600}),true);
+  assert.equal(isNearBottom({scrollHeight:1000,scrollTop:200,clientHeight:600}),false);
+  const bottom = {scrollHeight:1100,scrollTop:340,clientHeight:600};
+  maintainMessageViewport(bottom,new Map(),{atBottom:true,anchor:null,oldHeight:1000});
+  assert.equal(bottom.scrollTop,1100);
+  const anchored = {scrollHeight:1100,scrollTop:200,clientHeight:600};
+  const entries = new Map([['visible',{node:{getBoundingClientRect:()=>({top:52})}}]]);
+  maintainMessageViewport(anchored,entries,{atBottom:false,anchor:{id:'visible',top:40},oldHeight:1000});
+  assert.equal(anchored.scrollTop,212);
+});
+
+test('reaction-only refresh near bottom remains anchored to the bottom', () => {
+  const list = {scrollHeight:1030,scrollTop:360,clientHeight:620};
+  assert.equal(isNearBottom(list),true);
+  list.scrollHeight = 1060;
+  maintainMessageViewport(list,new Map(),{atBottom:true,anchor:null,oldHeight:1030});
+  assert.equal(list.scrollTop,1060);
+});
+
+test('clipboard files take precedence over simultaneous text and URI values', () => {
+  const screenshot = {name:'Screenshot.png',type:'image/png',size:120};
+  const data = {
+    items:[
+      {kind:'string',type:'text/plain'},
+      {kind:'file',type:'image/png',getAsFile:()=>screenshot},
+    ],
+    files:[],
+    getData:type => type === 'text/plain' ? 'file:///Users/me/PasteboardHistory/image.png' : '',
+  };
+  assert.equal(clipboardFile(data),screenshot);
+  assert.equal(localImageClipboardUri(data),'');
+  assert.equal(uploadWithinLimit(clipboardFile(data),1024),true);
+});
+
+test('clipboard fallback supports browser file lists and filters only local image URIs', () => {
+  const jpeg = {name:'photo.jpg',type:'image/jpeg',size:12};
+  assert.equal(clipboardFile({files:[jpeg]}),jpeg);
+  const local = value => ({items:[],files:[],getData:type => type === 'text/uri-list' ? value : ''});
+  assert.equal(localImageClipboardUri(local('file:///Users/me/Library/Metadata/CoreSpotlight/PasteboardHistory/a.webp')),
+    'file:///Users/me/Library/Metadata/CoreSpotlight/PasteboardHistory/a.webp');
+  assert.equal(localImageClipboardUri(local('https://example.com/image.png')),'');
+  assert.equal(localImageClipboardUri(local('ordinary text')),'');
+  assert.equal(localImageClipboardUri(local('file:///Users/me/document.pdf')),'');
+});
+
+test('file drag depth stays visible across children and resets once on leave or drop', () => {
+  const changes = [], tracker = createFileDragTracker(visible => changes.push(visible));
+  assert.equal(tracker.enter(true),true);
+  assert.equal(tracker.enter(true),true);
+  assert.deepEqual(changes,[true]);
+  assert.equal(tracker.leave(),true);
+  assert.equal(tracker.visible,true);
+  assert.deepEqual(changes,[true]);
+  assert.equal(tracker.leave(),true);
+  assert.equal(tracker.visible,false);
+  assert.deepEqual(changes,[true,false]);
+  tracker.enter(true);
+  assert.equal(tracker.reset(),true);
+  assert.equal(tracker.reset(),false);
+  assert.deepEqual(changes,[true,false,true,false]);
+});
+
+test('read-only and non-file drags never activate the drop overlay', () => {
+  const changes = [], tracker = createFileDragTracker(visible => changes.push(visible));
+  assert.equal(tracker.enter(false),false);
+  assert.equal(tracker.visible,false);
+  assert.deepEqual(changes,[]);
+  assert.equal(hasFileTransfer({types:['text/plain'],files:[]}),false);
+  assert.equal(hasFileTransfer({types:['Files'],files:[]}),true);
+  assert.equal(hasFileTransfer({types:[],files:[{name:'report.pdf'}]}),true);
 });
 
 test('incremental grouping updates inserted messages and the existing page boundary only', () => {

@@ -1,16 +1,18 @@
 'use strict';
 
-import {createPlaybackController} from './playback.mjs?v=8';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=8';
-import {createPushController} from './push.mjs?v=8';
+import {createPlaybackController} from './playback.mjs?v=9';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=9';
+import {createPushController} from './push.mjs?v=9';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
   messagesChanged, moveSelectedSource, newPageMessages, nextAuxiliaryPanel,
   normalizedSearchQuery, parseDeepLink, renderableMessages, restoreScrollAnchor,
   openedConversationIds, preferencePayload, retainFocusedMessage, scopePath, uploadWithinLimit,
-  digestTitle, dismissDigest, isDigestDismissed, reactionEmojiPresentation,
-} from './ui.mjs?v=8';
+  clipboardFile, createFileDragTracker, digestTitle, dismissDigest, hasFileTransfer,
+  isDigestDismissed, isNearBottom, localImageClipboardUri, maintainMessageViewport,
+  reactionEmojiPresentation, settleScrollBottom,
+} from './ui.mjs?v=9';
 
 const playback = createPlaybackController(document);
 const $ = id => document.getElementById(id);
@@ -33,6 +35,7 @@ let managementDialogs = [], focusedMessageId = null;
 let libraryManagementEnabled = false;
 let pushController = null;
 let auxiliaryPanel = 'none';
+let fileDrag = null;
 const drafts = new Map();
 
 window.addEventListener('pagehide', () => playback.stopAll());
@@ -271,6 +274,8 @@ function resetConversationSurface() {
   $('older').hidden = true; $('older').disabled = false;
   $('older').textContent = 'Загрузить предыдущие сообщения';
   $('pinned-panel').hidden = true; $('pinned-list').replaceChildren();
+  $('pinned-toggle').setAttribute('aria-expanded', 'false'); $('pinned-list').hidden = true;
+  fileDrag?.reset();
   resetSearch();
 }
 
@@ -308,7 +313,9 @@ async function choose(key, {updateHistory = true, messageId = null} = {}) {
     if (messageId === null) focusedMessageId = null;
     if (updateHistory) updateLocation(null);
     await Promise.all([loadMessages(key), loadPins('inbox', key)]);
+    if (request !== choosing) return;
     if (messageId) await focusMessage(messageId, {replaceUrl: true});
+    else settleScrollBottom($('messages'), requestAnimationFrame);
     if (matchMedia('(min-width: 769px)').matches) $('text').focus();
   } catch (error) {
     if (request !== choosing) return;
@@ -335,6 +342,7 @@ async function chooseLibrary(key, {updateHistory = true, messageId = null} = {})
     await Promise.all([loadLibrary(key, null, !changed), loadPins('library', key)]);
     if (request !== choosing) return;
     if (messageId) await focusMessage(messageId, {replaceUrl: true});
+    else settleScrollBottom($('messages'), requestAnimationFrame);
     if (currentSource()?.writable && matchMedia('(min-width: 769px)').matches) $('text').focus();
   } catch (error) {
     if (request !== choosing) return;
@@ -655,7 +663,7 @@ function incrementalMessagePage(messages, key, {preserveAnchor = false} = {}) {
   const additions = newPageMessages(existingIds, messages);
   if (!additions.length) return false;
   const list = $('messages');
-  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 70;
+  const atBottom = isNearBottom(list);
   const anchor = preserveAnchor ? visibleAnchor(list) : null, oldHeight = list.scrollHeight;
   const current = [...messageNodes.values()].filter(value => value.message)
     .map(value => value.message);
@@ -705,7 +713,7 @@ function focusLoadedMessage(messageId, {replaceUrl = false} = {}) {
   return true;
 }
 
-function renderMessages(messages, key, {triggerId = null, prepend = false, merge = false, focusId = null} = {}) {
+function renderMessages(messages, key, {prepend = false, merge = false, focusId = null} = {}) {
   const list = $('messages'), initial = shownKey !== key;
   messages = renderableMessages(messages);
   if (prepend && !initial) return prependMessagePage(messages, key);
@@ -717,8 +725,9 @@ function renderMessages(messages, key, {triggerId = null, prepend = false, merge
   if (!initial && !prepend && appendOnlyMessages(signatures, unique)) {
     return incrementalMessagePage(unique, key);
   }
-  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 70;
-  const oldHeight = list.scrollHeight, anchor = prepend ? visibleAnchor(list) : null;
+  const atBottom = isNearBottom(list);
+  const oldHeight = list.scrollHeight;
+  const anchor = !initial && !atBottom ? visibleAnchor(list) : null;
   const keep = new Set(), order = [];
   let date = '', previousMessage = null;
   for (const message of unique) {
@@ -761,11 +770,8 @@ function renderMessages(messages, key, {triggerId = null, prepend = false, merge
     if (anchored) list.scrollTop += anchored.getBoundingClientRect().top - anchor.top;
     else list.scrollTop += list.scrollHeight - oldHeight;
   } else if (focusId && messageNodes.has(String(focusId))) focusLoadedMessage(focusId, {replaceUrl: true});
-  else if (initial) {
-    const trigger = messageNodes.get(String(triggerId));
-    if (trigger) trigger.node.scrollIntoView({block: 'center'});
-    else list.scrollTop = list.scrollHeight;
-  } else if (atBottom) list.scrollTop = list.scrollHeight;
+  else if (initial) list.scrollTop = list.scrollHeight;
+  else maintainMessageViewport(list, messageNodes, {atBottom, anchor, oldHeight});
   return true;
 }
 
@@ -783,7 +789,7 @@ async function loadMessages(key) {
     selectedLoadPaused = false; renderHeader(); showError('load-error', '');
     const focused = messageNodes.get(String(focusedMessageId))?.message;
     const messages = retainFocusedMessage(result.messages || [], focusedMessageId, focused);
-    renderMessages(messages, key, {triggerId: result.conversation?.trigger_id});
+    renderMessages(messages, key);
   } catch (error) {
     if (selected !== key || selectedMode !== 'inbox') return;
     if (isTerminalConversationStatus(error.status)) {
@@ -827,7 +833,9 @@ async function loadLibrary(key, before = null, refresh = false) {
 
 function renderPins(pins) {
   if (!pins.length) {
-    $('pinned-panel').hidden = true; $('pinned-list').replaceChildren(); return;
+    $('pinned-panel').hidden = true; $('pinned-list').replaceChildren();
+    $('pinned-toggle').setAttribute('aria-expanded', 'false');
+    $('pinned-list').hidden = true; return;
   }
   $('pinned-count').textContent = pins.length > 1 ? `· ${pins.length}` : '';
   $('pinned-list').replaceChildren(...pins.map(pin => {
@@ -837,8 +845,8 @@ function renderPins(pins) {
     open.type = 'button'; open.onclick = () => focusMessage(pin.id);
     item.append(preview, open); return item;
   }));
-  $('pinned-toggle').setAttribute('aria-expanded', 'true');
-  $('pinned-list').hidden = false; $('pinned-panel').hidden = false;
+  const expanded = $('pinned-toggle').getAttribute('aria-expanded') === 'true';
+  $('pinned-list').hidden = !expanded; $('pinned-panel').hidden = false;
 }
 
 async function loadPins(mode, key) {
@@ -1094,9 +1102,22 @@ $('text').onkeydown = event => {
     event.preventDefault(); $('composer').requestSubmit();
   }
 };
+$('text').addEventListener('paste', event => {
+  if (!selected || !isWritable(selectedMode, currentSource())) return;
+  const file = clipboardFile(event.clipboardData);
+  if (file) {
+    event.preventDefault(); chooseFile(file); return;
+  }
+  if (localImageClipboardUri(event.clipboardData)) {
+    event.preventDefault();
+    const value = draft();
+    value.error = 'Буфер содержит путь к локальному файлу, а не изображение. Скопируйте сам скриншот или перетащите файл.';
+    renderComposer();
+  }
+});
 
 function chooseFile(file) {
-  if (!file || !selected) return;
+  if (!file || !selected || !isWritable(selectedMode, currentSource())) return;
   const value = draft();
   if (!uploadWithinLimit(file, uploadMax)) {
     value.error = `Файл пустой или больше ${Math.floor(uploadMax / 1048576)} МБ.`;
@@ -1148,6 +1169,7 @@ $('composer').onsubmit = async event => {
 };
 
 $('close').onclick = () => closeConversation(selected);
+$('home').onclick = () => deselect();
 $('mobile-back').onclick = () => deselect();
 $('reply-target').querySelector('button').onclick = () => { const value = draft(); value.reply = null; renderComposer(); };
 let pauseMenuOpen = false;
@@ -1200,16 +1222,28 @@ $('search-input').oninput = () => {
 };
 $('search-more').onclick = () => executeSearch({append: true});
 
-for (const type of ['dragenter', 'dragover']) $('conversation').addEventListener(type, event => {
-  if (selected && isWritable(selectedMode, currentSource())) {
-    event.preventDefault(); $('drop-zone').hidden = false;
-  }
+fileDrag = createFileDragTracker(visible => { $('drop-zone').hidden = !visible; });
+$('conversation').addEventListener('dragenter', event => {
+  const allowed = Boolean(selected && isWritable(selectedMode, currentSource())
+    && hasFileTransfer(event.dataTransfer));
+  if (fileDrag.enter(allowed)) event.preventDefault();
 });
-for (const type of ['dragleave', 'drop']) $('conversation').addEventListener(type, event => {
-  if (!selected || !isWritable(selectedMode, currentSource())) return;
-  event.preventDefault(); $('drop-zone').hidden = true;
-  if (type === 'drop') chooseFile(event.dataTransfer.files[0]);
+$('conversation').addEventListener('dragover', event => {
+  if (selected && isWritable(selectedMode, currentSource())
+      && hasFileTransfer(event.dataTransfer)) event.preventDefault();
 });
+$('conversation').addEventListener('dragleave', event => {
+  if (fileDrag.leave()) event.preventDefault();
+});
+$('conversation').addEventListener('drop', event => {
+  const allowed = Boolean(selected && isWritable(selectedMode, currentSource())
+    && hasFileTransfer(event.dataTransfer));
+  const active = fileDrag.reset();
+  if (!allowed && !active) return;
+  event.preventDefault();
+  if (allowed) chooseFile(event.dataTransfer.files?.[0]);
+});
+window.addEventListener('dragend', () => fileDrag.reset());
 $('dismiss-photo').onclick = () => $('photo-dialog').close();
 $('photo-dialog').addEventListener('close', () => $('large-photo').removeAttribute('src'));
 

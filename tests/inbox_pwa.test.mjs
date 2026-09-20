@@ -28,9 +28,9 @@ test('PWA PNG icons have the declared dimensions and stay compact', async () => 
 
 test('service worker explicitly bypasses every API request', async () => {
   const worker = await readFile(new URL('sw.js', root), 'utf8');
-  assert.match(worker, /telegram-detox-shell-v8/);
+  assert.match(worker, /telegram-detox-shell-v9/);
   for (const asset of ['style.css', 'app.js', 'ui.mjs', 'notifications.mjs']) {
-    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=8`));
+    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=9`));
   }
   assert.match(worker, /url\.pathname\.startsWith\('\/api\/'\)/);
   assert.doesNotMatch(worker, /SHELL[^;]*\/api\//s);
@@ -47,8 +47,8 @@ test('mobile shell declares safe-area and removes the legacy minimum width', asy
   ]);
   assert.match(page, /viewport-fit=cover/);
   assert.match(page, /manifest\.webmanifest/);
-  assert.match(page, /style\.css\?v=8/);
-  assert.match(page, /app\.js\?v=8/);
+  assert.match(page, /style\.css\?v=9/);
+  assert.match(page, /app\.js\?v=9/);
   assert.match(page, /rel="apple-touch-icon" sizes="180x180" href="\/static\/app-icon-180\.png"/);
   assert.match(style, /@media \(max-width:768px\)/);
   assert.match(style, /safe-area-inset-bottom/);
@@ -90,6 +90,65 @@ test('history polling fast paths and pagination preserve existing message nodes'
   assert.match(app, /restoreScrollAnchor\(list, messageNodes, anchor, oldHeight\)/);
   assert.match(app, /document\.elementFromPoint/);
   assert.doesNotMatch(app, /\.\.\.list\.querySelectorAll\('\[data-id\]'\)/);
+});
+
+test('ordinary opens settle at bottom while explicit message navigation keeps exact focus', async () => {
+  const app = await readFile(new URL('app.js', root), 'utf8');
+  assert.match(app, /await Promise\.all\(\[loadMessages\(key\), loadPins\('inbox', key\)\]\)[\s\S]*?if \(messageId\) await focusMessage\(messageId,[\s\S]*?else settleScrollBottom/);
+  assert.match(app, /await Promise\.all\(\[loadLibrary\(key, null, !changed\), loadPins\('library', key\)\]\)[\s\S]*?if \(messageId\) await focusMessage\(messageId,[\s\S]*?else settleScrollBottom/);
+  assert.match(app, /item\.node\.scrollIntoView\(\{block: 'center'\}\)/);
+  assert.doesNotMatch(app, /trigger\.node\.scrollIntoView/);
+  assert.match(app, /maintainMessageViewport\(list, messageNodes, \{atBottom, anchor, oldHeight\}\)/);
+});
+
+test('pins begin collapsed and data refresh preserves an explicit expansion', async () => {
+  const [page, app] = await Promise.all([
+    readFile(new URL('index.html', root), 'utf8'),
+    readFile(new URL('app.js', root), 'utf8'),
+  ]);
+  assert.match(page, /id="pinned-toggle"[^>]*aria-expanded="false"/);
+  assert.match(page, /id="pinned-list" hidden/);
+  assert.match(app, /resetConversationSurface\(\)[\s\S]*?pinned-toggle'\)\.setAttribute\('aria-expanded', 'false'\)/);
+  assert.match(app, /const expanded = \$\('pinned-toggle'\)\.getAttribute\('aria-expanded'\) === 'true'/);
+  assert.match(app, /\$\('pinned-list'\)\.hidden = !expanded/);
+});
+
+test('desktop Home is navigation only and mobile back keeps its existing action', async () => {
+  const [page, app, style] = await Promise.all([
+    readFile(new URL('index.html', root), 'utf8'),
+    readFile(new URL('app.js', root), 'utf8'),
+    readFile(new URL('style.css', root), 'utf8'),
+  ]);
+  assert.doesNotMatch(page, />активные</);
+  assert.match(page, /<button id="home"[^>]*aria-label="На главный экран"[^>]*>[\s\S]*?<svg/);
+  assert.match(app, /\$\('home'\)\.onclick = \(\) => deselect\(\)/);
+  assert.match(app, /\$\('mobile-back'\)\.onclick = \(\) => deselect\(\)/);
+  assert.match(app, /const url = selected \? deepLinkFor[\s\S]*?: '\/'/);
+  assert.match(app, /if \(removeCurrent && previousMode === 'inbox'\)/);
+  assert.doesNotMatch(app, /\$\('home'\)\.onclick\s*=\s*\(\)\s*=>\s*closeConversation/);
+  assert.match(style, /@media \(max-width:768px\)[\s\S]*?#home \{ display:none \}/);
+});
+
+test('paste and drag reuse the attachment path without intercepting ordinary text', async () => {
+  const [app, page, style] = await Promise.all([
+    readFile(new URL('app.js', root), 'utf8'),
+    readFile(new URL('index.html', root), 'utf8'),
+    readFile(new URL('style.css', root), 'utf8'),
+  ]);
+  assert.match(app, /addEventListener\('paste', event => \{/);
+  assert.match(app, /const file = clipboardFile\(event\.clipboardData\)/);
+  assert.match(app, /if \(file\) \{[\s\S]*?event\.preventDefault\(\); chooseFile\(file\)/);
+  assert.match(app, /if \(localImageClipboardUri\(event\.clipboardData\)\) \{[\s\S]*?event\.preventDefault\(\)/);
+  assert.match(app, /function chooseFile\(file\)[\s\S]*?uploadWithinLimit\(file, uploadMax\)/);
+  assert.match(app, /URL\.createObjectURL\(file\)/);
+  assert.match(page, /id="attachment-preview"/);
+  assert.match(app, /createFileDragTracker/);
+  assert.match(app, /addEventListener\('dragenter'/);
+  assert.match(app, /addEventListener\('dragover'/);
+  assert.match(app, /addEventListener\('dragleave'/);
+  assert.match(app, /addEventListener\('drop'/);
+  assert.match(app, /window\.addEventListener\('dragend', \(\) => fileDrag\.reset\(\)\)/);
+  assert.match(style, /#drop-zone \{[^}]*pointer-events:none/);
 });
 
 test('service messages use a separate control-free system row', async () => {
@@ -159,10 +218,10 @@ test('all frontend shell references use the same cache version', async () => {
     readFile(new URL('app.js', root), 'utf8'),
     readFile(new URL('sw.js', root), 'utf8'),
   ]);
-  for (const source of [page, app, worker]) assert.doesNotMatch(source, /\?v=[67]|shell-v[67]/);
-  assert.match(worker, /telegram-detox-shell-v8/);
-  assert.match(page, /app\.js\?v=8/);
-  assert.match(app, /ui\.mjs\?v=8/);
+  for (const source of [page, app, worker]) assert.doesNotMatch(source, /\?v=[678]|shell-v[678]/);
+  assert.match(worker, /telegram-detox-shell-v9/);
+  assert.match(page, /app\.js\?v=9/);
+  assert.match(app, /ui\.mjs\?v=9/);
 });
 
 test('aggregate reactions render compactly and message reconciliation replaces only changed nodes', async () => {

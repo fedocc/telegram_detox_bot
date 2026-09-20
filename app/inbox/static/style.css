@@ -73,9 +73,9 @@ aside {
 .list-header strong {
   font-size:14px;
   font-weight:600}
-.list-header>span {
-  font-size:11px;
-  color:var(--muted)}
+#home { display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; padding:0; border-radius:6px; color:var(--muted) }
+#home svg { width:17px; height:17px }
+#home:hover,#home:focus-visible { color:var(--text) }
 .count {
   font-size:11px;
   border-radius:20px;
@@ -233,7 +233,7 @@ main {
   gap:8px;
   overflow-anchor:none}
 #older { align-self:center; min-height:34px; color:var(--muted); padding:7px 11px }
-#drop-zone { position:absolute; inset:45px 0 58px; z-index:5; display:flex; align-items:center; justify-content:center; background:#111417dd; border:2px dashed var(--primary); color:var(--primary); font-size:15px }
+#drop-zone { position:absolute; inset:45px 0 58px; z-index:5; display:flex; align-items:center; justify-content:center; pointer-events:none; background:#111417dd; border:2px dashed var(--primary); color:var(--primary); font-size:15px }
 .date {
   align-self:center;
   border-radius:20px;
@@ -685,6 +685,7 @@ dialog img {
   body.conversation-open aside { display:none }
   body.conversation-open main { display:block }
   .list-header { min-height:50px; height:auto; padding-left:max(12px,env(safe-area-inset-left)); padding-right:max(12px,env(safe-area-inset-right)) }
+  #home { display:none }
   nav { -webkit-overflow-scrolling:touch }
   .chat-row,.library-row { min-height:48px }
   #conversations { padding-bottom:calc(84px + env(safe-area-inset-bottom)) }
