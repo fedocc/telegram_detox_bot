@@ -19,7 +19,12 @@ from telethon.tl.types import (
     InputStickerSetEmpty,
     MessageEntityCustomEmoji,
     MessageEntityTextUrl,
+    MessageReactions,
     PeerChannel,
+    ReactionCount,
+    ReactionCustomEmoji,
+    ReactionEmoji,
+    ReactionPaid,
 )
 
 from app.db.session import init_db
@@ -60,12 +65,13 @@ class FakeTelegram:
         self.send_file = AsyncMock(return_value=SimpleNamespace(id=902))
         self.downloads = 0
         self.custom_emoji_calls = []
+        self.unresolved_custom_emoji = set()
 
     async def __call__(self, request):
         self.custom_emoji_calls.append(list(request.document_id))
         return [SimpleNamespace(id=value, mime_type="video/webm", size=100,
             attributes=[DocumentAttributeCustomEmoji("🔥", InputStickerSetEmpty())])
-            for value in request.document_id]
+            for value in request.document_id if value not in self.unresolved_custom_emoji]
 
     def is_connected(self):
         return self.connected
@@ -154,6 +160,53 @@ async def test_custom_emoji_documents_are_batch_resolved_and_cached(service):
     assert service.client.custom_emoji_calls == [[11, 12]]
     assert first == second
     assert all(item["segments"][0]["custom_emoji"]["format"] == "video" for item in first)
+
+
+async def test_reactions_serialize_counts_without_identities_or_extra_rpc(service):
+    message = Message(1, "hello", reactions=MessageReactions(results=[
+        ReactionCount(ReactionEmoji("👍"), 4),
+        ReactionCount(ReactionEmoji("❤️"), 2),
+        ReactionCount(ReactionPaid(), 1),
+        ReactionCount(ReactionEmoji("🔥"), 0),
+    ], recent_reactions=[SimpleNamespace(peer_id=PeerChannel(999))]))
+    result = (await service.serialize_many([message], activate(service), {1: message}))[0]
+
+    assert result["reactions"] == [
+        {"type": "emoji", "emoji": "👍", "count": 4},
+        {"type": "emoji", "emoji": "❤️", "count": 2},
+        {"type": "paid", "emoji": "⭐", "count": 1},
+    ]
+    assert "999" not in str(result)
+    assert service.client.custom_emoji_calls == []
+
+
+async def test_custom_reactions_share_batch_resolution_and_cache_with_entities(service):
+    messages = [
+        Message(1, "hello", reactions=MessageReactions(results=[
+            ReactionCount(ReactionCustomEmoji(22), 3),
+        ])),
+        Message(2, "🔥", entities=[MessageEntityCustomEmoji(0, 2, 11)],
+                reactions=MessageReactions(results=[
+                    ReactionCount(ReactionCustomEmoji(22), 2),
+                ])),
+    ]
+    row = activate(service)
+    first = await service.serialize_many(messages, row, {item.id: item for item in messages})
+    second = await service.serialize_many(messages, row, {item.id: item for item in messages})
+
+    assert service.client.custom_emoji_calls == [[11, 22]]
+    assert first == second
+    assert first[0]["reactions"][0]["custom_emoji"]["available"] is True
+
+
+async def test_unresolved_custom_reaction_keeps_visible_fallback(service):
+    service.client.unresolved_custom_emoji.add(404)
+    message = Message(1, "hello", reactions=MessageReactions(results=[
+        ReactionCount(ReactionCustomEmoji(404), 2),
+    ]))
+    result = (await service.serialize_many([message], activate(service), {1: message}))[0]
+    assert result["reactions"][0]["emoji"] == "◉"
+    assert result["reactions"][0]["custom_emoji"]["available"] is False
 
 
 def test_library_config_is_static_ordered_and_fail_closed(tmp_path):

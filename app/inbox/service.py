@@ -623,6 +623,13 @@ class InboxService:
         ids = {int(entity.document_id) for message in messages
                for entity in (getattr(message, "entities", None) or ())
                if isinstance(entity, MessageEntityCustomEmoji)}
+        ids.update(
+            int(reaction.document_id)
+            for message in messages
+            for result in (getattr(getattr(message, "reactions", None), "results", None) or ())
+            if isinstance((reaction := getattr(result, "reaction", None)),
+                          tl_types.ReactionCustomEmoji)
+        )
         now = self.clock()
         unknown = sorted(value for value in ids
                          if value not in self.custom_emoji_documents
@@ -669,6 +676,36 @@ class InboxService:
                 "url": f"/api/custom-emoji/{document_id}",
             }
         return result
+
+    def _reaction_payloads(self, message):
+        output = []
+        results = getattr(getattr(message, "reactions", None), "results", None) or ()
+        for result in results:
+            count = int(getattr(result, "count", 0) or 0)
+            if count <= 0:
+                continue
+            reaction = getattr(result, "reaction", None)
+            if isinstance(reaction, tl_types.ReactionEmoji):
+                output.append({"type": "emoji", "emoji": reaction.emoticon, "count": count})
+            elif isinstance(reaction, tl_types.ReactionCustomEmoji):
+                document_id = int(reaction.document_id)
+                custom = self._custom_emoji_payloads((
+                    MessageEntityCustomEmoji(0, 1, document_id),
+                )).get(document_id, {
+                    "document_id": str(document_id), "format": "unsupported",
+                    "available": False, "text_color": False,
+                    "url": f"/api/custom-emoji/{document_id}",
+                })
+                output.append({
+                    "type": "custom", "emoji": "◉", "count": count,
+                    "document_id": str(document_id), "custom_emoji": custom,
+                })
+            elif ((paid_type := getattr(tl_types, "ReactionPaid", None)) is not None
+                  and isinstance(reaction, paid_type)):
+                output.append({"type": "paid", "emoji": "⭐", "count": count})
+            else:
+                output.append({"type": "unknown", "emoji": "◉", "count": count})
+        return output
 
     async def library_history(self, source_id, before=None):
         source = self.library_source(source_id)
@@ -1051,6 +1088,7 @@ class InboxService:
             "timestamp": message.date.isoformat(),
             "mention": has_exact_fedocc_mention(raw_text) and not message.out,
             "reply": None, "media": None, "system": None,
+            "reactions": self._reaction_payloads(message),
         }
         reply_id = getattr(message, "reply_to_msg_id", None)
         if reply_id:

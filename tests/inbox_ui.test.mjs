@@ -38,6 +38,21 @@ test('unchanged polling payload skips message reconciliation', () => {
   assert.equal(messagesChanged(signatures,[{id:1,text:'changed'},messages[1]]),true);
 });
 
+test('reaction-only polling changes are meaningful without duplicating messages', () => {
+  const original = [
+    {id:1,text:'one',reactions:[{type:'emoji',emoji:'👍',count:1}]},
+    {id:2,text:'two',reactions:[]},
+  ];
+  const signatures=new Map(original.map(message=>[String(message.id),JSON.stringify(message)]));
+  const changed=[
+    {...original[0],reactions:[{type:'emoji',emoji:'👍',count:2}]},
+    original[1],
+  ];
+  assert.equal(messagesChanged(signatures,changed),true);
+  assert.equal(signatures.get('2'),JSON.stringify(changed[1]));
+  assert.equal(mergeMessagePages(changed,changed).length,2);
+});
+
 test('append-only polling accepts new tail messages without hiding edits or removals', () => {
   const current=[{id:1,text:'one'},{id:2,text:'two'}];
   const signatures=new Map(current.map(message=>[String(message.id),JSON.stringify(message)]));

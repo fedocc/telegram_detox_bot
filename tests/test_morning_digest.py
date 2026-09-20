@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from urllib.error import HTTPError
+from zoneinfo import ZoneInfo
+
+from sqlalchemy import func, select
 
 from app.config import Settings
 from app.db.session import init_db
+from app.db.tables import MorningDigest
 from app.inbox.digest import (
     DigestItem,
     DigestPayload,
     GeminiDigestProvider,
+    GeminiProviderError,
+    MorningDigestReconciler,
+    desired_digest_cutoff,
     latest_digest,
     preprocess,
     run_digest,
@@ -32,6 +41,25 @@ class Provider:
         return DigestPayload(title="Главное", items=[] if not refs else [DigestItem(
             category="action", title="Дедлайн", summary="Сдать работу до 18:00.",
             source_refs=[refs[0], "m_unknown"],
+        )])
+
+
+class SequenceProvider(Provider):
+    def __init__(self, failures=0, *, transient=True, delay=0):
+        super().__init__()
+        self.failures = failures
+        self.transient = transient
+        self.delay = delay
+
+    def generate(self, context, *, candidate_mode=False):
+        if self.delay:
+            time.sleep(self.delay)
+        self.calls.append((context, candidate_mode))
+        if len(self.calls) <= self.failures:
+            raise GeminiProviderError("sanitized provider failure", transient=self.transient)
+        refs = [item["ref"] for item in context]
+        return DigestPayload(title="Главное", items=[DigestItem(
+            category="news", title="Новость", summary="Факт.", source_refs=refs[:1],
         )])
 
 
@@ -88,6 +116,84 @@ async def test_window_idempotency_failed_cutoff_and_deep_link(settings):
     provider2 = Provider()
     await run_digest(service, factory, settings, later, provider2)
     assert service.windows[-1][0] == cutoff
+
+
+async def test_reconciliation_retries_transient_failure_at_same_canonical_cutoff(settings):
+    factory = init_db(settings)
+    service = Service([row()])
+    provider = SequenceProvider(failures=1)
+    reconciler = MorningDigestReconciler(service, factory, settings, provider=provider)
+    zone = ZoneInfo(settings.timezone)
+    scheduled = datetime(2026, 9, 20, 7, 0, tzinfo=zone)
+
+    assert await reconciler.reconcile(now=scheduled) == "pending"
+    with factory() as session:
+        assert session.scalar(select(func.count()).select_from(MorningDigest)) == 0
+    assert await reconciler.reconcile(now=scheduled + timedelta(minutes=15)) == "complete"
+    with factory() as session:
+        stored = session.scalar(select(MorningDigest))
+        assert stored.period_end == scheduled.astimezone(UTC).replace(tzinfo=None)
+    expected = (scheduled.astimezone(UTC) - timedelta(hours=24), scheduled.astimezone(UTC))
+    assert service.windows == [expected, expected]
+    assert len(provider.calls) == 2
+    assert await reconciler.reconcile(now=scheduled + timedelta(hours=1)) == "complete"
+    assert len(provider.calls) == 2
+
+
+async def test_reconciliation_startup_before_and_after_cutoff(settings):
+    factory = init_db(settings)
+    service = Service([row()])
+    provider = Provider()
+    reconciler = MorningDigestReconciler(service, factory, settings, provider=provider)
+    zone = ZoneInfo(settings.timezone)
+    before = datetime(2026, 9, 20, 6, 59, tzinfo=zone)
+    after = datetime(2026, 9, 20, 8, 30, tzinfo=zone)
+
+    assert desired_digest_cutoff(before, settings.digest_time) is None
+    assert await reconciler.reconcile(now=before) == "not_due"
+    assert not provider.calls
+    assert await reconciler.reconcile(now=after) == "complete"
+    assert service.windows[0][1] == datetime(
+        2026, 9, 20, 7, 0, tzinfo=zone,
+    ).astimezone(UTC)
+
+
+async def test_reconciliation_single_flight_prevents_duplicate_provider_calls(settings):
+    factory = init_db(settings)
+    service = Service([row()])
+    provider = SequenceProvider(delay=0.05)
+    reconciler = MorningDigestReconciler(service, factory, settings, provider=provider)
+    now = datetime(2026, 9, 20, 7, 0, tzinfo=ZoneInfo(settings.timezone))
+
+    results = await asyncio.gather(*(reconciler.reconcile(now=now) for _ in range(3)))
+    assert results == ["complete", "complete", "complete"]
+    assert len(provider.calls) == 1
+
+
+async def test_permanent_provider_error_is_suppressed_for_same_cutoff(settings):
+    factory = init_db(settings)
+    provider = SequenceProvider(failures=10, transient=False)
+    reconciler = MorningDigestReconciler(
+        Service([row()]), factory, settings, provider=provider,
+    )
+    now = datetime(2026, 9, 20, 7, 0, tzinfo=ZoneInfo(settings.timezone))
+
+    assert await reconciler.reconcile(now=now) == "blocked"
+    assert await reconciler.reconcile(now=now + timedelta(minutes=15)) == "blocked"
+    assert len(provider.calls) == 1
+
+
+async def test_next_successful_day_starts_at_previous_canonical_cutoff(settings):
+    factory = init_db(settings)
+    service = Service([row()])
+    provider = Provider()
+    first = datetime(2026, 9, 20, 7, 0, tzinfo=ZoneInfo(settings.timezone))
+    second = first + timedelta(days=1)
+    reconciler = MorningDigestReconciler(service, factory, settings, provider=provider)
+
+    await reconciler.reconcile(now=first)
+    await reconciler.reconcile(now=second)
+    assert service.windows[1] == (first.astimezone(UTC), second.astimezone(UTC))
 
 
 def test_digest_defaults():
@@ -153,13 +259,33 @@ def test_direct_gemini_429_retries_are_bounded():
     provider = GeminiDigestProvider(settings, opener=opener, sleeper=sleeps.append)
     try:
         provider.generate([{"ref": "m_a"}])
-    except RuntimeError as exc:
+    except GeminiProviderError as exc:
         assert str(exc) == (
             "Gemini API request failed: HTTP 429 UNKNOWN: Request rejected"
         )
+        assert exc.transient is True
     else:
         raise AssertionError("429 must fail after bounded retries")
     assert len(attempts) == 3 and sleeps == [1, 2]
+
+
+def test_direct_gemini_503_remains_retryable():
+    attempts = []
+
+    def opener(request, timeout):
+        attempts.append((request, timeout))
+        raise HTTPError(request.full_url, 503, "unavailable", {}, None)
+
+    settings = Settings(_env_file=None, gemini_api_key="secret-test-value")
+    provider = GeminiDigestProvider(settings, opener=opener, sleeper=lambda _: None)
+    try:
+        provider.generate([{"ref": "m_a"}])
+    except GeminiProviderError as exc:
+        assert exc.transient is True
+        assert "HTTP 503" in str(exc)
+    else:
+        raise AssertionError("503 must fail after bounded retries")
+    assert len(attempts) == 3
 
 
 def test_direct_gemini_error_is_sanitized_without_key_prompt_or_logs(caplog):

@@ -122,19 +122,22 @@ async def main() -> None:
         )
 
     def register_morning_digest(inbox) -> None:
-        async def morning_digest_job() -> None:
-            from app.inbox.digest import run_digest
+        from app.inbox.digest import MorningDigestReconciler
 
-            now = datetime.now(ZoneInfo(settings.timezone)).replace(second=0, microsecond=0)
-            try:
-                await run_digest(inbox, session_factory, settings, now)
-            except Exception:
-                logger.exception("Morning digest generation failed")
+        reconciler = MorningDigestReconciler(inbox, session_factory, settings)
+
+        async def morning_digest_job() -> None:
+            await reconciler.reconcile(now=datetime.now(ZoneInfo(settings.timezone)))
 
         if settings.digest_enabled:
             scheduler.add_job(
                 morning_digest_job, "cron", hour=hour, minute=minute,
-                id="morning_digest", replace_existing=True,
+                id="morning_digest_exact", replace_existing=True,
+            )
+            scheduler.add_job(
+                morning_digest_job, "interval", minutes=15,
+                next_run_time=datetime.now(ZoneInfo(settings.timezone)),
+                id="morning_digest_reconciliation", replace_existing=True,
             )
 
     scheduler.add_job(cleanup_job, "cron", hour=3, minute=10)

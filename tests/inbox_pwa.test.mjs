@@ -148,3 +148,15 @@ test('custom emoji and morning digest render inline without replacing stable mes
   assert.match(app, /\/?library=|item\.links\?\.\[0\]/);
   assert.match(app, /incrementalMessagePage/);
 });
+
+test('aggregate reactions render compactly and message reconciliation replaces only changed nodes', async () => {
+  const app = await readFile(new URL('app.js', root), 'utf8');
+  const style = await readFile(new URL('style.css', root), 'utf8');
+  assert.match(app, /function reactionsNode\(reactions\)/);
+  assert.match(app, /reactionIcon\(reaction\)/);
+  assert.match(app, /reaction\?\.emoji \|\| '◉'/);
+  assert.match(app, /else if \(existing\.signature !== signature\)/);
+  assert.match(app, /existing\.node\.replaceWith\(element\)/);
+  assert.match(style, /\.message-reactions \{/);
+  assert.match(style, /font-size:11px/);
+});

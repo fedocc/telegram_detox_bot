@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
@@ -98,6 +99,12 @@ class Provider(Protocol):
     def generate(self, context: list[dict], *, candidate_mode: bool = False) -> DigestPayload: ...
 
 
+class GeminiProviderError(RuntimeError):
+    def __init__(self, message: str, *, transient: bool):
+        super().__init__(message)
+        self.transient = transient
+
+
 def stable_ref(source_id: str, message_id: int) -> str:
     value = hashlib.sha256(f"{source_id}:{message_id}".encode()).hexdigest()[:20]
     return f"m_{value}"
@@ -183,7 +190,7 @@ class GeminiDigestProvider:
 
     def _post(self, payload: dict, *, sensitive: tuple[str, ...] = ()) -> dict:
         if not self.api_key:
-            raise RuntimeError("Gemini API not configured")
+            raise GeminiProviderError("Gemini API not configured", transient=False)
         request = Request(  # noqa: S310 - endpoint is a fixed HTTPS Gemini API URL.
             self.ENDPOINT.format(model=self.model),
             data=json.dumps(payload, ensure_ascii=False).encode(),
@@ -200,14 +207,21 @@ class GeminiDigestProvider:
                 if exc.code in {429, 500, 502, 503, 504} and attempt < 2:
                     self.sleeper(2 ** attempt)
                     continue
-                raise RuntimeError(self._safe_http_error(exc, sensitive)) from None
+                raise GeminiProviderError(
+                    self._safe_http_error(exc, sensitive),
+                    transient=exc.code in {429, 500, 502, 503, 504},
+                ) from None
             except (URLError, TimeoutError) as exc:
                 last_error = exc
                 if attempt < 2:
                     self.sleeper(2 ** attempt)
                     continue
-                raise RuntimeError("Gemini API request failed (network)") from None
-        raise RuntimeError("Gemini API retry limit reached") from last_error
+                raise GeminiProviderError(
+                    "Gemini API request failed (network)", transient=True,
+                ) from None
+        raise GeminiProviderError(
+            "Gemini API retry limit reached", transient=True,
+        ) from last_error
 
     def smoke_text(self) -> str:
         prompt = "Return OK"
@@ -345,6 +359,82 @@ async def run_digest(
         session.commit()
         session.refresh(record)
         return record
+
+
+def desired_digest_cutoff(now: datetime, digest_time: str) -> datetime | None:
+    """Return today's canonical cutoff once it is due.
+
+    Before the configured time reconciliation waits for today's run instead of
+    creating an old first-run digest for yesterday.
+    """
+    hour, minute = (int(part) for part in digest_time.split(":", 1))
+    cutoff = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return cutoff if now >= cutoff else None
+
+
+def digest_succeeded(factory, cutoff: datetime) -> bool:
+    cutoff = cutoff.astimezone(UTC).replace(tzinfo=None)
+    with factory() as session:
+        return session.scalar(select(MorningDigest.id).where(
+            MorningDigest.period_end == cutoff,
+            MorningDigest.status == "success",
+        )) is not None
+
+
+class MorningDigestReconciler:
+    """Single-process, idempotent delivery for the daily canonical cutoff."""
+
+    def __init__(self, service, factory, settings, *, provider=None):
+        self.service = service
+        self.factory = factory
+        self.settings = settings
+        self.provider = provider
+        self.lock = asyncio.Lock()
+        self.permanent_failures: set[datetime] = set()
+
+    async def reconcile(
+        self, *, now: datetime | None = None, cutoff: datetime | None = None,
+    ) -> str:
+        zone_now = now or datetime.now(ZoneInfo(self.settings.timezone))
+        cutoff = cutoff or desired_digest_cutoff(zone_now, self.settings.digest_time)
+        if cutoff is None:
+            return "not_due"
+        cutoff = cutoff.replace(second=0, microsecond=0)
+        key = cutoff.astimezone(UTC)
+        if key in self.permanent_failures:
+            return "blocked"
+        async with self.lock:
+            if digest_succeeded(self.factory, cutoff):
+                return "complete"
+            if key in self.permanent_failures:
+                return "blocked"
+            try:
+                await run_digest(
+                    self.service, self.factory, self.settings, cutoff, self.provider,
+                )
+            except GeminiProviderError as exc:
+                if exc.transient:
+                    logger.warning(
+                        "morning_digest pending retry cutoff=%s "
+                        "next retry through reconciliation: %s",
+                        cutoff.isoformat(), exc,
+                    )
+                    return "pending"
+                self.permanent_failures.add(key)
+                logger.error(
+                    "morning_digest blocked cutoff=%s permanent provider error: %s",
+                    cutoff.isoformat(), exc,
+                )
+                return "blocked"
+            except Exception as exc:
+                logger.error(
+                    "morning_digest pending retry cutoff=%s "
+                    "next retry through reconciliation: %s",
+                    cutoff.isoformat(), type(exc).__name__,
+                )
+                return "pending"
+            logger.info("morning_digest complete cutoff=%s", cutoff.isoformat())
+            return "complete"
 
 
 def latest_digest(factory):

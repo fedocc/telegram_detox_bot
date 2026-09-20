@@ -417,6 +417,39 @@ function appendSegments(parent, segments, fallback, mention = false) {
   }
 }
 
+function reactionIcon(reaction) {
+  const fallback = String(reaction?.emoji || '◉');
+  const custom = reaction?.custom_emoji;
+  if (custom?.available && custom.format === 'static') {
+    const image = node('img', 'custom-emoji');
+    image.src = custom.url; image.alt = fallback; image.loading = 'lazy'; image.decoding = 'async';
+    image.onerror = () => image.replaceWith(document.createTextNode(fallback));
+    return image;
+  }
+  if (custom?.available && custom.format === 'video') {
+    const video = node('video', 'custom-emoji custom-emoji-video');
+    video.src = custom.url; video.muted = true; video.defaultMuted = true;
+    video.loop = true; video.playsInline = true; video.preload = 'metadata';
+    video.setAttribute('aria-label', fallback); video.setAttribute('role', 'img');
+    video.onerror = () => video.replaceWith(document.createTextNode(fallback));
+    stickerObserver?.observe(video);
+    if (!stickerObserver) { video.autoplay = true; video.play().catch(() => {}); }
+    return video;
+  }
+  return document.createTextNode(fallback);
+}
+
+function reactionsNode(reactions) {
+  const wrap = node('div', 'message-reactions');
+  for (const reaction of reactions || []) {
+    if (!Number.isFinite(Number(reaction?.count)) || Number(reaction.count) <= 0) continue;
+    const item = node('span', 'message-reaction');
+    item.append(reactionIcon(reaction), document.createTextNode(` ${Number(reaction.count)}`));
+    wrap.append(item);
+  }
+  return wrap.childNodes.length ? wrap : null;
+}
+
 const sizeLabel = size => size >= 1048576
   ? `${(size / 1048576).toFixed(1)} МБ` : `${Math.ceil(size / 1024)} КБ`;
 const duration = seconds => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
@@ -560,6 +593,8 @@ function messageNode(message) {
     const paragraph = node('p', 'message-text');
     appendSegments(paragraph, message.segments, message.text, message.mention); bubble.append(paragraph);
   }
+  const reactions = reactionsNode(message.reactions);
+  if (reactions) bubble.append(reactions);
   const timestamp = node('time', 'timestamp',
     new Date(message.timestamp).toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'})
       + (message.own ? ' ✓' : ''));
