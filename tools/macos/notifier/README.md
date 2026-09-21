@@ -84,6 +84,10 @@ The installer only manages `com.fedocc.telegram-inbox-notifier`. It does not tou
 `com.fedocc.telegram-inbox-tunnel`, shell profiles, SSH configuration or credentials.
 Logs: `~/Library/Logs/telegram-inbox-notifier.log` and
 `~/Library/Logs/telegram-inbox-notifier-error.log`. No message text is logged.
+The bundle icon is generated deterministically from the web app's canonical
+`app-icon-512.png`. Re-running `install.sh` registers bundle version 2 with Launch
+Services, which refreshes the Notification Center identity without resetting the
+existing notification permission.
 
 ## Toggle and CLI
 

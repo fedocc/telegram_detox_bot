@@ -1,8 +1,8 @@
 'use strict';
 
-import {createPlaybackController} from './playback.mjs?v=11';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=11';
-import {createPushController} from './push.mjs?v=11';
+import {createPlaybackController} from './playback.mjs?v=12';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=12';
+import {createPushController} from './push.mjs?v=12';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
@@ -13,7 +13,7 @@ import {
   hasFileTransfer, isDigestDismissed, isDigestHistoryRoute, isNearBottom,
   localImageClipboardUri, maintainMessageViewport, reactionEmojiPresentation,
   settleScrollBottom,
-} from './ui.mjs?v=11';
+} from './ui.mjs?v=12';
 
 const playback = createPlaybackController(document);
 const $ = id => document.getElementById(id);

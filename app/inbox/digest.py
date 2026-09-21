@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import re
@@ -9,6 +10,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
@@ -23,7 +25,7 @@ TOKEN_THRESHOLD = 90_000
 MAX_ITEMS = 6
 SYSTEM_INSTRUCTION = """You are the editorial engine for a private Telegram information digest.
 
-Your job is to compress messages from the user's explicitly selected Library sources
+Your job is to compress messages from the user's permitted information sources
 into an extremely short factual briefing.
 
 PRIORITIZE:
@@ -79,6 +81,65 @@ NO_CONTENT = re.compile(
     r"^(?:привет|здравствуйте|доброе утро|добрый день|спасибо|ок|ага|👍|🙏)[!. ]*$",
     re.I,
 )
+URL = re.compile(r"\bhttps?://[^\s<>()]+", re.I)
+PRIVATE_SCHEME = re.compile(
+    r"\b(?:vmess|vless|trojan|ss|ssr|socks5?|wg|wireguard|openvpn|otpauth|"
+    r"postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqps?)://[^\s]+", re.I,
+)
+BEARER = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{8,}", re.I)
+NAMED_SECRET = re.compile(
+    r"\b(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|auth(?:orization)?|"
+    r"password|passwd|session|secret|private[_ -]?key|preshared[_ -]?key|"
+    r"client[_ -]?secret|auth[_ -]?code|otp)\b\s*[:=]\s*[^\s,;]+",
+    re.I,
+)
+EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
+PHONE = re.compile(r"(?<!\w)(?:\+?\d[\d ()-]{8,}\d)(?!\w)")
+USERNAME = re.compile(r"(?<!\w)@[A-Za-z][A-Za-z0-9_]{4,31}\b")
+NUMERIC_ID = re.compile(r"(?<!\w)-?\d{7,}(?!\w)")
+LONG_CREDENTIAL = re.compile(
+    r"(?<![\w-])(?=[A-Za-z0-9_./+=-]{24,}(?![\w-]))"
+    r"(?=[^\s]*[A-Za-z])(?=[^\s]*\d)[A-Za-z0-9_./+=-]+"
+)
+
+
+def redact_digest_text(value: str) -> tuple[str, int]:
+    """Deterministically minimize secrets and personal identifiers before Gemini."""
+    text = str(value or "")
+    redactions = 0
+
+    def replace(pattern, replacement):
+        nonlocal text, redactions
+        text, count = pattern.subn(replacement, text)
+        redactions += count
+
+    replace(PRIVATE_SCHEME, "[private link]")
+    replace(BEARER, "Bearer [redacted]")
+
+    def safe_url(match):
+        nonlocal redactions
+        redactions += 1
+        try:
+            host = urlsplit(match.group(0)).hostname
+        except ValueError:
+            host = None
+        if host:
+            try:
+                ipaddress.ip_address(host)
+            except ValueError:
+                pass
+            else:
+                host = None
+        return f"[link: {host.lower()}]" if host else "[link]"
+
+    text = URL.sub(safe_url, text)
+    replace(NAMED_SECRET, "[credential redacted]")
+    replace(EMAIL, "[email]")
+    replace(PHONE, "[phone]")
+    replace(USERNAME, "[username]")
+    replace(NUMERIC_ID, "[id]")
+    replace(LONG_CREDENTIAL, "[credential redacted]")
+    return " ".join(text.split()).strip(), redactions
 
 
 class DigestItem(BaseModel):
@@ -110,12 +171,16 @@ def stable_ref(source_id: str, message_id: int) -> str:
     return f"m_{value}"
 
 
-def preprocess(rows: list[dict]) -> tuple[list[dict], dict[str, dict]]:
+def preprocess(
+    rows: list[dict], *, report: dict[str, int] | None = None,
+) -> tuple[list[dict], dict[str, dict]]:
     output, refs, seen_text, seen_forward = [], {}, {}, {}
+    redaction_count = 0
     for row in sorted(
         rows, key=lambda item: (item["timestamp"], item["source_id"], item["message_id"]),
     ):
-        text = " ".join(str(row.get("text") or row.get("caption") or "").split()).strip()
+        text, count = redact_digest_text(row.get("text") or row.get("caption") or "")
+        redaction_count += count
         if not text or row.get("service") or row.get("sticker_only") or NO_CONTENT.fullmatch(text):
             continue
         normalized = text.casefold()
@@ -133,11 +198,9 @@ def preprocess(rows: list[dict]) -> tuple[list[dict], dict[str, dict]]:
             seen_forward[forwarded] = len(output)
         item = {"ref": ref, "timestamp": row["timestamp"], "source": row["source_title"],
                 "text": text, "refs": [ref]}
-        if row.get("sender"):
-            item["sender"] = row["sender"]
-        if row.get("reply_context"):
-            item["reply_context"] = row["reply_context"]
         output.append(item)
+    if report is not None:
+        report["redactions"] = redaction_count
     return output, refs
 
 
@@ -333,7 +396,17 @@ async def run_digest(
             if previous else cutoff - timedelta(hours=24)
         )
     rows = await service.digest_rows(start, cutoff)
-    context, refs = preprocess(rows)
+    report = getattr(service, "last_digest_report", None)
+    context, refs = preprocess(rows, report=report if isinstance(report, dict) else None)
+    if isinstance(report, dict):
+        logger.info(
+            "morning_digest scope total=%d groups=%d channels=%d bots=%d "
+            "human_dms_excluded=%d ignored=%d unavailable=%d redactions=%d",
+            report.get("total_dialogs", 0), report.get("included_groups", 0),
+            report.get("included_channels", 0), report.get("included_bots", 0),
+            report.get("excluded_human_dms", 0), report.get("ignored", 0),
+            report.get("unavailable", 0), report.get("redactions", 0),
+        )
     engine = provider or GeminiDigestProvider(settings)
     payload = await asyncio.to_thread(generate_payload, engine, context)
     payload = validate_refs(payload, set(refs))

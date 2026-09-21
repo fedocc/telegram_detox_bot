@@ -23,6 +23,7 @@ from app.inbox.digest import (
     digest_history,
     latest_digest,
     preprocess,
+    redact_digest_text,
     run_digest,
     stable_ref,
     validate_refs,
@@ -85,6 +86,61 @@ def test_preprocess_deduplicates_noise_and_keeps_stable_opaque_refs():
     assert context[0]["ref"] == stable_ref("course", 1)
     assert context[0]["refs"] == [stable_ref("course", 1), stable_ref("course", 2)]
     assert refs[context[0]["ref"]] == {"source_id": "course", "message_id": 1}
+
+
+def test_digest_redaction_removes_secrets_pii_and_urls_but_preserves_news_and_refs():
+    credential_marker = "".join(("AbCdEf0123456789", "AbCdEf0123456789"))
+    text = (
+        "Релиз сегодня. api_key=top-secret Bearer abcdefghijklmnop "
+        "https://vpn.example/sub/path?token=hidden "
+        "https://10.0.0.8/config?auth=private "
+        "vless://credential@example.net:443/config "
+        f"password=hunter2 {credential_marker} person@example.org "
+        "+7 999 123-45-67 @private_user"
+    )
+    redacted, count = redact_digest_text(text)
+    assert redacted.startswith("Релиз сегодня.")
+    assert "[link: vpn.example]" in redacted
+    assert "[link]" in redacted and "10.0.0.8" not in redacted
+    assert count >= 8
+    for private in (
+        "top-secret", "abcdefghijklmnop", "token=hidden", "vless://", "hunter2",
+        credential_marker, "person@example.org", "999 123", "@private_user",
+    ):
+        assert private not in redacted
+
+    context, refs = preprocess([row(text=text)])
+    assert context[0]["ref"] in refs
+    assert context[0]["refs"] == [context[0]["ref"]]
+    assert "source" in context[0] and "sender" not in context[0]
+
+
+def test_digest_redaction_preserves_ordinary_harmless_text():
+    text = "Занятие перенесли на пятницу в 18:00, аудитория 305."
+    assert redact_digest_text(text) == (text, 0)
+
+
+async def test_run_digest_reports_only_safe_aggregates_and_provider_sees_redacted_text(
+    settings, caplog,
+):
+    factory = init_db(settings)
+    marker = "".join(("private", "-token-12345678901234567890"))
+    service = Service([row(text=f"Обновление token={marker}")])
+    service.last_digest_report = {
+        "total_dialogs": 5, "included_groups": 2, "included_channels": 1,
+        "included_bots": 1, "excluded_human_dms": 1, "ignored": 0,
+        "unavailable": 0, "redactions": 0,
+    }
+    provider = Provider()
+    cutoff = datetime(2026, 9, 19, 4, tzinfo=UTC)
+
+    with caplog.at_level("INFO"):
+        await run_digest(service, factory, settings, cutoff, provider)
+
+    assert marker not in str(provider.calls)
+    assert marker not in caplog.text
+    assert "human_dms_excluded=1" in caplog.text
+    assert "redactions=1" in caplog.text
 
 
 def test_digest_history_returns_one_success_per_local_day_for_last_week(settings):

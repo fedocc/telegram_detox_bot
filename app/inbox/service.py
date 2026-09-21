@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
+import logging
 import math
 import secrets
 import time
@@ -9,6 +11,7 @@ import warnings
 from collections import OrderedDict
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -69,6 +72,9 @@ PEER_ERRORS = (
     UserIdInvalidError,
 )
 RESOLUTION_ERRORS = (ValueError, *PEER_ERRORS)
+logger = logging.getLogger(__name__)
+DIGEST_DIALOG_CONCURRENCY = 4
+DIGEST_PAGE_SIZE = 100
 
 
 class InboxError(Exception):
@@ -321,6 +327,7 @@ class InboxService:
         self.peer_failures = {}
         self.custom_emoji_documents = {}
         self.custom_emoji_failures = {}
+        self.last_digest_report = None
         self.telegram_blocked_until = 0.0
         self.upload_max = upload_max_mb * 1024 * 1024
         self.upload_stale = upload_stale_hours * 3600
@@ -742,38 +749,192 @@ class InboxService:
         return payload
 
     async def digest_rows(self, start, end):
-        """Read only explicitly selected, digest-eligible Library sources."""
-        rows = []
-        sources = [source for source in self.store.library_sources()
-                   if source.library_enabled and not source.digest_excluded
-                   and source.peer_id not in self.store.ignored()]
-        for source in sources:
-            messages = list(await self._peer_call(source, lambda peer: self.client.get_messages(
-                peer, limit=5000, offset_date=end,
-            )))
-            for message in messages:
-                date = getattr(message, "date", None)
-                if date is None or not (start <= date <= end):
+        """Collect the digest window from non-private information dialogs only."""
+        iterator = getattr(self.client, "iter_dialogs", None)
+        if iterator is None:
+            raise InboxError("Список Telegram-чатов сейчас недоступен.", 503)
+        ignored = {str(value) for value in self.store.ignored()}
+        library = {
+            row.peer_id: row for row in self.store.library_sources(enabled_only=False)
+        }
+        stats = {
+            "total_dialogs": 0, "included_groups": 0, "included_channels": 0,
+            "included_bots": 0, "excluded_human_dms": 0, "ignored": 0,
+            "unavailable": 0, "redactions": 0,
+        }
+        sources, seen_peers = [], set()
+        try:
+            async for dialog in iterator(limit=None):
+                stats["total_dialogs"] += 1
+                entity = getattr(dialog, "entity", None)
+                if entity is None:
                     continue
-                action = getattr(message, "action", None)
-                file = getattr(message, "file", None)
-                raw_text = getattr(message, "raw_text", None) or ""
-                sender = getattr(message, "sender", None)
-                forwarded = getattr(message, "fwd_from", None)
-                forward_identity = None
-                if forwarded is not None:
-                    origin = getattr(forwarded, "from_id", None)
-                    original_id = getattr(forwarded, "channel_post", None)
-                    if origin is not None and original_id is not None:
-                        forward_identity = f"{origin!s}:{original_id}"
-                rows.append({
-                    "source_id": source.id, "source_title": source.display_title,
-                    "message_id": int(message.id), "timestamp": date.isoformat(),
-                    "sender": display_name(sender) if sender else "", "text": raw_text,
-                    "caption": raw_text if file else "", "service": action is not None,
-                    "sticker_only": bool(getattr(message, "sticker", None) and not raw_text),
-                    "forward_identity": forward_identity,
-                })
+                peer_type, marked, access_hash = self._input_identity(
+                    getattr(dialog, "input_entity", None), dialog.id, entity,
+                )
+                marked = str(marked)
+                seen_peers.add(marked)
+                selected = library.get(marked)
+                title = (getattr(dialog, "name", None) or display_name(entity)).strip()[:512]
+                if marked in ignored:
+                    stats["ignored"] += 1
+                    continue
+                is_self = bool(getattr(entity, "is_self", False)) or (
+                    peer_type == "user" and str(getattr(entity, "id", "")) == str(self.self_id)
+                )
+                is_bot = peer_type == "user" and bool(getattr(entity, "bot", False))
+                unavailable = bool(getattr(entity, "deactivated", False)) or bool(
+                    peer_type == "channel" and getattr(entity, "left", False)
+                )
+                if unavailable:
+                    stats["unavailable"] += 1
+                    if selected and selected.library_enabled:
+                        self._disable_dead_library_source(selected, peer_type, title)
+                    continue
+                if peer_type == "user" and (is_self or not is_bot):
+                    if not is_self:
+                        stats["excluded_human_dms"] += 1
+                    continue
+                if peer_type == "chat":
+                    source_type = "group"
+                    stats["included_groups"] += 1
+                elif peer_type == "channel":
+                    source_type = "group" if bool(
+                        getattr(entity, "megagroup", False)
+                        or getattr(entity, "gigagroup", False)
+                    ) else "channel"
+                    stats[f"included_{source_type}s"] += 1
+                elif is_bot:
+                    source_type = "bot"
+                    stats["included_bots"] += 1
+                else:
+                    continue
+                opaque_id = selected.id if selected else "d" + hashlib.sha256(
+                    f"{peer_type}:{marked}".encode()
+                ).hexdigest()[:20]
+                sources.append(SimpleNamespace(
+                    id=opaque_id, peer_type=peer_type, peer_id=marked,
+                    access_hash=access_hash, display_title=title,
+                    input_entity=getattr(dialog, "input_entity", None),
+                    source_type=source_type, library_source=selected,
+                ))
+        except FloodWaitError as exc:
+            raise self._flood_wait_error(exc) from None
+        except RPCError:
+            raise InboxError("Telegram временно недоступен. Повторите позже.", 503) from None
+
+        semaphore = asyncio.Semaphore(DIGEST_DIALOG_CONCURRENCY)
+
+        async def fetch(source):
+            async with semaphore:
+                return await self._digest_source_rows(source, start, end, stats)
+
+        async def reconcile_missing(source):
+            if source.peer_id in seen_peers or not source.library_enabled:
+                return
+            async with semaphore:
+                try:
+                    await self._peer_call(
+                        source, lambda peer: self.client.get_messages(peer, limit=1),
+                    )
+                except InboxError as exc:
+                    if exc.status != 410:
+                        raise
+                    stats["unavailable"] += 1
+                    self._disable_dead_library_source(
+                        source, source.peer_type, source.display_title,
+                    )
+
+        results = await asyncio.gather(
+            *(fetch(source) for source in sources),
+            *(reconcile_missing(source) for source in library.values()),
+        )
+        rows = [row for result in results if result for row in result]
+        self.last_digest_report = stats
+        return rows
+
+    def _disable_dead_library_source(self, source, source_type, title):
+        self.store.update_library_source(source.id, library_enabled=False)
+        self.library_snapshots.clear()
+        self.pin_snapshots.clear()
+        self.media_allowances.clear()
+        safe_title = " ".join(str(title or "").split())[:80]
+        logger.warning(
+            "digest source skipped source_type=%s title=%s reason=unavailable",
+            source_type, safe_title,
+        )
+
+    async def _digest_source_rows(self, source, start, end, stats):
+        rows, offset_id = [], None
+        try:
+            while True:
+                options = {"limit": DIGEST_PAGE_SIZE}
+                if offset_id is None:
+                    options["offset_date"] = end
+                else:
+                    options["offset_id"] = offset_id
+                messages = list(await self._peer_call(
+                    source, lambda peer, request=options: self.client.get_messages(
+                        peer, **request
+                    ),
+                ))
+                if not messages:
+                    break
+                oldest = None
+                for message in messages:
+                    try:
+                        date = getattr(message, "date", None)
+                        if date is None:
+                            continue
+                        if date.tzinfo is None:
+                            date = date.replace(tzinfo=end.tzinfo)
+                        oldest = date if oldest is None else min(oldest, date)
+                        if not (start < date <= end):
+                            continue
+                        raw_text = getattr(message, "raw_text", None) or ""
+                        forwarded = getattr(message, "fwd_from", None)
+                        origin = getattr(forwarded, "from_id", None) if forwarded else None
+                        original_id = (
+                            getattr(forwarded, "channel_post", None) if forwarded else None
+                        )
+                        rows.append({
+                            "source_id": source.id,
+                            "source_title": source.display_title,
+                            "message_id": int(message.id),
+                            "timestamp": date.isoformat(),
+                            "text": raw_text,
+                            "caption": raw_text if getattr(message, "file", None) else "",
+                            "service": getattr(message, "action", None) is not None,
+                            "sticker_only": bool(
+                                getattr(message, "sticker", None) and not raw_text
+                            ),
+                            "forward_identity": (
+                                f"{origin!s}:{original_id}" if origin is not None
+                                and original_id is not None else None
+                            ),
+                        })
+                    except (AttributeError, TypeError, ValueError, OverflowError):
+                        continue
+                if len(messages) < DIGEST_PAGE_SIZE or (oldest is not None and oldest <= start):
+                    break
+                next_offset = min(int(message.id) for message in messages)
+                if next_offset == offset_id:
+                    break
+                offset_id = next_offset
+        except InboxError as exc:
+            if exc.status != 410:
+                raise
+            stats["unavailable"] += 1
+            stats[f"included_{source.source_type}s"] -= 1
+            if source.library_source and source.library_source.library_enabled:
+                self._disable_dead_library_source(
+                    source.library_source, source.source_type, source.display_title,
+                )
+            else:
+                logger.warning(
+                    "digest source skipped source_type=%s title=%s reason=unavailable",
+                    source.source_type, " ".join(source.display_title.split())[:80],
+                )
         return rows
 
     async def library_dialogs(self, query=""):

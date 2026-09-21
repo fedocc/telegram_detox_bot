@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import base64
 import io
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -2007,3 +2008,240 @@ def test_telegram_link_segments_use_utf16_and_reject_malformed_urls():
     malformed = MessageEntityTextUrl(0, 1, "https://[broken")
     unsafe = MessageEntityTextUrl(0, 1, "javascript:alert(1)")
     assert safe_link_segments("x", [malformed, unsafe]) == []
+
+
+def _digest_dialog(marked_id, input_entity, *, name, **entity_values):
+    defaults = {"id": abs(marked_id), "bot": False, "is_self": False,
+                "deactivated": False, "left": False, "megagroup": False,
+                "gigagroup": False, "first_name": name, "last_name": ""}
+    defaults.update(entity_values)
+    return SimpleNamespace(
+        id=marked_id, name=name, input_entity=input_entity,
+        entity=SimpleNamespace(**defaults),
+    )
+
+
+class DigestTelegram(FakeTelegram):
+    def __init__(self, dialogs, messages=None, failures=None, delay=0):
+        super().__init__()
+        self.dialogs = dialogs
+        self.by_peer = messages or {}
+        self.failures = failures or {}
+        self.delay = delay
+        self.fetch_peers = []
+        self.active = 0
+        self.max_active = 0
+
+    async def iter_dialogs(self, *, limit):
+        assert limit in {None, 200}
+        for dialog in self.dialogs:
+            yield dialog
+
+    def _marked(self, peer):
+        if isinstance(peer, int):
+            return peer
+        for dialog in self.dialogs:
+            if peer == dialog.input_entity:
+                return dialog.id
+        return int(getattr(peer, "user_id", getattr(peer, "chat_id", 0)))
+
+    async def get_messages(self, peer, **kwargs):
+        marked = self._marked(peer)
+        self.fetch_peers.append(marked)
+        failure = self.failures.get(marked)
+        if failure is not None:
+            raise failure
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            if self.delay:
+                await asyncio.sleep(self.delay)
+            messages = list(self.by_peer.get(marked, ()))
+            if kwargs.get("offset_id"):
+                messages = [item for item in messages if item.id < kwargs["offset_id"]]
+            if kwargs.get("offset_date"):
+                messages = [item for item in messages if item.date <= kwargs["offset_date"]]
+            return sorted(messages, key=lambda item: item.id, reverse=True)[
+                :kwargs.get("limit", 100)
+            ]
+        finally:
+            self.active -= 1
+
+
+async def test_digest_source_scope_filters_before_fetch_and_ignores_library_membership(
+    settings, tmp_path,
+):
+    from telethon.tl.types import InputPeerChannel, InputPeerChat, InputPeerUser
+
+    from app.inbox.digest import DigestItem, DigestPayload, latest_digest, preprocess, run_digest
+
+    group = _digest_dialog(-10, InputPeerChat(10), name="Group")
+    ignored = _digest_dialog(-11, InputPeerChat(11), name="Ignored")
+    supergroup = _digest_dialog(
+        -1000000000020, InputPeerChannel(20, 200), name="Forum", megagroup=True,
+    )
+    channel = _digest_dialog(
+        -1000000000030, InputPeerChannel(30, 300), name="Announcements",
+    )
+    bot = _digest_dialog(2, InputPeerUser(2, 200), name="Utility Bot", bot=True)
+    human = _digest_dialog(3, InputPeerUser(3, 300), name="Human")
+    saved = _digest_dialog(1, InputPeerUser(1, 100), name="Saved", is_self=True)
+    dialogs = [group, ignored, supergroup, channel, bot, human, saved]
+    now = datetime(2026, 9, 21, 4, tzinfo=UTC)
+    messages = {
+        -10: [Message(10, "group news", date=now)],
+        -1000000000020: [Message(20, "forum news", date=now)],
+        -1000000000030: [Message(30, "channel news", date=now)],
+        2: [Message(40, "bot news", date=now)],
+        3: [Message(50, "PRIVATE HUMAN MARKER", date=now)],
+        1: [Message(60, "SAVED MARKER", date=now)],
+        -11: [Message(70, "IGNORED MARKER", date=now)],
+    }
+    client = DigestTelegram(dialogs, messages)
+    service = InboxService(
+        client, init_db(settings), lambda: {"-11"}, tmp_path / "digest-cache", self_id=1,
+    )
+    selected = service.store.upsert_library_source(
+        source_id="disabled-group", peer_type="chat", peer_id="-10", access_hash=None,
+        display_title="Group", is_bot=False, library_enabled=False,
+    )
+
+    rows = await service.digest_rows(now - timedelta(days=1), now)
+    context, _ = preprocess(rows)
+    text = str(context)
+    assert {row["text"] for row in rows} == {
+        "group news", "forum news", "channel news", "bot news",
+    }
+    assert selected.id in {row["source_id"] for row in rows}
+    assert "PRIVATE HUMAN MARKER" not in text
+    assert "SAVED MARKER" not in text and "IGNORED MARKER" not in text
+    assert all(peer not in client.fetch_peers for peer in (3, 1, -11))
+    assert service.last_digest_report == {
+        "total_dialogs": 7, "included_groups": 2, "included_channels": 1,
+        "included_bots": 1, "excluded_human_dms": 1, "ignored": 1,
+        "unavailable": 0, "redactions": 0,
+    }
+
+    class CaptureProvider:
+        calls = []
+
+        def generate(self, supplied, *, candidate_mode=False):
+            self.calls.append((supplied, candidate_mode))
+            return DigestPayload(title="Scope", items=[DigestItem(
+                category="news", title="News", summary="Safe",
+                source_refs=[supplied[0]["ref"]],
+            )])
+
+    provider = CaptureProvider()
+    await run_digest(service, service.store.factory, settings, now, provider)
+    assert "PRIVATE HUMAN MARKER" not in str(provider.calls)
+    link = latest_digest(service.store.factory)["items"][0]["links"][0]
+    assert link.startswith("/?library=") and "-100" not in link
+
+
+async def test_digest_permanent_source_failure_isolated_and_library_soft_disabled(
+    settings, tmp_path,
+):
+    from telethon.errors import PeerIdInvalidError
+    from telethon.tl.types import InputPeerChat
+
+    dead = _digest_dialog(-20, InputPeerChat(20), name="Dead group")
+    live = _digest_dialog(-21, InputPeerChat(21), name="Live group")
+    now = datetime(2026, 9, 21, 4, tzinfo=UTC)
+    client = DigestTelegram(
+        [dead, live], {-21: [Message(1, "live news", date=now)]},
+        failures={-20: PeerIdInvalidError(request=None)},
+    )
+    service = InboxService(
+        client, init_db(settings), lambda: set(), tmp_path / "digest-cache", self_id=1,
+    )
+    source = service.store.upsert_library_source(
+        source_id="dead", peer_type="chat", peer_id="-20", access_hash=None,
+        display_title="Dead group", is_bot=False,
+    )
+    service.library_snapshots[(source.id, 0)] = {"payload": {}, "fetched": 0}
+
+    rows = await service.digest_rows(now - timedelta(days=1), now)
+    assert [row["text"] for row in rows] == ["live news"]
+    assert service.store.library_source(source.id, enabled_only=False).library_enabled is False
+    assert not service.library_snapshots
+    assert service.last_digest_report["unavailable"] == 1
+
+
+async def test_digest_transient_failure_stays_retryable_and_does_not_disable(
+    settings, tmp_path,
+):
+    from telethon.errors import FloodWaitError
+    from telethon.tl.types import InputPeerChat
+
+    dialog = _digest_dialog(-30, InputPeerChat(30), name="Temporary")
+    client = DigestTelegram(
+        [dialog], failures={-30: FloodWaitError(request=None, capture=9)},
+    )
+    service = InboxService(
+        client, init_db(settings), lambda: set(), tmp_path / "digest-cache", self_id=1,
+    )
+    source = service.store.upsert_library_source(
+        source_id="temporary", peer_type="chat", peer_id="-30", access_hash=None,
+        display_title="Temporary", is_bot=False,
+    )
+    now = datetime(2026, 9, 21, 4, tzinfo=UTC)
+    with pytest.raises(InboxError) as failure:
+        await service.digest_rows(now - timedelta(days=1), now)
+    assert failure.value.status == 429
+    assert service.store.library_source(source.id, enabled_only=False).library_enabled is True
+
+
+async def test_digest_fetch_uses_bounded_concurrency(settings, tmp_path):
+    from telethon.tl.types import InputPeerChat
+
+    dialogs = [
+        _digest_dialog(-index, InputPeerChat(index), name=f"Group {index}")
+        for index in range(1, 9)
+    ]
+    client = DigestTelegram(dialogs, delay=0.01)
+    service = InboxService(
+        client, init_db(settings), lambda: set(), tmp_path / "digest-cache", self_id=99,
+    )
+    now = datetime(2026, 9, 21, 4, tzinfo=UTC)
+    await service.digest_rows(now - timedelta(days=1), now)
+    assert 1 < client.max_active <= 4
+
+
+async def test_digest_daily_reconciliation_disables_only_confirmed_missing_library_source(
+    settings, tmp_path,
+):
+    from telethon.errors import PeerIdInvalidError
+
+    client = DigestTelegram([], failures={-40: PeerIdInvalidError(request=None)})
+    service = InboxService(
+        client, init_db(settings), lambda: set(), tmp_path / "digest-cache", self_id=1,
+    )
+    source = service.store.upsert_library_source(
+        source_id="missing", peer_type="chat", peer_id="-40", access_hash=None,
+        display_title="Missing", is_bot=False,
+    )
+    now = datetime(2026, 9, 21, 4, tzinfo=UTC)
+    assert await service.digest_rows(now - timedelta(days=1), now) == []
+    assert service.store.library_source(source.id, enabled_only=False).library_enabled is False
+    assert service.last_digest_report["unavailable"] == 1
+
+
+async def test_digest_503_does_not_disable_library_source(settings, tmp_path):
+    from telethon.tl.types import InputPeerChat
+
+    dialog = _digest_dialog(-50, InputPeerChat(50), name="Transient")
+    service = InboxService(
+        DigestTelegram([dialog]), init_db(settings), lambda: set(),
+        tmp_path / "digest-cache", self_id=1,
+    )
+    source = service.store.upsert_library_source(
+        source_id="transient", peer_type="chat", peer_id="-50", access_hash=None,
+        display_title="Transient", is_bot=False,
+    )
+    service._peer_call = AsyncMock(side_effect=InboxError("temporary", 503))
+    now = datetime(2026, 9, 21, 4, tzinfo=UTC)
+    with pytest.raises(InboxError) as failure:
+        await service.digest_rows(now - timedelta(days=1), now)
+    assert failure.value.status == 503
+    assert service.store.library_source(source.id, enabled_only=False).library_enabled is True
