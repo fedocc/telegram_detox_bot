@@ -26,8 +26,9 @@ async def main():
         static = root / 'static'
         static.mkdir()
         for file in inbox_web.STATIC.iterdir():
-            (static / file.name).write_text(file.read_text().replace('127.0.0.1:8788',
-                                                                    '127.0.0.1:8878'))
+            (static / file.name).write_bytes(
+                file.read_bytes().replace(b'127.0.0.1:8788', b'127.0.0.1:8878')
+            )
         inbox_web.STATIC = static
 
         async def history(key):
