@@ -175,7 +175,7 @@ export function openedConversationIds(result) {
 }
 
 export function isWritable(mode, source) {
-  return mode === 'inbox' || (['library', 'quick'].includes(mode) && source?.writable === true);
+  return mode === 'inbox' || (mode === 'library' && source?.writable === true);
 }
 
 export function manualOpenButtonVisible(quota, desktop = true) {
@@ -192,7 +192,6 @@ export function scopePath(mode, id) {
   const encoded = encodeURIComponent(String(id || ''));
   if (mode === 'inbox') return `/api/conversations/${encoded}`;
   if (mode === 'library') return `/api/library/${encoded}`;
-  if (mode === 'quick') return `/api/quick-write/${encoded}`;
   return '';
 }
 
@@ -231,10 +230,6 @@ export function parseDeepLink(search, conversations, sources) {
   if (source && sources.some(row => row.id === source)) {
     return {mode: 'library', id: source, messageId};
   }
-  const quick = params.get('write');
-  if (/^[A-Za-z0-9_-]{1,64}$/.test(quick || '')) {
-    return {mode: 'quick', id: quick, messageId};
-  }
   return null;
 }
 
@@ -242,7 +237,6 @@ export function deepLinkFor(mode, id, messageId = null) {
   const params = new URLSearchParams();
   if (mode === 'inbox') params.set('conversation', id);
   if (mode === 'library') params.set('library', id);
-  if (mode === 'quick') params.set('write', id);
   if (messageId && Number.isSafeInteger(Number(messageId)) && Number(messageId) > 0) {
     params.set('message', String(messageId));
   }

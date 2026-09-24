@@ -1221,7 +1221,13 @@ class InboxService:
         messages = await self.serialize_many(
             fetched, None, by_id, source_id=source.id, source_scope="quick-write",
         )
-        source, status, consumed = self.store.consume_manual_open(source.id, self.timezone)
+        latest = fetched[-1] if fetched else None
+        source, conversation, status, consumed = self.store.consume_manual_open(
+            source.id,
+            self.timezone,
+            latest_message_id=getattr(latest, "id", 0),
+            preview=(getattr(latest, "raw_text", None) or ""),
+        )
         if not consumed:
             raise InboxError(
                 "Сегодня уже использованы два ручных открытия.",
@@ -1229,6 +1235,7 @@ class InboxService:
             )
         return {
             "source": self._manual_source_json(source),
+            "conversation": conversation_json(conversation),
             "messages": messages,
             "next_before": min(by_id) if has_older and by_id else None,
             "quota": status,
@@ -1645,7 +1652,16 @@ class InboxService:
             if previous:
                 return previous
             row = self.require(key)
-            if row.library_source_id or self.store.library_source_for_peer(row.peer_id):
+            source = self.store.library_source_for_peer(row.peer_id, enabled_only=False)
+            manual_source = source if (
+                source is not None
+                and float(source.manual_access_until or 0) > self.clock()
+                and row.thread_id == 0
+            ) else None
+            if (
+                row.library_source_id
+                or (source is not None and source.library_enabled)
+            ) and manual_source is None:
                 raise InboxError(
                     "Отправляйте сообщения выбранному источнику через Библиотеку.", 403
                 )
@@ -1712,7 +1728,10 @@ class InboxService:
                 raise InboxError("Связь прервалась. Статус отправки неизвестен; "
                                  "проверьте сообщения. Черновик сохранён.", 409) from None
             self._finish_send(request_id, sent)
-            self.store.extend(key)
+            if manual_source is not None:
+                self.store.extend_manual_write(manual_source.id)
+            else:
+                self.store.extend(key)
             if key in self.snapshots:
                 self.snapshots[key]["fetched"] = 0
             return {"message_id": sent.id}

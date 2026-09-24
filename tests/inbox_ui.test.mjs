@@ -301,11 +301,11 @@ test('Library open exposes only validated unique Inbox projection ids to the bri
   assert.deepEqual(openedConversationIds(null), []);
 });
 
-test('only active, explicitly writable Library, and quick-write scopes are writable', () => {
+test('only active Inbox and explicitly writable Library scopes are writable', () => {
   assert.equal(isWritable('inbox'), true);
   assert.equal(isWritable('library', {writable:true}), true);
   assert.equal(isWritable('library', {writable:false}), false);
-  assert.equal(isWritable('quick', {writable:true}), true);
+  assert.equal(isWritable('quick', {writable:true}), false);
 });
 
 test('manual open action remains visible until both global daily uses are consumed', () => {
@@ -339,17 +339,16 @@ test('deep links resolve only currently allowed conversations and library source
     {mode:'library', id:'s-course', messageId:42});
   assert.equal(parseDeepLink('?library=crafted&message=42', conversations, sources), null);
   assert.equal(parseDeepLink('?conversation=evil', conversations, sources), null);
-  assert.deepEqual(parseDeepLink('?write=s-person', conversations, sources),
-    {mode:'quick', id:'s-person', messageId:null});
+  assert.equal(parseDeepLink('?write=s-person', conversations, sources), null);
   assert.equal(deepLinkFor('library', 's-course', 42), '/?library=s-course&message=42');
   assert.equal(deepLinkFor('inbox', id), `/?conversation=${id}`);
-  assert.equal(deepLinkFor('quick', 's-person'), '/?write=s-person');
+  assert.equal(deepLinkFor('quick', 's-person'), '/');
 });
 
 test('source endpoints never accept a peer id from a payload helper', () => {
   assert.equal(scopePath('library', 's-course'), '/api/library/s-course');
   assert.equal(scopePath('inbox', 'a'.repeat(32)), `/api/conversations/${'a'.repeat(32)}`);
-  assert.equal(scopePath('quick', 's-person'), '/api/quick-write/s-person');
+  assert.equal(scopePath('quick', 's-person'), '');
   assert.equal(scopePath('other', '123'), '');
   assert.equal(isTerminalConversationStatus(404), true);
   assert.equal(isTerminalConversationStatus(410), true);

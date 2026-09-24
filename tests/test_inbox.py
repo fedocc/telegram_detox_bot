@@ -1415,43 +1415,108 @@ async def test_foreground_lease_endpoint_and_history_get_are_separate(service):
         assert not service.store.has_view_lease(row.id)
 
 
-async def test_manual_open_quota_is_global_persistent_repeatable_and_resets(service):
+async def test_manual_open_projects_persistent_canonical_conversation_and_quota(
+    service, tmp_path,
+):
+    from sqlalchemy import func, select
+
+    from app.db.tables import InboxConversation
+
     dialog_key = "manual-token"
     service.dialog_tokens[dialog_key] = {
         "purpose": "manual_open", "peer_type": "user", "peer_id": "40",
         "access_hash": 4000, "display_title": "Person", "is_bot": False,
         "can_write": True, "source_id": None, "expires": service.clock() + 300,
     }
+    service.client.messages = [Message(10, "latest")]
     first = await service.open_manual_write(dialog_key)
     assert first["quota"]["used"] == 1 and first["quota"]["remaining"] == 1
     assert first["source"]["access_until"] == service.clock() + LIFETIME
+    conversation = first["conversation"]
+    assert conversation["opened_at"] == service.clock()
+    assert conversation["expires_at"] == pytest.approx(service.clock() + LIFETIME)
+    assert conversation["unread_count"] == 0
+    active = service.store.active()[0]
+    assert active.id == conversation["id"] and active.manually_closed is False
     source_id = first["source"]["id"]
 
-    attention = service.store.activate(
-        peer_id="41", peer_type="user", thread_id=0, is_forum=False,
-        title="Incoming", trigger_id=1, preview="hello", reason="private_message",
+    # Home/back, reload, ordinary Inbox reopen and history reads are all quota-free.
+    assert service.store.open(conversation["id"]).id == conversation["id"]
+    history = await service.history(conversation["id"])
+    assert [message["id"] for message in history["messages"]] == [10]
+    assert service.manual_open_status()["used"] == 1
+    restarted = InboxService(
+        FakeTelegram(), service.store.factory, lambda: set(),
+        tmp_path / "restarted-cache", self_id=1, clock=service.clock,
     )
-    assert attention is not None and service.manual_open_status()["used"] == 1
+    assert [row.id for row in restarted.store.active()] == [conversation["id"]]
 
     service.test_clock[0] += 20
-    result = await service.send_manual_write(source_id, str(uuid4()), "hello")
+    result = await service.send(conversation["id"], str(uuid4()), "hello")
     assert result == {"message_id": 901}
-    assert service.manual_write_source(source_id).manual_access_until == service.clock() + LIFETIME
+    source_deadline = service.manual_write_source(source_id).manual_access_until
+    projection_deadline = service.store.get(conversation["id"]).expires_at
+    assert source_deadline == projection_deadline == service.clock() + LIFETIME
 
     second = await service.open_manual_write(dialog_key)
     assert second["source"]["id"] == source_id
+    assert second["conversation"]["id"] == conversation["id"]
     assert second["quota"]["used"] == 2 and second["quota"]["remaining"] == 0
+    with service.store.factory() as session:
+        assert session.scalar(select(func.count(InboxConversation.id))) == 1
     with pytest.raises(InboxError) as exhausted:
         await service.open_manual_write(dialog_key)
     assert exhausted.value.status == 429
 
-    restarted = InboxStore(service.store.factory, lambda: set(), service.clock)
-    assert restarted.manual_open_status(service.timezone)["used"] == 2
+    service.test_clock[0] += LIFETIME
+    assert service.store.active() == []
+    assert service.store.get_any(conversation["id"]) is not None
+
+    restarted_store = InboxStore(service.store.factory, lambda: set(), service.clock)
+    assert restarted_store.manual_open_status(service.timezone)["used"] == 2
     service.test_clock[0] += 24 * 60 * 60
     service.dialog_tokens[dialog_key]["expires"] = service.clock() + 300
     assert service.manual_open_status()["used"] == 0
     next_day = await service.open_manual_write(dialog_key)
     assert next_day["quota"]["used"] == 1
+
+
+async def test_manual_open_reuses_pending_attention_and_close_ends_window(service):
+    from sqlalchemy import func, select
+
+    from app.db.tables import InboxConversation
+
+    pending = service.store.activate(
+        peer_id="40", peer_type="user", thread_id=0, is_forum=False,
+        title="Person", trigger_id=5, preview="attention", reason="private_message",
+    )
+    service.dialog_tokens["manual-token"] = {
+        "purpose": "manual_open", "peer_type": "user", "peer_id": "40",
+        "access_hash": 4000, "display_title": "Person", "is_bot": False,
+        "can_write": True, "source_id": None, "expires": service.clock() + 300,
+    }
+
+    opened = await service.open_manual_write("manual-token")
+    assert opened["conversation"]["id"] == pending.id
+    row = service.store.get(pending.id)
+    assert row.opened_at == service.clock()
+    assert row.unread_count == 0 and row.last_seen_message_id == 5
+    with service.store.factory() as session:
+        assert session.scalar(select(func.count(InboxConversation.id))) == 1
+
+    service.test_clock[0] += 1
+    attention = service.store.activate(
+        peer_id="40", peer_type="user", thread_id=0, is_forum=False,
+        title="Person", trigger_id=6, preview="new attention", reason="private_message",
+    )
+    assert attention.id == pending.id
+    assert attention.opened_at is None and attention.expires_at == 0
+    assert attention.unread_count == 1
+
+    service.store.open(pending.id)
+    await service.close(pending.id)
+    assert service.store.active() == []
+    assert service.manual_write_source(opened["source"]["id"]).manual_access_until == 0
 
 
 async def test_failed_manual_telegram_open_does_not_consume_quota(service):

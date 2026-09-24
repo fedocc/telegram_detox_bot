@@ -1,8 +1,8 @@
 'use strict';
 
-import {createPlaybackController} from './playback.mjs?v=14';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=14';
-import {createPushController} from './push.mjs?v=14';
+import {createPlaybackController} from './playback.mjs?v=15';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=15';
+import {createPushController} from './push.mjs?v=15';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
@@ -14,7 +14,7 @@ import {
   manualOpenButtonVisible,
   localImageClipboardUri, maintainMessageViewport, reactionEmojiPresentation,
   settleScrollBottom,
-} from './ui.mjs?v=14';
+} from './ui.mjs?v=15';
 
 const playback = createPlaybackController(document);
 const $ = id => document.getElementById(id);
@@ -26,7 +26,7 @@ const node = (tag, className, text) => {
 };
 
 let csrf = '', selected = null, selectedMode = null, conversations = [], library = [];
-let manualChat = null, manualQuota = {used: 0, remaining: 0, limit: 2};
+let manualQuota = {used: 0, remaining: 0, limit: 2};
 let manualDialogs = [], manualPickerOpen = false, manualPickerLoading = false;
 let manualPickerError = '';
 let serverOffset = 0, polling = false, choosing = 0, shownKey = null;
@@ -72,8 +72,7 @@ const visible = row => row.opened_at === null || row.expires_at > now();
 const minutes = row => `${Math.max(1, Math.ceil((row.expires_at - now()) / 60))} мин`;
 const initials = name => String(name || '').trim().split(/\s+/).slice(0, 2)
   .map(value => value[0] || '').join('').toUpperCase();
-const currentSource = () => selectedMode === 'quick' ? manualChat
-  : library.find(row => row.id === selected);
+const currentSource = () => library.find(row => row.id === selected);
 const currentScope = () => scopePath(selectedMode, selected);
 
 async function api(path, data) {
@@ -245,8 +244,7 @@ function renderDigestHistory(digests) {
 
 function renderHeader() {
   const row = selectedMode === 'library' ? library.find(value => value.id === selected)
-    : selectedMode === 'quick' ? manualChat
-      : conversations.find(value => value.id === selected);
+    : conversations.find(value => value.id === selected);
   const history = appView === 'digests';
   $('empty').hidden = Boolean(row) || history;
   $('digest-history').hidden = !history;
@@ -259,10 +257,9 @@ function renderHeader() {
     + (row.topic_title ? ` · ${row.topic_title}` : row.thread_id ? ` · Тема ${row.thread_id}` : '');
   $('chat-avatar').textContent = initials(row.title);
   $('remaining').hidden = selectedMode === 'library';
-  $('remaining').textContent = selectedMode === 'library' ? ''
-    : selectedMode === 'quick' ? minutes({expires_at: row.access_until}) : minutes(row);
+  $('remaining').textContent = selectedMode === 'library' ? '' : minutes(row);
   $('close').hidden = selectedMode !== 'inbox';
-  $('older').hidden = !['library', 'quick'].includes(selectedMode) || !nextBefore;
+  $('older').hidden = selectedMode !== 'library' || !nextBefore;
 }
 
 function resize() {
@@ -379,29 +376,6 @@ async function choose(key, {updateHistory = true, messageId = null} = {}) {
   }
 }
 
-async function chooseQuick(key, {updateHistory = true, messageId = null} = {}) {
-  const request = ++choosing;
-  try {
-    if (!manualChat || manualChat.id !== key) {
-      manualChat = {id: key, title: 'Telegram', writable: true, access_until: now() + 300};
-    }
-    const changed = prepareSelection('quick', key);
-    auxiliaryPanel = 'none'; syncAuxiliaryPanels();
-    if (messageId === null) focusedMessageId = null;
-    if (updateHistory) updateLocation(null);
-    await Promise.all([loadSource(key, null, !changed, 'quick'), loadPins('quick', key)]);
-    if (request !== choosing) return;
-    if (messageId) await focusMessage(messageId, {replaceUrl: true});
-    else settleScrollBottom($('messages'), requestAnimationFrame);
-    if (matchMedia('(min-width: 769px)').matches) $('text').focus();
-  } catch (error) {
-    if (request !== choosing) return;
-    if (isTerminalConversationStatus(error.status) || error.status === 403 || error.status === 429) {
-      deselect({message: error.message});
-    } else showError(selected ? 'load-error' : 'open-error', error.message);
-  }
-}
-
 async function chooseLibrary(key, {updateHistory = true, messageId = null} = {}) {
   if (!library.some(row => row.id === key)) return;
   const request = ++choosing;
@@ -424,8 +398,7 @@ async function chooseLibrary(key, {updateHistory = true, messageId = null} = {})
     if (currentSource()?.writable && matchMedia('(min-width: 769px)').matches) $('text').focus();
   } catch (error) {
     if (request !== choosing) return;
-    if (isTerminalConversationStatus(error.status) || (mode === 'quick' && error.status === 403)) {
-      if (mode === 'quick') manualChat = null;
+    if (isTerminalConversationStatus(error.status)) {
       await loadLibrarySources().catch(() => {});
       deselect({message: error.message});
     } else showError(selected ? 'load-error' : 'open-error', error.message);
@@ -877,32 +850,27 @@ async function loadMessages(key) {
   }
 }
 
-async function loadSource(key, before = null, refresh = false, mode = 'library') {
+async function loadSource(key, before = null, refresh = false) {
   if (olderLoading && before) return;
   if (before) {
     olderLoading = true; $('older').disabled = true; $('older').textContent = 'Загрузка…';
   }
   try {
     const suffix = before ? `?before=${encodeURIComponent(before)}` : '';
-    const base = mode === 'quick' ? 'quick-write' : 'library';
-    const result = await api(`/api/${base}/${encodeURIComponent(key)}/messages${suffix}`);
-    if (selected !== key || selectedMode !== mode) return;
-    if (mode === 'quick' && result.source) {
-      manualChat = result.source;
-      renderHeader(); renderComposer();
-    }
+    const result = await api(`/api/library/${encodeURIComponent(key)}/messages${suffix}`);
+    if (selected !== key || selectedMode !== 'library') return;
     if (before || !refresh || !olderCursorInitialized) {
       nextBefore = advanceOlderCursor(before, result.next_before);
       olderCursorInitialized = true;
       $('older').hidden = !nextBefore;
     }
     selectedLoadPaused = false;
-    renderMessages(result.messages || [], `${mode}:${key}`, {
+    renderMessages(result.messages || [], `library:${key}`, {
       prepend: Boolean(before), merge: Boolean(before) || refresh,
     });
     showError('load-error', '');
   } catch (error) {
-    if (selected !== key || selectedMode !== mode) return;
+    if (selected !== key || selectedMode !== 'library') return;
     if (isTerminalConversationStatus(error.status)) {
       await loadLibrarySources().catch(() => {});
       deselect({message: error.message});
@@ -916,7 +884,7 @@ async function loadSource(key, before = null, refresh = false, mode = 'library')
 }
 
 const loadLibrary = (key, before = null, refresh = false) => loadSource(
-  key, before, refresh, 'library',
+  key, before, refresh,
 );
 
 function renderPins(pins) {
@@ -956,8 +924,7 @@ async function focusMessage(messageId, {replaceUrl = false} = {}) {
     const result = await api(`${currentScope()}/messages/${numeric}`);
     const messages = result.messages || (result.message ? [result.message] : []);
     if (!messages.some(value => Number(value.id) === numeric)) throw new Error('Сообщение недоступно.');
-    const key = ['library', 'quick'].includes(selectedMode)
-      ? `${selectedMode}:${selected}` : selected;
+    const key = selectedMode === 'library' ? `library:${selected}` : selected;
     renderMessages(messages, key, {merge: true});
     focusLoadedMessage(numeric, {replaceUrl});
   } catch (error) { showError('load-error', error.message); }
@@ -1082,9 +1049,13 @@ async function selectManualDialog(row) {
   try {
     const result = await api('/api/manual-open', {token: row.token});
     manualQuota = result.quota || manualQuota;
-    manualChat = result.source;
+    if (!result.conversation?.id) throw new Error('Чат не удалось открыть.');
+    conversations = [
+      result.conversation,
+      ...conversations.filter(item => item.id !== result.conversation.id),
+    ];
     closeManualPicker(); renderManualOpenButton();
-    await chooseQuick(result.source.id);
+    await choose(result.conversation.id);
   } catch (error) {
     if (error.status === 429) await loadManualQuota().catch(() => {});
     manualPickerError = error.message;
@@ -1233,11 +1204,11 @@ async function applyLocation() {
   const route = parseDeepLink(location.search, conversations, library);
   if (!route) {
     const params = new URLSearchParams(location.search);
-    const hasRoute = params.has('conversation') || params.has('library') || params.has('write');
+    const hasRoute = params.has('conversation') || params.has('library');
     if (!hasRoute) {
       routePending = false;
       if (selected || appView === 'digests') deselect({replaceUrl: false});
-    } else if (Date.now() - routeWaitStarted > 30000 || params.has('library') || params.has('write')) {
+    } else if (Date.now() - routeWaitStarted > 30000 || params.has('library')) {
       routePending = false; deselect({message: 'Ссылка недоступна.', replaceUrl: true});
     }
     return;
@@ -1246,7 +1217,7 @@ async function applyLocation() {
   if (route.mode === 'inbox') await choose(route.id, {updateHistory: false, messageId: route.messageId});
   else if (route.mode === 'library') {
     await chooseLibrary(route.id, {updateHistory: false, messageId: route.messageId});
-  } else await chooseQuick(route.id, {updateHistory: false, messageId: route.messageId});
+  }
 }
 
 async function poll() {
@@ -1278,9 +1249,6 @@ async function poll() {
     if (selected && !selectedLoadPaused && selectedMode === 'inbox') await loadMessages(selected);
     if (selected && !selectedLoadPaused && selectedMode === 'library' && Date.now() >= libraryPollAt) {
       libraryPollAt = Date.now() + 10000; await loadLibrary(selected, null, true);
-    }
-    if (selected && !selectedLoadPaused && selectedMode === 'quick' && Date.now() >= libraryPollAt) {
-      libraryPollAt = Date.now() + 10000; await loadSource(selected, null, true, 'quick');
     }
     if (!result.connected) showError('load-error', 'Telegram переподключается…');
   } catch (error) {
@@ -1348,8 +1316,7 @@ $('composer').onsubmit = async event => {
     if (value.file) form.set('file', value.file, value.file.name);
     if (value.reply) form.set('reply_to', String(value.reply.id));
     const path = mode === 'library' ? `/api/library/${encodeURIComponent(key)}/send`
-      : mode === 'quick' ? `/api/quick-write/${encodeURIComponent(key)}/send`
-        : `/api/conversations/${key}/upload`;
+      : `/api/conversations/${key}/upload`;
     await multipartApi(path, form);
     value.text = ''; value.file = null; value.reply = null; value.requestId = null;
     if (value.url) URL.revokeObjectURL(value.url);
@@ -1357,10 +1324,7 @@ $('composer').onsubmit = async event => {
     try { sessionStorage.removeItem(`draft:${value.storageKey}`); } catch (_) {}
     if (selected === key && selectedMode === mode) {
       if (mode === 'library') await loadLibrary(key, null, true);
-      else if (mode === 'quick') {
-        if (manualChat?.id === key) manualChat.access_until = now() + 300;
-        await loadSource(key, null, true, 'quick');
-      } else await loadMessages(key);
+      else await loadMessages(key);
     }
   } catch (error) {
     value.error = error.message || 'Нет ответа. Проверьте сообщения перед повтором; черновик сохранён.';
@@ -1416,8 +1380,8 @@ $('library-dialog').addEventListener('click', event => {
 });
 $('dialog-search').oninput = renderManagement;
 $('older').onclick = () => {
-  if (['library', 'quick'].includes(selectedMode) && nextBefore && !olderLoading) {
-    loadSource(selected, nextBefore, false, selectedMode);
+  if (selectedMode === 'library' && nextBefore && !olderLoading) {
+    loadSource(selected, nextBefore);
   }
 };
 $('pinned-toggle').onclick = () => {

@@ -285,6 +285,17 @@ class InboxStore:
             if row:
                 row.manually_closed = True
                 row.preview = ""
+                source = session.scalar(select(LibrarySource).where(
+                    LibrarySource.peer_type == row.peer_type,
+                    LibrarySource.peer_id == row.peer_id,
+                ))
+                if (
+                    row.thread_id == 0
+                    and source
+                    and float(source.manual_access_until or 0) > self.clock()
+                ):
+                    source.manual_access_until = 0
+                    source.updated_at = self.clock()
                 session.commit()
 
     def extend(self, key):
@@ -605,8 +616,11 @@ class InboxStore:
                 "remaining": max(0, MANUAL_OPEN_LIMIT - int(used)),
                 "limit": MANUAL_OPEN_LIMIT, "retry_after": retry_after}
 
-    def consume_manual_open(self, source_id, timezone):
+    def consume_manual_open(
+        self, source_id, timezone, *, latest_message_id=0, preview="",
+    ):
         now = self.clock()
+        deadline = now + LIFETIME
         zone = ZoneInfo(timezone)
         today = datetime.fromtimestamp(now, zone).date()
         tomorrow = datetime.combine(today + timedelta(days=1), datetime.min.time(), zone)
@@ -616,19 +630,70 @@ class InboxStore:
                 session.execute(text("BEGIN IMMEDIATE"))
             source = session.get(LibrarySource, source_id)
             if source is None:
-                return None, self._manual_status(used=0, retry_after=retry_after), False
+                return None, None, self._manual_status(
+                    used=0, retry_after=retry_after,
+                ), False
             used = session.scalar(select(func.count(ManualOpenUsage.id)).where(
                 ManualOpenUsage.local_date == today,
             )) or 0
             if used >= MANUAL_OPEN_LIMIT:
-                return source, self._manual_status(used, retry_after), False
+                return source, None, self._manual_status(used, retry_after), False
             session.add(ManualOpenUsage(
                 local_date=today, source_id=source.id, opened_at=now,
             ))
-            source.manual_access_until = now + LIFETIME
+            source.manual_access_until = deadline
             source.updated_at = now
+            row = session.scalar(select(InboxConversation).where(
+                InboxConversation.peer_type == source.peer_type,
+                InboxConversation.peer_id == source.peer_id,
+                InboxConversation.thread_id == 0,
+            ))
+            if row is None:
+                message_id = max(0, int(latest_message_id or 0))
+                row = InboxConversation(
+                    id=uuid4().hex,
+                    peer_type=source.peer_type,
+                    peer_id=source.peer_id,
+                    access_hash=source.access_hash,
+                    thread_id=0,
+                    is_forum=False,
+                    title=source.display_title[:512],
+                    topic_title="",
+                    preview=preview[:256],
+                    trigger_id=message_id,
+                    activated_at=now,
+                    opened_at=now,
+                    latest_relevant_message_id=message_id,
+                    last_seen_message_id=message_id,
+                    unread_count=0,
+                    expires_at=deadline,
+                    manually_closed=False,
+                    library_source_id=None,
+                    quarantined_at=None,
+                    quarantine_reason=None,
+                )
+                session.add(row)
+            else:
+                row.access_hash = source.access_hash or row.access_hash
+                row.title = source.display_title[:512]
+                row.activated_at = now
+                row.opened_at = now
+                row.expires_at = deadline
+                row.last_seen_message_id = max(
+                    int(row.last_seen_message_id or 0),
+                    int(row.latest_relevant_message_id or 0),
+                )
+                row.unread_count = 0
+                row.manually_closed = False
+                row.quarantined_at = None
+                row.quarantine_reason = None
+            if row.library_source_id:
+                source.last_seen_message_id = max(
+                    int(source.last_seen_message_id or 0),
+                    int(row.latest_relevant_message_id or 0),
+                )
             session.commit()
-            return source, self._manual_status(used + 1, retry_after), True
+            return source, row, self._manual_status(used + 1, retry_after), True
 
     def manual_write_source(self, source_id, *, require_access=False):
         with self.factory() as session:
@@ -640,12 +705,23 @@ class InboxStore:
             return source
 
     def extend_manual_write(self, source_id):
+        now = self.clock()
+        deadline = now + LIFETIME
         with self.factory() as session:
             source = session.get(LibrarySource, source_id)
             if source is None:
                 return None
-            source.manual_access_until = self.clock() + LIFETIME
-            source.updated_at = self.clock()
+            source.manual_access_until = deadline
+            source.updated_at = now
+            row = session.scalar(select(InboxConversation).where(
+                InboxConversation.peer_type == source.peer_type,
+                InboxConversation.peer_id == source.peer_id,
+                InboxConversation.thread_id == 0,
+                InboxConversation.manually_closed.is_(False),
+                InboxConversation.quarantined_at.is_(None),
+            ))
+            if row is not None:
+                row.expires_at = deadline
             session.commit()
             return source
 

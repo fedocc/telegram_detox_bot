@@ -205,10 +205,31 @@ async def test_manual_open_api_consumes_only_successes_and_rejects_third_use(rou
         headers = await csrf_headers(client)
         first = await client.post("/api/manual-open", json={"token": dialog_key}, headers=headers)
         assert first.status == 200
-        assert (await first.json())["quota"]["remaining"] == 1
+        first_body = await first.json()
+        assert first_body["quota"]["remaining"] == 1
+        conversation_id = first_body["conversation"]["id"]
+        listing = await (await client.get("/api/conversations")).json()
+        assert [row["id"] for row in listing["conversations"]] == [conversation_id]
+
+        reopened = await client.post(
+            f"/api/conversations/{conversation_id}/open", json={}, headers=headers,
+        )
+        assert reopened.status == 200
+        assert (await (await client.get(
+            f"/api/conversations/{conversation_id}/messages"
+        )).json())["conversation"]["id"] == conversation_id
+        assert (await (await client.get("/api/manual-open/status")).json())["quota"]["used"] == 1
+
+        assert (await client.post(
+            f"/api/conversations/{conversation_id}/close", json={}, headers=headers,
+        )).status == 200
+        assert (await (await client.get("/api/conversations")).json())["conversations"] == []
+
         second = await client.post("/api/manual-open", json={"token": dialog_key}, headers=headers)
         assert second.status == 200
-        assert (await second.json())["quota"]["remaining"] == 0
+        second_body = await second.json()
+        assert second_body["quota"]["remaining"] == 0
+        assert second_body["conversation"]["id"] == conversation_id
         third = await client.post("/api/manual-open", json={"token": dialog_key}, headers=headers)
         assert third.status == 429
 
