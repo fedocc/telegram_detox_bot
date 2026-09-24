@@ -159,6 +159,9 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
     async def library(request):
         return web.json_response({"sources": service.library_json()})
 
+    async def manual_write(request):
+        return web.json_response({"sources": service.manual_write_json()})
+
     async def morning_digest(request):
         from app.inbox.digest import latest_digest
 
@@ -184,7 +187,7 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         body = await request.json()
         fields = {
             "token", "source_id", "library_enabled", "notifications_muted",
-            "allow_bot_write", "digest_excluded",
+            "allow_bot_write", "digest_excluded", "manual_write_enabled",
         }
         if not isinstance(body, dict) or set(body) - fields:
             raise InboxError("Некорректные настройки библиотеки.")
@@ -209,6 +212,34 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
     async def open_library(request):
         async with service.action_lock:
             return web.json_response(service.open_library(request.match_info["source"]))
+
+    async def open_manual_write(request):
+        async with service.action_lock:
+            return web.json_response(service.open_manual_write(request.match_info["source"]))
+
+    async def manual_write_history(request):
+        return web.json_response(await service.manual_write_history(
+            request.match_info["source"], positive_query(request, "before"),
+        ))
+
+    async def manual_write_pins(request):
+        async with asyncio.timeout(45):
+            return web.json_response(await service.manual_write_pins(
+                request.match_info["source"]
+            ))
+
+    async def manual_write_message(request):
+        async with asyncio.timeout(45):
+            return web.json_response(await service.manual_write_message(
+                request.match_info["source"], int(request.match_info["message_id"]),
+            ))
+
+    async def manual_write_search(request):
+        async with asyncio.timeout(45):
+            return web.json_response(await service.manual_write_search(
+                request.match_info["source"], request.query.get("q", ""),
+                positive_query(request, "before"),
+            ))
 
     async def library_history(request):
         return web.json_response(await service.library_history(
@@ -267,6 +298,15 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
 
     async def close(request):
         await service.close(request.match_info["key"])
+        return web.json_response({"ok": True})
+
+    async def foreground_lease(request):
+        if not service.store.refresh_view_lease(request.match_info["key"]):
+            raise InboxError("Разговор закрыт или время активности истекло.", 404)
+        return web.json_response({"ok": True})
+
+    async def release_foreground_lease(request):
+        service.store.release_view_lease(request.match_info["key"])
         return web.json_response({"ok": True})
 
     async def send(request):
@@ -385,6 +425,25 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
                 if item:
                     item[0].unlink(missing_ok=True)
 
+    async def send_manual_write(request):
+        service.manual_write_source(request.match_info["source"], require_access=True)
+        async with service.upload_slots:
+            values, item = await read_upload(request)
+            try:
+                request_id = str(UUID(values.get("request_id", "")))
+                reply = values.get("reply_to") or None
+                reply = int(reply) if reply else None
+                return web.json_response(await service.send_manual_write(
+                    request.match_info["source"], request_id, values.get("text", ""),
+                    file_path=item[0] if item else None,
+                    filename=item[1] if item else None,
+                    mime_type=item[2] if item else None,
+                    reply_to=reply,
+                ))
+            finally:
+                if item:
+                    item[0].unlink(missing_ok=True)
+
     async def media(request):
         path, mime, name, inline = await service.media(
             request.match_info["key"], int(request.match_info["message_id"]),
@@ -398,6 +457,18 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
 
     async def library_media(request):
         path, mime, name, inline = await service.library_media(
+            request.match_info["source"], int(request.match_info["message_id"]),
+        )
+        response = web.FileResponse(path)
+        response.content_type = mime
+        filename = quote(Path(name or "attachment").name[:180], safe="")
+        response.headers["Content-Disposition"] = (
+            f"{'inline' if inline else 'attachment'}; filename*=UTF-8''{filename}"
+        )
+        return response
+
+    async def manual_write_media(request):
+        path, mime, name, inline = await service.manual_write_media(
             request.match_info["source"], int(request.match_info["message_id"]),
         )
         response = web.FileResponse(path)
@@ -432,12 +503,22 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         web.get("/api/conversations", conversations),
         web.get("/api/badge", badge),
         web.get("/api/library", library),
+        web.get("/api/quick-write", manual_write),
         web.get("/api/digest/latest", morning_digest),
         web.get("/api/digest/history", morning_digest_history),
         web.get("/api/library/dialogs", library_dialogs),
         web.post("/api/library/preferences", library_preferences),
         web.post("/api/library/reorder", library_reorder),
         web.post(r"/api/library/{source:[A-Za-z0-9_-]{1,64}}/open", open_library),
+        web.post(r"/api/quick-write/{source:[A-Za-z0-9_-]{1,64}}/open", open_manual_write),
+        web.get(r"/api/quick-write/{source:[A-Za-z0-9_-]{1,64}}/messages", manual_write_history),
+        web.get(r"/api/quick-write/{source:[A-Za-z0-9_-]{1,64}}/pins", manual_write_pins),
+        web.get(r"/api/quick-write/{source:[A-Za-z0-9_-]{1,64}}/messages/"
+                r"{message_id:[1-9][0-9]*}", manual_write_message),
+        web.get(r"/api/quick-write/{source:[A-Za-z0-9_-]{1,64}}/search", manual_write_search),
+        web.post(r"/api/quick-write/{source:[A-Za-z0-9_-]{1,64}}/send", send_manual_write),
+        web.get(r"/api/quick-write/{source:[A-Za-z0-9_-]{1,64}}/media/"
+                r"{message_id:[1-9][0-9]*}", manual_write_media),
         web.get(r"/api/library/{source:[A-Za-z0-9_-]{1,64}}/messages", library_history),
         web.get(r"/api/library/{source:[A-Za-z0-9_-]{1,64}}/pins", library_pins),
         web.get(r"/api/library/{source:[A-Za-z0-9_-]{1,64}}/messages/"
@@ -454,6 +535,9 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
                 r"{message_id:[1-9][0-9]*}", conversation_message),
         web.get(r"/api/conversations/{key:[a-f0-9]{32}}/search", conversation_search),
         web.post(r"/api/conversations/{key:[a-f0-9]{32}}/open", open_conversation),
+        web.post(r"/api/conversations/{key:[a-f0-9]{32}}/lease", foreground_lease),
+        web.post(r"/api/conversations/{key:[a-f0-9]{32}}/lease/release",
+                 release_foreground_lease),
         web.post(r"/api/conversations/{key:[a-f0-9]{32}}/close", close),
         web.post(r"/api/conversations/{key:[a-f0-9]{32}}/send", send),
         web.post(r"/api/conversations/{key:[a-f0-9]{32}}/upload", upload),

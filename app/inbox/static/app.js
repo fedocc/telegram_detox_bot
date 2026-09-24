@@ -1,19 +1,19 @@
 'use strict';
 
-import {createPlaybackController} from './playback.mjs?v=12';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=12';
-import {createPushController} from './push.mjs?v=12';
+import {createPlaybackController} from './playback.mjs?v=13';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=13';
+import {createPushController} from './push.mjs?v=13';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
   messagesChanged, moveSelectedSource, newPageMessages, nextAuxiliaryPanel,
   normalizedSearchQuery, parseDeepLink, renderableMessages, restoreScrollAnchor,
   openedConversationIds, preferencePayload, retainFocusedMessage, scopePath, uploadWithinLimit,
-  canonicalBadge, clipboardFile, createFileDragTracker, digestTitle, dismissDigest,
-  hasFileTransfer, isDigestDismissed, isDigestHistoryRoute, isNearBottom,
+  canonicalBadge, clipboardFile, createFileDragTracker, digestTitle,
+  hasFileTransfer, isDigestHistoryRoute, isNearBottom,
   localImageClipboardUri, maintainMessageViewport, reactionEmojiPresentation,
   settleScrollBottom,
-} from './ui.mjs?v=12';
+} from './ui.mjs?v=13';
 
 const playback = createPlaybackController(document);
 const $ = id => document.getElementById(id);
@@ -25,6 +25,7 @@ const node = (tag, className, text) => {
 };
 
 let csrf = '', selected = null, selectedMode = null, conversations = [], library = [];
+let quickWrite = [], latestDigest = null;
 let serverOffset = 0, polling = false, choosing = 0, shownKey = null;
 let messageNodes = new Map(), nextBefore = null, olderLoading = false;
 let olderCursorInitialized = false;
@@ -40,7 +41,9 @@ let fileDrag = null;
 let appView = 'home', digestHistoryGeneration = 0;
 const drafts = new Map();
 
-window.addEventListener('pagehide', () => playback.stopAll());
+window.addEventListener('pagehide', () => {
+  playback.stopAll(); releaseForegroundLease(selectedMode === 'inbox' ? selected : null, true);
+});
 const stickerObserver = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
   for (const entry of entries) {
     if (entry.isIntersecting) entry.target.play().catch(() => {});
@@ -65,7 +68,8 @@ const visible = row => row.opened_at === null || row.expires_at > now();
 const minutes = row => `${Math.max(1, Math.ceil((row.expires_at - now()) / 60))} мин`;
 const initials = name => String(name || '').trim().split(/\s+/).slice(0, 2)
   .map(value => value[0] || '').join('').toUpperCase();
-const currentSource = () => library.find(row => row.id === selected);
+const currentSource = () => (selectedMode === 'quick' ? quickWrite : library)
+  .find(row => row.id === selected);
 const currentScope = () => scopePath(selectedMode, selected);
 
 async function api(path, data) {
@@ -86,6 +90,33 @@ async function api(path, data) {
     throw error;
   }
   return result;
+}
+
+function foregroundActive() {
+  if (document.visibilityState !== 'visible') return false;
+  return matchMedia('(max-width: 768px)').matches || document.hasFocus();
+}
+
+function releaseForegroundLease(key, keepalive = false) {
+  if (!key || !csrf) return;
+  fetch(`/api/conversations/${key}/lease/release`, {
+    method: 'POST', cache: 'no-store', keepalive,
+    headers: {'Content-Type': 'application/json', 'X-Inbox-CSRF': csrf},
+    body: '{}',
+  }).catch(() => {});
+}
+
+async function refreshForegroundLease() {
+  if (selectedMode !== 'inbox' || !selected) return;
+  const key = selected;
+  if (!foregroundActive()) { releaseForegroundLease(key); return; }
+  try {
+    await api(`/api/conversations/${key}/lease`, {});
+  } catch (error) {
+    if (selected === key && selectedMode === 'inbox' && isTerminalConversationStatus(error.status)) {
+      deselect({message: error.message, removeCurrent: true});
+    }
+  }
 }
 
 async function multipartApi(path, form) {
@@ -160,7 +191,7 @@ function renderList() {
 }
 
 function renderLibrary() {
-  $('library-list').replaceChildren(...library.map(row => {
+  const rows = library.map(row => {
     const active = selectedMode === 'library' && selected === row.id;
     const button = node('button', `library-row${active ? ' selected' : ''}`);
     button.type = 'button'; button.dataset.key = row.id;
@@ -170,6 +201,31 @@ function renderLibrary() {
     if (row.is_bot && row.writable) flags.push('bot');
     if (flags.length) button.append(node('span', 'source-flags', flags.join(' · ')));
     button.onclick = () => chooseLibrary(row.id);
+    return button;
+  });
+  if (matchMedia('(min-width: 769px)').matches) {
+    const digest = node('button', `library-row digest-row${appView === 'digests' ? ' selected' : ''}`,
+      latestDigest ? digestTitle(latestDigest.period_end) : 'Сводка');
+    digest.type = 'button'; digest.setAttribute('aria-current', appView === 'digests' ? 'page' : 'false');
+    digest.onclick = () => showDigestHistory();
+    rows.splice(Math.min(1, rows.length), 0, digest);
+  }
+  $('library-list').replaceChildren(...rows);
+}
+
+function renderQuickWrite() {
+  const section = $('quick-write');
+  section.hidden = quickWrite.length === 0;
+  $('quick-write-list').replaceChildren(...quickWrite.map(row => {
+    const active = selectedMode === 'quick' && selected === row.id;
+    const button = node('button', `quick-write-row${active ? ' selected' : ''}`);
+    button.type = 'button'; button.disabled = Boolean(row.used_today);
+    button.setAttribute('aria-current', active ? 'true' : 'false');
+    button.append(node('span', 'avatar', initials(row.title)),
+      node('span', 'quick-title', row.title));
+    if (row.used_today) button.append(node('small', '', 'сегодня использовано'));
+    else if (row.access_until) button.append(node('small', '', 'открыт'));
+    button.onclick = () => chooseQuick(row.id);
     return button;
   }));
 }
@@ -188,24 +244,6 @@ function digestNodes(digest, emptyText) {
   }) : [node('p', 'digest-empty', emptyText)];
 }
 
-function renderMorningDigest(digest) {
-  const card = $('morning-digest');
-  let storage = null;
-  try { storage = window.localStorage; } catch (_) {}
-  if (!digest || isDigestDismissed(storage, digest)) {
-    card.hidden = true; card.replaceChildren(); return;
-  }
-  const heading = node('strong', 'digest-heading', digestTitle(digest.period_end));
-  const dismiss = node('button', 'digest-dismiss', '×');
-  dismiss.type = 'button'; dismiss.setAttribute('aria-label', 'Скрыть сводку');
-  dismiss.onclick = () => {
-    dismissDigest(storage, digest);
-    card.hidden = true; card.replaceChildren();
-  };
-  const content = digestNodes(digest, 'Ничего важного с прошлой сводки.');
-  card.replaceChildren(heading, dismiss, ...content); card.hidden = false;
-}
-
 function renderDigestHistory(digests) {
   const cards = (digests || []).map(digest => {
     const card = node('article', 'digest-history-card');
@@ -220,7 +258,8 @@ function renderDigestHistory(digests) {
 
 function renderHeader() {
   const row = selectedMode === 'library' ? library.find(value => value.id === selected)
-    : conversations.find(value => value.id === selected);
+    : selectedMode === 'quick' ? quickWrite.find(value => value.id === selected)
+      : conversations.find(value => value.id === selected);
   const history = appView === 'digests';
   $('empty').hidden = Boolean(row) || history;
   $('digest-history').hidden = !history;
@@ -233,9 +272,10 @@ function renderHeader() {
     + (row.topic_title ? ` · ${row.topic_title}` : row.thread_id ? ` · Тема ${row.thread_id}` : '');
   $('chat-avatar').textContent = initials(row.title);
   $('remaining').hidden = selectedMode === 'library';
-  $('remaining').textContent = selectedMode === 'library' ? '' : minutes(row);
-  $('close').hidden = selectedMode === 'library';
-  $('older').hidden = selectedMode !== 'library' || !nextBefore;
+  $('remaining').textContent = selectedMode === 'library' ? ''
+    : selectedMode === 'quick' ? minutes({expires_at: row.access_until}) : minutes(row);
+  $('close').hidden = selectedMode !== 'inbox';
+  $('older').hidden = !['library', 'quick'].includes(selectedMode) || !nextBefore;
 }
 
 function resize() {
@@ -302,6 +342,7 @@ function resetConversationSurface() {
 
 function deselect({message = '', removeCurrent = false, replaceUrl = true} = {}) {
   const previous = selected, previousMode = selectedMode;
+  if (previousMode === 'inbox') releaseForegroundLease(previous);
   choosing += 1; pinsGeneration += 1;
   if (removeCurrent && previousMode === 'inbox') {
     conversations = conversations.filter(row => row.id !== previous);
@@ -309,19 +350,20 @@ function deselect({message = '', removeCurrent = false, replaceUrl = true} = {})
   selected = null; selectedMode = null;
   appView = 'home'; digestHistoryGeneration += 1;
   resetConversationSurface();
-  renderList(); renderLibrary(); renderHeader();
+  renderList(); renderLibrary(); renderQuickWrite(); renderHeader();
   showError('open-error', message); showError('load-error', '');
   if (replaceUrl) updateLocation(null, {replace: true});
 }
 
 function prepareSelection(mode, key) {
   const changed = selected !== key || selectedMode !== mode;
+  if (changed && selectedMode === 'inbox') releaseForegroundLease(selected);
   appView = 'home'; digestHistoryGeneration += 1;
   selected = key; selectedMode = mode;
   if (changed) resetConversationSurface();
   selectedLoadPaused = false;
   showError('open-error', ''); showError('load-error', '');
-  renderList(); renderLibrary(); renderHeader(); renderComposer();
+  renderList(); renderLibrary(); renderQuickWrite(); renderHeader(); renderComposer();
   return changed;
 }
 
@@ -333,6 +375,7 @@ async function choose(key, {updateHistory = true, messageId = null} = {}) {
     if (request !== choosing) return;
     conversations = conversations.map(row => row.id === key ? result.conversation : row);
     prepareSelection('inbox', key);
+    await refreshForegroundLease();
     syncBadge();
     if (messageId === null) focusedMessageId = null;
     if (updateHistory) updateLocation(null);
@@ -345,6 +388,32 @@ async function choose(key, {updateHistory = true, messageId = null} = {}) {
     if (request !== choosing) return;
     if (isTerminalConversationStatus(error.status)) {
       deselect({message: error.message, removeCurrent: true});
+    } else showError(selected ? 'load-error' : 'open-error', error.message);
+  }
+}
+
+async function chooseQuick(key, {updateHistory = true, messageId = null} = {}) {
+  if (!quickWrite.some(row => row.id === key)) return;
+  const request = ++choosing;
+  try {
+    const opened = await api(`/api/quick-write/${encodeURIComponent(key)}/open`, {});
+    if (request !== choosing) return;
+    if (opened.source) quickWrite = quickWrite.map(row => row.id === key
+      ? {...row, ...opened.source} : row);
+    const changed = prepareSelection('quick', key);
+    auxiliaryPanel = 'none'; syncAuxiliaryPanels();
+    if (messageId === null) focusedMessageId = null;
+    if (updateHistory) updateLocation(null);
+    await Promise.all([loadSource(key, null, !changed, 'quick'), loadPins('quick', key)]);
+    if (request !== choosing) return;
+    if (messageId) await focusMessage(messageId, {replaceUrl: true});
+    else settleScrollBottom($('messages'), requestAnimationFrame);
+    if (matchMedia('(min-width: 769px)').matches) $('text').focus();
+  } catch (error) {
+    if (request !== choosing) return;
+    await loadQuickWrite().catch(() => {});
+    if (isTerminalConversationStatus(error.status) || error.status === 403 || error.status === 429) {
+      deselect({message: error.message});
     } else showError(selected ? 'load-error' : 'open-error', error.message);
   }
 }
@@ -823,27 +892,28 @@ async function loadMessages(key) {
   }
 }
 
-async function loadLibrary(key, before = null, refresh = false) {
+async function loadSource(key, before = null, refresh = false, mode = 'library') {
   if (olderLoading && before) return;
   if (before) {
     olderLoading = true; $('older').disabled = true; $('older').textContent = 'Загрузка…';
   }
   try {
     const suffix = before ? `?before=${encodeURIComponent(before)}` : '';
-    const result = await api(`/api/library/${encodeURIComponent(key)}/messages${suffix}`);
-    if (selected !== key || selectedMode !== 'library') return;
+    const base = mode === 'quick' ? 'quick-write' : 'library';
+    const result = await api(`/api/${base}/${encodeURIComponent(key)}/messages${suffix}`);
+    if (selected !== key || selectedMode !== mode) return;
     if (before || !refresh || !olderCursorInitialized) {
       nextBefore = advanceOlderCursor(before, result.next_before);
       olderCursorInitialized = true;
       $('older').hidden = !nextBefore;
     }
     selectedLoadPaused = false;
-    renderMessages(result.messages || [], `library:${key}`, {
+    renderMessages(result.messages || [], `${mode}:${key}`, {
       prepend: Boolean(before), merge: Boolean(before) || refresh,
     });
     showError('load-error', '');
   } catch (error) {
-    if (selected !== key || selectedMode !== 'library') return;
+    if (selected !== key || selectedMode !== mode) return;
     if (isTerminalConversationStatus(error.status)) {
       await loadLibrarySources().catch(() => {});
       deselect({message: error.message});
@@ -855,6 +925,10 @@ async function loadLibrary(key, before = null, refresh = false) {
     }
   }
 }
+
+const loadLibrary = (key, before = null, refresh = false) => loadSource(
+  key, before, refresh, 'library',
+);
 
 function renderPins(pins) {
   if (!pins.length) {
@@ -893,7 +967,8 @@ async function focusMessage(messageId, {replaceUrl = false} = {}) {
     const result = await api(`${currentScope()}/messages/${numeric}`);
     const messages = result.messages || (result.message ? [result.message] : []);
     if (!messages.some(value => Number(value.id) === numeric)) throw new Error('Сообщение недоступно.');
-    const key = selectedMode === 'library' ? `library:${selected}` : selected;
+    const key = ['library', 'quick'].includes(selectedMode)
+      ? `${selectedMode}:${selected}` : selected;
     renderMessages(messages, key, {merge: true});
     focusLoadedMessage(numeric, {replaceUrl});
   } catch (error) { showError('load-error', error.message); }
@@ -953,12 +1028,23 @@ function toggleSearch(open = $('search-panel').hidden) {
 }
 
 async function loadLibrarySources() {
-  library = (await api('/api/library')).sources || [];
-  const digest = await api('/api/digest/latest').catch(() => ({digest: null}));
-  renderMorningDigest(digest.digest);
+  const [libraryResult, quickResult, digestResult] = await Promise.all([
+    api('/api/library'), api('/api/quick-write'),
+    matchMedia('(min-width: 769px)').matches
+      ? api('/api/digest/latest').catch(() => ({digest: null})) : {digest: null},
+  ]);
+  library = libraryResult.sources || [];
+  quickWrite = quickResult.sources || [];
+  latestDigest = digestResult.digest;
   libraryLoaded = true;
-  renderLibrary();
+  renderLibrary(); renderQuickWrite();
   if (selectedMode === 'library' && !library.some(row => row.id === selected)) deselect();
+  if (selectedMode === 'quick' && !quickWrite.some(row => row.id === selected)) deselect();
+}
+
+async function loadQuickWrite() {
+  quickWrite = (await api('/api/quick-write')).sources || [];
+  renderQuickWrite();
 }
 
 async function showDigestHistory({updateHistory = true} = {}) {
@@ -968,7 +1054,7 @@ async function showDigestHistory({updateHistory = true} = {}) {
   choosing += 1; pinsGeneration += 1;
   selected = null; selectedMode = null; appView = 'digests';
   const generation = ++digestHistoryGeneration;
-  resetConversationSurface(); renderList(); renderLibrary(); renderHeader();
+  resetConversationSurface(); renderList(); renderLibrary(); renderQuickWrite(); renderHeader();
   showError('open-error', ''); showError('digest-history-error', '');
   $('digest-history-list').replaceChildren(node('p', 'digest-empty', 'Загрузка…'));
   if (updateHistory) history.pushState(null, '', '/?view=digests');
@@ -1024,6 +1110,7 @@ async function savePreference(row, container, previous) {
 }
 
 function renderManagement() {
+  const manualCount = managementDialogs.filter(row => row.manual_write_enabled).length;
   $('dialog-list').replaceChildren(...managementRows().map(row => {
     const item = node('section', 'dialog-row'), main = node('div', 'dialog-main');
     const enabled = node('input');
@@ -1052,9 +1139,11 @@ function renderManagement() {
       label.append(input, document.createTextNode(labelText)); return label;
     };
     options.append(option('Без системных уведомлений', 'notifications_muted', !row.selected),
-      option('Не включать в будущий дайджест', 'digest_excluded', !row.selected));
+      option('Не включать в будущий дайджест', 'digest_excluded', !row.selected),
+      option('Разрешить ручное открытие', 'manual_write_enabled',
+        !row.can_manual_write || (!row.manual_write_enabled && manualCount >= 2)));
     if (row.is_bot) options.append(option('Разрешить писать этому боту', 'allow_bot_write', !row.selected));
-    options.hidden = !row.selected;
+    options.hidden = false;
     enabled.onchange = () => {
       const previous = {...row};
       row.selected = enabled.checked;
@@ -1097,21 +1186,23 @@ async function applyLocation() {
     routePending = false;
     await showDigestHistory({updateHistory: false}); return;
   }
-  const route = parseDeepLink(location.search, conversations, library);
+  const route = parseDeepLink(location.search, conversations, library, quickWrite);
   if (!route) {
     const params = new URLSearchParams(location.search);
-    const hasRoute = params.has('conversation') || params.has('library');
+    const hasRoute = params.has('conversation') || params.has('library') || params.has('write');
     if (!hasRoute) {
       routePending = false;
       if (selected || appView === 'digests') deselect({replaceUrl: false});
-    } else if (Date.now() - routeWaitStarted > 30000 || params.has('library')) {
+    } else if (Date.now() - routeWaitStarted > 30000 || params.has('library') || params.has('write')) {
       routePending = false; deselect({message: 'Ссылка недоступна.', replaceUrl: true});
     }
     return;
   }
   routePending = false;
   if (route.mode === 'inbox') await choose(route.id, {updateHistory: false, messageId: route.messageId});
-  else await chooseLibrary(route.id, {updateHistory: false, messageId: route.messageId});
+  else if (route.mode === 'library') {
+    await chooseLibrary(route.id, {updateHistory: false, messageId: route.messageId});
+  } else await chooseQuick(route.id, {updateHistory: false, messageId: route.messageId});
 }
 
 async function poll() {
@@ -1139,6 +1230,9 @@ async function poll() {
     if (selected && !selectedLoadPaused && selectedMode === 'inbox') await loadMessages(selected);
     if (selected && !selectedLoadPaused && selectedMode === 'library' && Date.now() >= libraryPollAt) {
       libraryPollAt = Date.now() + 10000; await loadLibrary(selected, null, true);
+    }
+    if (selected && !selectedLoadPaused && selectedMode === 'quick' && Date.now() >= libraryPollAt) {
+      libraryPollAt = Date.now() + 10000; await loadSource(selected, null, true, 'quick');
     }
     if (!result.connected) showError('load-error', 'Telegram переподключается…');
   } catch (error) {
@@ -1206,7 +1300,8 @@ $('composer').onsubmit = async event => {
     if (value.file) form.set('file', value.file, value.file.name);
     if (value.reply) form.set('reply_to', String(value.reply.id));
     const path = mode === 'library' ? `/api/library/${encodeURIComponent(key)}/send`
-      : `/api/conversations/${key}/upload`;
+      : mode === 'quick' ? `/api/quick-write/${encodeURIComponent(key)}/send`
+        : `/api/conversations/${key}/upload`;
     await multipartApi(path, form);
     value.text = ''; value.file = null; value.reply = null; value.requestId = null;
     if (value.url) URL.revokeObjectURL(value.url);
@@ -1214,7 +1309,11 @@ $('composer').onsubmit = async event => {
     try { sessionStorage.removeItem(`draft:${value.storageKey}`); } catch (_) {}
     if (selected === key && selectedMode === mode) {
       if (mode === 'library') await loadLibrary(key, null, true);
-      else await loadMessages(key);
+      else if (mode === 'quick') {
+        const row = quickWrite.find(item => item.id === key);
+        if (row) row.access_until = now() + 300;
+        await loadSource(key, null, true, 'quick');
+      } else await loadMessages(key);
     }
   } catch (error) {
     value.error = error.message || 'Нет ответа. Проверьте сообщения перед повтором; черновик сохранён.';
@@ -1227,7 +1326,6 @@ $('composer').onsubmit = async event => {
 
 $('close').onclick = () => closeConversation(selected);
 $('home').onclick = () => deselect();
-$('digest-history-button').onclick = () => showDigestHistory();
 $('mobile-back').onclick = () => deselect();
 $('reply-target').querySelector('button').onclick = () => { const value = draft(); value.reply = null; renderComposer(); };
 let pauseMenuOpen = false;
@@ -1259,7 +1357,9 @@ $('library-dialog').addEventListener('click', event => {
 });
 $('dialog-search').oninput = renderManagement;
 $('older').onclick = () => {
-  if (selectedMode === 'library' && nextBefore && !olderLoading) loadLibrary(selected, nextBefore);
+  if (['library', 'quick'].includes(selectedMode) && nextBefore && !olderLoading) {
+    loadSource(selected, nextBefore, false, selectedMode);
+  }
 };
 $('pinned-toggle').onclick = () => {
   const open = $('pinned-toggle').getAttribute('aria-expanded') !== 'true';
@@ -1309,10 +1409,17 @@ window.addEventListener('popstate', () => {
   routePending = true; routeWaitStarted = Date.now(); applyLocation();
 });
 window.addEventListener('pageshow', () => syncBadge());
-window.addEventListener('focus', () => syncBadge());
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') syncBadge();
+window.addEventListener('focus', () => { syncBadge(); refreshForegroundLease(); });
+window.addEventListener('blur', () => {
+  if (selectedMode === 'inbox') releaseForegroundLease(selected);
 });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    syncBadge(); refreshForegroundLease();
+  } else if (selectedMode === 'inbox') releaseForegroundLease(selected);
+});
+
+setInterval(refreshForegroundLease, 5000);
 
 setInterval(() => {
   conversations = conversations.filter(visible);

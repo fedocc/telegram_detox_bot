@@ -106,15 +106,6 @@ export function messagesChanged(signatures, messages) {
   return messages.some(message => signatures.get(String(message.id)) !== JSON.stringify(message));
 }
 
-export const DIGEST_DISMISSED_KEY = 'telegram-detox:dismissed-digest';
-
-export function digestIdentity(digest) {
-  if (!digest || typeof digest !== 'object') return '';
-  const id = digest.id == null ? '' : String(digest.id);
-  const periodEnd = digest.period_end == null ? '' : String(digest.period_end);
-  return id || periodEnd ? `${id}|${periodEnd}` : '';
-}
-
 export function digestTitle(periodEnd) {
   const parsed = new Date(periodEnd);
   if (Number.isNaN(parsed.valueOf())) return 'Сводка';
@@ -122,18 +113,6 @@ export function digestTitle(periodEnd) {
     day: 'numeric', month: 'short', timeZone: 'Europe/Moscow',
   });
   return `Сводка · ${date}`;
-}
-
-export function isDigestDismissed(storage, digest) {
-  const identity = digestIdentity(digest);
-  if (!identity || !storage) return false;
-  try { return storage.getItem(DIGEST_DISMISSED_KEY) === identity; } catch (_) { return false; }
-}
-
-export function dismissDigest(storage, digest) {
-  const identity = digestIdentity(digest);
-  if (!identity || !storage) return false;
-  try { storage.setItem(DIGEST_DISMISSED_KEY, identity); return true; } catch (_) { return false; }
 }
 
 export function reactionEmojiPresentation(value) {
@@ -196,7 +175,7 @@ export function openedConversationIds(result) {
 }
 
 export function isWritable(mode, source) {
-  return mode === 'inbox' || (mode === 'library' && source?.writable === true);
+  return mode === 'inbox' || (['library', 'quick'].includes(mode) && source?.writable === true);
 }
 
 export function uploadWithinLimit(file, maxBytes) {
@@ -208,6 +187,7 @@ export function scopePath(mode, id) {
   const encoded = encodeURIComponent(String(id || ''));
   if (mode === 'inbox') return `/api/conversations/${encoded}`;
   if (mode === 'library') return `/api/library/${encoded}`;
+  if (mode === 'quick') return `/api/quick-write/${encoded}`;
   return '';
 }
 
@@ -231,7 +211,7 @@ export function advanceOlderCursor(requested, returned) {
   return next;
 }
 
-export function parseDeepLink(search, conversations, sources) {
+export function parseDeepLink(search, conversations, sources, quickSources = []) {
   const params = new URLSearchParams(search || '');
   const messageValue = params.get('message');
   const numericMessage = messageValue && /^[1-9][0-9]*$/.test(messageValue)
@@ -246,6 +226,10 @@ export function parseDeepLink(search, conversations, sources) {
   if (source && sources.some(row => row.id === source)) {
     return {mode: 'library', id: source, messageId};
   }
+  const quick = params.get('write');
+  if (quick && quickSources.some(row => row.id === quick)) {
+    return {mode: 'quick', id: quick, messageId};
+  }
   return null;
 }
 
@@ -253,6 +237,7 @@ export function deepLinkFor(mode, id, messageId = null) {
   const params = new URLSearchParams();
   if (mode === 'inbox') params.set('conversation', id);
   if (mode === 'library') params.set('library', id);
+  if (mode === 'quick') params.set('write', id);
   if (messageId && Number.isSafeInteger(Number(messageId)) && Number(messageId) > 0) {
     params.set('message', String(messageId));
   }
@@ -283,6 +268,7 @@ export function preferencePayload(row) {
     notifications_muted: Boolean(row.notifications_muted),
     allow_bot_write: Boolean(row.is_bot && row.allow_bot_write),
     digest_excluded: Boolean(row.digest_excluded),
+    manual_write_enabled: Boolean(row.manual_write_enabled),
   };
   if (row.source_id) result.source_id = row.source_id;
   else if (row.token) result.token = row.token;

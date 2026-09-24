@@ -107,6 +107,22 @@ async def test_attention_event_drives_one_grouped_push(push_fixture, reason):
         assert session.scalar(select(func.count(WebPushDelivery.id))) == 1
 
 
+async def test_telegram_code_push_never_contains_the_code(push_fixture):
+    push_fixture.push.subscribe(subscription())
+    push_fixture.clock[0] += 1
+    push_fixture.store.activate(
+        peer_id="777000", peer_type="user", thread_id=0, is_forum=False,
+        title="Telegram", trigger_id=10, preview="Новый код Telegram",
+        reason="telegram_code",
+    )
+    await push_fixture.push.deliver_pending()
+    payload = json.loads(push_fixture.sent[0]["data"])
+    assert payload["title"] == "Telegram"
+    assert payload["subtitle"] == "Новый код Telegram"
+    assert payload["body"] == "Новый код Telegram"
+    assert "12345" not in str(payload)
+
+
 async def test_burst_uses_latest_preview_and_one_push_per_conversation(push_fixture):
     push_fixture.push.subscribe(subscription())
     for trigger in (10, 11, 12):

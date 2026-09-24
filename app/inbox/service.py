@@ -9,10 +9,11 @@ import secrets
 import time
 import warnings
 from collections import OrderedDict
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 from sqlalchemy import delete
@@ -46,7 +47,7 @@ from telethon.tl.types import (
 from app.db.tables import InboxSend
 from app.inbox.library import SAVED_MESSAGES, LibraryChat, peer_type_for_marked_id
 from app.inbox.push import WebPushService
-from app.inbox.store import InboxStore
+from app.inbox.store import InboxStore, ManualWriteLimitError
 from app.services.attention import INBOX_TRIGGER_TYPES, classify_incoming
 from app.services.mentions import has_exact_fedocc_mention
 from app.telegram.mapper import display_name
@@ -380,7 +381,7 @@ class InboxService:
         source = self.store.library_source_for_peer(event.chat_id)
         # Bots remain excluded from ordinary Inbox/email, but an explicitly
         # selected Library bot still gets its one attention projection.
-        if sender_is_bot and source is None:
+        if sender_is_bot and source is None and trigger != "telegram_code":
             return
         if trigger is None and source is None:
             trigger = await classify_incoming(event.message, self_id=self.self_id,
@@ -389,7 +390,11 @@ class InboxService:
             return
         chat = await event.get_chat()
         peer_type, peer_id, access_hash = await self._event_identity(event, chat)
-        if source is not None:
+        if trigger == "telegram_code":
+            thread, forum = 0, False
+            reason = "telegram_code"
+            title = "Telegram"
+        elif source is not None:
             # A selected source has one peer-wide attention projection even when
             # the source itself is a forum with many topics.
             thread, forum = 0, False
@@ -409,7 +414,8 @@ class InboxService:
             is_forum=forum,
             title=title,
             trigger_id=event.id,
-            preview=event.raw_text or "",
+            preview=("Новый код Telegram" if trigger == "telegram_code"
+                     else event.raw_text or ""),
             reason=reason,
             library_source_id=source.id if source else None,
             notifications_muted=bool(source and source.notifications_muted),
@@ -425,6 +431,7 @@ class InboxService:
                 "notifications_muted": False,
                 "allow_bot_write": False,
                 "digest_excluded": False,
+                "manual_write_enabled": False,
                 "sort_order": 0,
                 "is_bot": False,
             }
@@ -435,6 +442,7 @@ class InboxService:
             "notifications_muted": bool(source.notifications_muted),
             "allow_bot_write": bool(source.allow_bot_write),
             "digest_excluded": bool(source.digest_excluded),
+            "manual_write_enabled": bool(source.manual_write_enabled),
             "sort_order": int(source.sort_order),
             "is_bot": bool(source.is_bot),
         }
@@ -455,6 +463,31 @@ class InboxService:
             ) not in known_peers
         )
         return [self._source_json(row) for row in sources]
+
+    def _manual_source_json(self, source):
+        local_today = datetime.fromtimestamp(
+            self.clock(), ZoneInfo(self.timezone)
+        ).date()
+        access_until = float(source.manual_access_until or 0)
+        used_today = source.manual_open_date == local_today
+        return {
+            "id": source.id,
+            "title": source.display_title,
+            "writable": True,
+            "access_until": access_until if access_until > self.clock() else None,
+            "used_today": bool(used_today and access_until <= self.clock()),
+        }
+
+    def manual_write_json(self):
+        return [self._manual_source_json(row) for row in self.store.manual_write_sources()]
+
+    def manual_write_source(self, source_id, *, require_access=False):
+        source = self.store.manual_write_source(source_id, require_access=require_access)
+        if source is None:
+            message = ("Срок ручного доступа истёк. Повторное открытие доступно завтра."
+                       if require_access else "Чат для ручного открытия не найден.")
+            raise InboxError(message, 403 if require_access else 404)
+        return source
 
     def library_source(self, source_id):
         if source_id == SAVED_MESSAGES.id:
@@ -610,19 +643,23 @@ class InboxService:
             except PEER_ERRORS:
                 raise gone() from None
 
-    async def serialize_library(self, message, source_id, by_id):
+    async def serialize_library(self, message, source_id, by_id, *, scope="library"):
         row = type("LibraryRow", (), {"id": source_id, "is_forum": False,
                                       "thread_id": 0})()
         result = await self.serialize(message, row, by_id)
         if result and result["media"]:
-            result["media"]["url"] = f"/api/library/{source_id}/media/{message.id}"
+            result["media"]["url"] = f"/api/{scope}/{source_id}/media/{message.id}"
         return result
 
-    async def serialize_many(self, messages, row, by_id, *, source_id=None):
+    async def serialize_many(
+        self, messages, row, by_id, *, source_id=None, source_scope="library",
+    ):
         await self._resolve_custom_emoji(messages)
         result = []
         for message in messages:
-            item = (await self.serialize_library(message, source_id, by_id)
+            item = (await self.serialize_library(
+                message, source_id, by_id, scope=source_scope,
+            )
                     if source_id is not None else await self.serialize(message, row, by_id))
             if item is not None:
                 result.append(item)
@@ -778,6 +815,9 @@ class InboxService:
                 title = (getattr(dialog, "name", None) or display_name(entity)).strip()[:512]
                 if marked in ignored:
                     stats["ignored"] += 1
+                    continue
+                if marked == "777000":
+                    # Authentication codes never enter Morning Digest or Gemini context.
                     continue
                 is_self = bool(getattr(entity, "is_self", False)) or (
                     peer_type == "user" and str(getattr(entity, "id", "")) == str(self.self_id)
@@ -976,6 +1016,7 @@ class InboxService:
                     "access_hash": access_hash,
                     "display_title": title[:512],
                     "is_bot": bool(getattr(entity, "bot", False)),
+                    "can_manual_write": self._entity_can_write(entity, peer_type),
                     "source_id": selected.id if selected else None,
                     "expires": self.clock() + 300,
                 }
@@ -991,6 +1032,10 @@ class InboxService:
                     ),
                     "allow_bot_write": bool(selected and selected.allow_bot_write),
                     "digest_excluded": bool(selected and selected.digest_excluded),
+                    "manual_write_enabled": bool(
+                        selected and selected.manual_write_enabled
+                    ),
+                    "can_manual_write": bool(candidate["can_manual_write"]),
                     "sort_order": int(selected.sort_order) if selected else None,
                 })
         except FloodWaitError as exc:
@@ -1019,6 +1064,43 @@ class InboxService:
         )
         return is_bot
 
+    @staticmethod
+    def _entity_can_write(entity, peer_type):
+        if entity is None or getattr(entity, "deactivated", False):
+            return False
+        if peer_type == "user":
+            return not bool(getattr(entity, "is_self", False) or getattr(entity, "deleted", False))
+        if peer_type == "chat":
+            return not bool(getattr(entity, "left", False))
+        if peer_type != "channel" or getattr(entity, "left", False):
+            return False
+        if getattr(entity, "megagroup", False) or getattr(entity, "gigagroup", False):
+            return True
+        rights = getattr(entity, "admin_rights", None)
+        return bool(getattr(entity, "creator", False) or getattr(rights, "post_messages", False))
+
+    async def _verify_manual_write(self, source):
+        try:
+            entity = await self._peer_call(
+                source, lambda peer: self.client.get_entity(peer)
+            )
+        except AttributeError:
+            return source.peer_type in {"user", "chat"}
+        if not self._entity_can_write(entity, source.peer_type):
+            return False
+        if source.peer_type == "user":
+            return str(getattr(entity, "id", "")) != str(self.self_id)
+        get_permissions = getattr(self.client, "get_permissions", None)
+        if get_permissions is None:
+            return True
+        permissions = await self._peer_call(
+            source, lambda peer: get_permissions(peer, "me")
+        )
+        if getattr(permissions, "is_banned", False):
+            return False
+        allowed = getattr(permissions, "send_messages", None)
+        return allowed is not False
+
     async def update_library(self, identifier, preferences=None, **changes):
         async with self.action_lock:
             return await self._update_library(identifier, preferences, **changes)
@@ -1030,7 +1112,7 @@ class InboxService:
             changes = {**preferences, **changes}
         allowed = {
             "library_enabled", "sort_order", "notifications_muted",
-            "allow_bot_write", "digest_excluded",
+            "allow_bot_write", "digest_excluded", "manual_write_enabled",
         }
         if set(changes) - allowed:
             raise InboxError("Некорректные настройки библиотеки.")
@@ -1067,14 +1149,111 @@ class InboxService:
                 notifications_muted=changes.get("notifications_muted", False),
                 allow_bot_write=requested_write,
                 digest_excluded=changes.get("digest_excluded", False),
+                manual_write_enabled=False,
                 sort_order=changes.get("sort_order"),
             )
+            if changes.get("manual_write_enabled"):
+                if not await self._verify_manual_write(source):
+                    raise InboxError("Telegram не разрешает отправку в этот чат.", 422)
+                try:
+                    source = self.store.update_library_source(
+                        source.id, manual_write_enabled=True,
+                    )
+                except ManualWriteLimitError:
+                    raise InboxError(
+                        "Можно выбрать не больше двух чатов для ручного открытия.", 409,
+                    ) from None
         else:
             if changes.get("allow_bot_write") and not await self._verify_source_bot(source):
                 raise InboxError("Писать можно только Telegram-боту.", 422)
-            source = self.store.update_library_source(source.id, **changes)
+            if changes.get("manual_write_enabled") and not await self._verify_manual_write(source):
+                raise InboxError("Telegram не разрешает отправку в этот чат.", 422)
+            try:
+                source = self.store.update_library_source(source.id, **changes)
+            except ManualWriteLimitError:
+                raise InboxError(
+                    "Можно выбрать не больше двух чатов для ручного открытия.", 409,
+                ) from None
         self.library_snapshots.clear()
         return self._source_json(source)
+
+    def open_manual_write(self, source_id):
+        source, retry_after = self.store.open_manual_write(source_id, self.timezone)
+        if source is None:
+            raise InboxError("Чат для ручного открытия не найден.", 404)
+        if retry_after:
+            raise InboxError(
+                "Сегодня этот чат уже открывался. Повторное открытие доступно завтра.",
+                429, retry_after=retry_after,
+            )
+        return {"source": self._manual_source_json(source)}
+
+    async def manual_write_history(self, source_id, before=None):
+        source = self.manual_write_source(source_id, require_access=True)
+        if before is not None and (not isinstance(before, int) or before <= 0):
+            raise InboxError("Некорректный cursor.")
+        options = {"limit": LIBRARY_PAGE_SIZE + 1}
+        if before:
+            options["offset_id"] = before
+        fetched = list(await self._peer_call(
+            source, lambda peer: self.client.get_messages(peer, **options)
+        ))
+        has_older = len(fetched) > LIBRARY_PAGE_SIZE
+        fetched = fetched[:LIBRARY_PAGE_SIZE]
+        fetched.sort(key=lambda message: message.id)
+        by_id = {message.id: message for message in fetched}
+        return {
+            "source": self._manual_source_json(source),
+            "messages": await self.serialize_many(
+                fetched, None, by_id, source_id=source_id, source_scope="quick-write",
+            ),
+            "next_before": min(by_id) if has_older and by_id else None,
+        }
+
+    async def manual_write_pins(self, source_id):
+        source = self.manual_write_source(source_id, require_access=True)
+        fetched = list(await self._peer_call(
+            source, lambda peer: self.client.get_messages(
+                peer, limit=20, filter=InputMessagesFilterPinned()
+            ),
+        ))
+        fetched.sort(key=lambda message: message.id)
+        by_id = {message.id: message for message in fetched}
+        return {"pins": await self.serialize_many(
+            fetched, None, by_id, source_id=source_id, source_scope="quick-write",
+        )}
+
+    async def manual_write_message(self, source_id, message_id):
+        source = self.manual_write_source(source_id, require_access=True)
+        if not isinstance(message_id, int) or message_id <= 0:
+            raise InboxError("Некорректное сообщение.")
+        message = await self._peer_call(
+            source, lambda peer: self.client.get_messages(peer, ids=message_id)
+        )
+        if not message:
+            raise InboxError("Сообщение не найдено в этом чате.", 404)
+        serialized = await self.serialize_library(
+            message, source_id, {message.id: message}, scope="quick-write",
+        )
+        return {"source": self._manual_source_json(source), "message": serialized}
+
+    async def manual_write_search(self, source_id, query, before=None):
+        source = self.manual_write_source(source_id, require_access=True)
+        if not isinstance(query, str) or not 2 <= len(query.strip()) <= 100:
+            raise InboxError("Введите не меньше двух символов.")
+        options = {"limit": SEARCH_PAGE_SIZE + 1, "search": query.strip()}
+        if before:
+            options["offset_id"] = before
+        fetched = list(await self._peer_call(
+            source, lambda peer: self.client.get_messages(peer, **options)
+        ))
+        has_more = len(fetched) > SEARCH_PAGE_SIZE
+        fetched = fetched[:SEARCH_PAGE_SIZE]
+        fetched.sort(key=lambda message: message.id, reverse=True)
+        by_id = {message.id: message for message in fetched}
+        return {"results": await self.serialize_many(
+            fetched, None, by_id, source_id=source_id, source_scope="quick-write",
+        ), "next_before": min(by_id) if has_more and by_id else None}
 
     def reorder_library(self, source_ids):
         if not isinstance(source_ids, list) or not all(
@@ -1569,7 +1748,7 @@ class InboxService:
 
     async def send_library(
         self, source_id, request_id, text, image=None, *, file_path=None,
-        filename=None, mime_type=None, reply_to=None,
+        filename=None, mime_type=None, reply_to=None, manual=False,
     ):
         if source_id == SAVED_MESSAGES.id:
             if image is not None:
@@ -1581,14 +1760,15 @@ class InboxService:
         async with self.action_lock:
             # Reload after acquiring the shared permission/send boundary. A
             # queued disable must take effect before any later queued send.
-            source = self.library_source(source_id)
-            scope = f"library:{source.id}"
+            source = (self.manual_write_source(source_id, require_access=True)
+                      if manual else self.library_source(source_id))
+            scope = f"{'quick-write' if manual else 'library'}:{source.id}"
             previous = await self._claim_send(request_id, scope, insert=False)
             if previous:
                 return previous
-            if not source.library_enabled or not source.allow_bot_write:
+            if not manual and (not source.library_enabled or not source.allow_bot_write):
                 raise InboxError("Отправка этому источнику не разрешена.", 403)
-            if not await self._verify_source_bot(source):
+            if not manual and not await self._verify_source_bot(source):
                 self.store.update_library_source(source.id, allow_bot_write=False)
                 raise InboxError("Источник больше не является Telegram-ботом.", 403)
             if not self.client.is_connected():
@@ -1643,8 +1823,15 @@ class InboxService:
                     "Статус отправки неизвестен; проверьте чат бота.", 409
                 ) from None
             self._finish_send(request_id, sent)
+            if manual:
+                self.store.extend_manual_write(source.id)
             self.library_snapshots.clear()
             return {"message_id": sent.id}
+
+    async def send_manual_write(self, source_id, request_id, text, image=None, **kwargs):
+        return await self.send_library(
+            source_id, request_id, text, image, manual=True, **kwargs,
+        )
 
     async def media(self, key, message_id):
         async with self.media_lock:
@@ -1708,8 +1895,18 @@ class InboxService:
             self.media_allowances.popitem(last=False)
 
     async def library_media(self, source_id, message_id):
+        return await self._source_media(
+            self.library_source(source_id), source_id, message_id, "library",
+        )
+
+    async def manual_write_media(self, source_id, message_id):
+        return await self._source_media(
+            self.manual_write_source(source_id, require_access=True),
+            source_id, message_id, "quick_write",
+        )
+
+    async def _source_media(self, source, source_id, message_id, cache_scope):
         async with self.media_lock:
-            source = self.library_source(source_id)
             message = await self._peer_call(
                 source, lambda peer: self.client.get_messages(peer, ids=message_id)
             )
@@ -1718,7 +1915,7 @@ class InboxService:
             size = message.file.size
             if not size or size > MAX_MEDIA:
                 raise InboxError("Вложение превышает лимит 64 МБ.", 413)
-            path = self.cache_dir / f"library_{source_id}_{message_id}.bin"
+            path = self.cache_dir / f"{cache_scope}_{source_id}_{message_id}.bin"
             if path.is_symlink():
                 raise InboxError("Вложение недоступно.", 404)
             if not path.exists():

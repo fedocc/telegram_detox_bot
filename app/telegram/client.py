@@ -72,6 +72,16 @@ async def ingest_event(
 ) -> bool:
     if str(event.chat_id) in ignored_chat_ids:
         return False
+    telegram_code = str(getattr(event, "sender_id", "")) == "777000"
+    if telegram_code:
+        if inbox is not None:
+            try:
+                await inbox.observe(event, trigger="telegram_code", sender_is_bot=True)
+            except Exception as exc:
+                logger.warning("Inbox activation failed (%s)", type(exc).__name__)
+        # Authentication codes stay in Telegram and the live Inbox projection.
+        # Do not even map them into the durable message/email/LLM pipeline.
+        return True
     if settings.mention_only_mode:
         stored = await event_to_stored_message(event, resolve_reply=False)
     else:
@@ -82,9 +92,9 @@ async def ingest_event(
         get_sender = getattr(event, "get_sender", None)
         sender = await get_sender() if get_sender else None
         sender_is_bot = bool(sender is not None and getattr(sender, "bot", False))
+        sender_id = getattr(sender, "id", None)
         excluded_sender = sender is not None and (
-            getattr(sender, "id", None) in {42777, 777000}
-            or getattr(event.message, "action", None) is not None
+            sender_id == 42777 or getattr(event.message, "action", None) is not None
         )
         if excluded_sender:
             return False

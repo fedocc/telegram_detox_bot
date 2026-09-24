@@ -343,6 +343,23 @@ def init_db(settings: Settings) -> sessionmaker[Session]:
                 connection.execute(
                     text("ALTER TABLE messages ADD COLUMN reply_to_is_mine BOOLEAN")
                 )
+            library_columns = {row[1] for row in connection.execute(
+                text("PRAGMA table_info(library_sources)")
+            )}
+            library_additions = {
+                "manual_write_enabled": "BOOLEAN DEFAULT 0",
+                "manual_open_date": "DATE",
+                "manual_access_until": "FLOAT DEFAULT 0",
+            }
+            for name, ddl in library_additions.items():
+                if name not in library_columns:
+                    connection.execute(text(
+                        f"ALTER TABLE library_sources ADD COLUMN {name} {ddl}"
+                    ))
+            connection.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_library_sources_manual_write_enabled "
+                "ON library_sources (manual_write_enabled)"
+            ))
             digest_columns = {
                 row[1]
                 for row in connection.execute(text("PRAGMA table_info(digests)")).fetchall()

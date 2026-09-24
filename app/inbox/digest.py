@@ -380,6 +380,9 @@ def generate_payload(provider: Provider, context: list[dict]) -> DigestPayload:
 async def run_digest(
     service, factory, settings, cutoff: datetime, provider: Provider | None = None,
 ):
+    zone = ZoneInfo(settings.timezone)
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.replace(tzinfo=zone)
     cutoff = cutoff.astimezone(UTC)
     with factory() as session:
         existing = session.scalar(select(MorningDigest).where(
@@ -388,13 +391,11 @@ async def run_digest(
         ))
         if existing:
             return existing
-        previous = session.scalar(select(MorningDigest).where(
-            MorningDigest.status == "success", MorningDigest.period_end <= cutoff,
-        ).order_by(MorningDigest.period_end.desc()))
-        start = (
-            previous.period_end.replace(tzinfo=UTC)
-            if previous else cutoff - timedelta(hours=24)
-        )
+        local_cutoff = cutoff.astimezone(zone)
+        previous_day = local_cutoff.date() - timedelta(days=1)
+        start = datetime.combine(
+            previous_day, local_cutoff.timetz().replace(tzinfo=None), zone,
+        ).astimezone(UTC)
     rows = await service.digest_rows(start, cutoff)
     report = getattr(service, "last_digest_report", None)
     context, refs = preprocess(rows, report=report if isinstance(report, dict) else None)
@@ -454,6 +455,43 @@ def digest_succeeded(factory, cutoff: datetime) -> bool:
         )) is not None
 
 
+def earliest_missing_cutoff(factory, latest: datetime, timezone: str, *, limit=7):
+    """Return the first missing canonical daily cutoff, capped to recent days."""
+    zone = ZoneInfo(timezone)
+    if latest.tzinfo is None:
+        latest = latest.replace(tzinfo=zone)
+    latest_local = latest.astimezone(zone)
+    latest_utc = latest_local.astimezone(UTC).replace(tzinfo=None)
+    with factory() as session:
+        previous = session.scalar(select(MorningDigest).where(
+            MorningDigest.status == "success",
+            MorningDigest.period_end <= latest_utc,
+        ).order_by(MorningDigest.period_end.desc()))
+        if previous is None:
+            return latest_local
+        previous_day = previous.period_end.replace(tzinfo=UTC).astimezone(zone).date()
+        earliest_day = max(
+            previous_day + timedelta(days=1),
+            latest_local.date() - timedelta(days=max(0, limit - 1)),
+        )
+        successes = set(session.scalars(select(MorningDigest.period_end).where(
+            MorningDigest.status == "success",
+            MorningDigest.period_end >= datetime.combine(
+                earliest_day, latest_local.timetz().replace(tzinfo=None), zone,
+            ).astimezone(UTC).replace(tzinfo=None),
+            MorningDigest.period_end <= latest_utc,
+        )))
+    day = earliest_day
+    while day <= latest_local.date():
+        candidate = datetime.combine(
+            day, latest_local.timetz().replace(tzinfo=None), zone,
+        )
+        if candidate.astimezone(UTC).replace(tzinfo=None) not in successes:
+            return candidate
+        day += timedelta(days=1)
+    return None
+
+
 class MorningDigestReconciler:
     """Single-process, idempotent delivery for the daily canonical cutoff."""
 
@@ -473,6 +511,11 @@ class MorningDigestReconciler:
         if cutoff is None:
             return "not_due"
         cutoff = cutoff.replace(second=0, microsecond=0)
+        cutoff = earliest_missing_cutoff(
+            self.factory, cutoff, self.settings.timezone,
+        )
+        if cutoff is None:
+            return "complete"
         key = cutoff.astimezone(UTC)
         if key in self.permanent_failures:
             return "blocked"

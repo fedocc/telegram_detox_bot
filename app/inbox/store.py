@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -18,7 +20,15 @@ NOTIFICATION_REASONS = {
     "direct_reply": "direct_reply",
     "private_message": "private_message",
     "library_message": "library_message",
+    "telegram_code": "telegram_code",
 }
+
+VIEW_LEASE_SECONDS = 15
+MAX_MANUAL_WRITE_CHATS = 2
+
+
+class ManualWriteLimitError(ValueError):
+    pass
 
 
 class InboxStore:
@@ -26,6 +36,26 @@ class InboxStore:
         self.factory = session_factory
         self.ignored = ignored
         self.clock = clock
+        # Foreground presence is intentionally process-local. A restart fails safe:
+        # no stale browser tab can keep an attention projection open.
+        self.view_leases: dict[str, float] = {}
+
+    def refresh_view_lease(self, key):
+        row = self.get(key)
+        if row is None:
+            return False
+        self.view_leases[key] = self.clock() + VIEW_LEASE_SECONDS
+        return True
+
+    def release_view_lease(self, key):
+        self.view_leases.pop(key, None)
+
+    def has_view_lease(self, key):
+        deadline = self.view_leases.get(key, 0)
+        if deadline <= self.clock():
+            self.view_leases.pop(key, None)
+            return False
+        return True
 
     def clamp_existing_lifetimes(self):
         # Upgrade existing hour-long windows without extending any short window.
@@ -141,6 +171,7 @@ class InboxStore:
                     )
                     next_unread = max(0, int(row.unread_count or 0)) + 1
                     inserted_event = None
+                    foreground = self.has_view_lease(row.id)
                     public_reason = NOTIFICATION_REASONS.get(reason)
                     if public_reason is not None:
                         result = session.execute(sqlite_insert(InboxNotification).values(
@@ -152,7 +183,7 @@ class InboxStore:
                             preview=plain_preview(preview, 240),
                             trigger_reason=public_reason,
                             unread_count=next_unread,
-                            suppressed=bool(notifications_muted),
+                            suppressed=bool(notifications_muted or foreground),
                             created_at=now,
                         ).on_conflict_do_nothing(
                             index_elements=["peer_id", "trigger_id"]
@@ -189,15 +220,22 @@ class InboxStore:
                         row.last_seen_message_id or 0
                     )
                     if unseen:
-                        pending = (
+                        pending = not foreground or (
                             row.opened_at is None
                             or row.manually_closed
                             or row.expires_at <= now
                         )
-                        row.unread_count = next_unread
                         row.activated_at = now
-                        row.opened_at = None if pending else row.opened_at
-                        row.expires_at = 0 if pending else now + LIFETIME
+                        if pending:
+                            row.unread_count = next_unread
+                            row.opened_at = None
+                            row.expires_at = 0
+                        else:
+                            row.unread_count = 0
+                            row.last_seen_message_id = max(
+                                int(row.last_seen_message_id or 0), int(trigger_id)
+                            )
+                            row.expires_at = now + LIFETIME
                         row.manually_closed = False
                     if int(trigger_id) >= int(row.trigger_id or 0):
                         row.title = title[:512]
@@ -240,6 +278,7 @@ class InboxStore:
         return self.get(key)
 
     def close(self, key):
+        self.release_view_lease(key)
         with self.factory() as session:
             row = session.get(InboxConversation, key)
             if row:
@@ -406,6 +445,9 @@ class InboxStore:
                     notifications_muted=False,
                     allow_bot_write=False,
                     digest_excluded=False,
+                    manual_write_enabled=False,
+                    manual_open_date=None,
+                    manual_access_until=0,
                     last_seen_message_id=0,
                     is_bot=False,
                     created_at=now,
@@ -453,11 +495,21 @@ class InboxStore:
         notifications_muted=False,
         allow_bot_write=False,
         digest_excluded=False,
+        manual_write_enabled=False,
         sort_order=None,
     ):
         peer_id = str(int(peer_id))
         now = self.clock()
         with self.factory() as session:
+            if session.get_bind().dialect.name == "sqlite":
+                session.execute(text("BEGIN IMMEDIATE"))
+            if manual_write_enabled:
+                selected = session.scalar(select(func.count(LibrarySource.id)).where(
+                    LibrarySource.manual_write_enabled.is_(True),
+                    LibrarySource.peer_id != peer_id,
+                )) or 0
+                if selected >= MAX_MANUAL_WRITE_CHATS:
+                    raise ManualWriteLimitError("manual write limit reached")
             source = session.scalar(select(LibrarySource).where(
                 LibrarySource.peer_type == peer_type,
                 LibrarySource.peer_id == peer_id,
@@ -481,6 +533,9 @@ class InboxStore:
                     notifications_muted=bool(notifications_muted),
                     allow_bot_write=bool(allow_bot_write and is_bot),
                     digest_excluded=bool(digest_excluded),
+                    manual_write_enabled=bool(manual_write_enabled),
+                    manual_open_date=None,
+                    manual_access_until=0,
                     last_seen_message_id=0,
                     is_bot=bool(is_bot),
                     created_at=now,
@@ -497,6 +552,7 @@ class InboxStore:
                 source.notifications_muted = bool(notifications_muted)
                 source.allow_bot_write = bool(allow_bot_write and is_bot)
                 source.digest_excluded = bool(digest_excluded)
+                source.manual_write_enabled = bool(manual_write_enabled)
                 if sort_order is not None:
                     source.sort_order = int(sort_order)
                 source.updated_at = now
@@ -513,14 +569,23 @@ class InboxStore:
     def update_library_source(self, source_id, **values):
         allowed = {
             "library_enabled", "sort_order", "notifications_muted",
-            "allow_bot_write", "digest_excluded", "display_title", "access_hash", "is_bot",
+            "allow_bot_write", "digest_excluded", "manual_write_enabled",
+            "display_title", "access_hash", "is_bot",
         }
         if set(values) - allowed:
             raise ValueError("unsupported library preference")
         with self.factory() as session:
+            if session.get_bind().dialect.name == "sqlite":
+                session.execute(text("BEGIN IMMEDIATE"))
             source = session.get(LibrarySource, source_id)
             if source is None:
                 return None
+            if values.get("manual_write_enabled") and not source.manual_write_enabled:
+                selected = session.scalar(select(func.count(LibrarySource.id)).where(
+                    LibrarySource.manual_write_enabled.is_(True)
+                )) or 0
+                if selected >= MAX_MANUAL_WRITE_CHATS:
+                    raise ManualWriteLimitError("manual write limit reached")
             for key, value in values.items():
                 setattr(source, key, value)
             if source.allow_bot_write and not source.is_bot:
@@ -532,6 +597,54 @@ class InboxStore:
                 session.execute(update(InboxConversation).where(
                     InboxConversation.library_source_id == source.id,
                 ).values(manually_closed=True, preview=""))
+            session.commit()
+            return source
+
+    def manual_write_sources(self):
+        with self.factory() as session:
+            return list(session.scalars(select(LibrarySource).where(
+                LibrarySource.manual_write_enabled.is_(True)
+            ).order_by(LibrarySource.updated_at, LibrarySource.id)))
+
+    def open_manual_write(self, source_id, timezone):
+        now = self.clock()
+        zone = ZoneInfo(timezone)
+        local_now = datetime.fromtimestamp(now, zone)
+        today = local_now.date()
+        tomorrow = datetime.combine(today + timedelta(days=1), datetime.min.time(), zone)
+        retry_after = max(1, int(tomorrow.timestamp() - now))
+        with self.factory() as session:
+            if session.get_bind().dialect.name == "sqlite":
+                session.execute(text("BEGIN IMMEDIATE"))
+            source = session.get(LibrarySource, source_id)
+            if source is None or not source.manual_write_enabled:
+                return None, None
+            if source.manual_open_date == today:
+                if float(source.manual_access_until or 0) <= now:
+                    return source, retry_after
+            else:
+                source.manual_open_date = today
+                source.manual_access_until = now + LIFETIME
+                source.updated_at = now
+                session.commit()
+            return source, 0
+
+    def manual_write_source(self, source_id, *, require_access=False):
+        with self.factory() as session:
+            source = session.get(LibrarySource, source_id)
+            if source is None or not source.manual_write_enabled:
+                return None
+            if require_access and float(source.manual_access_until or 0) <= self.clock():
+                return None
+            return source
+
+    def extend_manual_write(self, source_id):
+        with self.factory() as session:
+            source = session.get(LibrarySource, source_id)
+            if source is None or not source.manual_write_enabled:
+                return None
+            source.manual_access_until = self.clock() + LIFETIME
+            source.updated_at = self.clock()
             session.commit()
             return source
 

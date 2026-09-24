@@ -7,13 +7,10 @@ import {
   clipboardFile,
   createFileDragTracker,
   deepLinkFor,
-  digestIdentity,
   digestTitle,
-  dismissDigest,
   insertNewNodesInOrder,
   incrementalGrouping,
   hasFileTransfer,
-  isDigestDismissed,
   isDigestHistoryRoute,
   isMacNotifierClient,
   isNearBottom,
@@ -38,12 +35,6 @@ import {
   uploadWithinLimit,
   messagesChanged,
 } from '../app/inbox/static/ui.mjs';
-
-class MemoryStorage {
-  constructor() { this.values = new Map(); }
-  getItem(key) { return this.values.get(key) ?? null; }
-  setItem(key, value) { this.values.set(key, String(value)); }
-}
 
 test('library pages merge in chronological order without duplicates', () => {
   assert.deepEqual(mergeMessagePages([{id:2}, {id:1}], [{id:2}, {id:3}]).map(x => x.id),
@@ -78,20 +69,10 @@ test('reaction emoji presentation colors a plain heart without changing other em
   assert.deepEqual(emoji.map(reactionEmojiPresentation), ['❤️','❤️','👍','🙏','🔥','😂']);
 });
 
-test('digest title and dismissal persist only for the current digest', () => {
-  const storage = new MemoryStorage();
+test('digest title is stable without client-side dismissal state', () => {
   const current = {period_end:'2026-09-20T04:00:00Z'};
-  const next = {period_end:'2026-09-21T04:00:00Z'};
   assert.equal(digestTitle(current.period_end),'Сводка · 20 сент.');
-  assert.equal(digestIdentity(current),`|${current.period_end}`);
-  assert.equal(isDigestDismissed(storage,current),false);
-  assert.equal(dismissDigest(storage,current),true);
-  assert.equal(isDigestDismissed(storage,current),true);
-  assert.equal(isDigestDismissed(storage,{...current}),true);
-  assert.equal(isDigestDismissed(storage,next),false);
-  assert.equal(isDigestDismissed(storage,{...current,id:2}),false);
-  const serverHistory = [current, next];
-  assert.deepEqual(serverHistory,[current,next]);
+  assert.equal(digestTitle('invalid'),'Сводка');
 });
 
 test('digest history route and canonical badge values are strict', () => {
@@ -319,10 +300,11 @@ test('Library open exposes only validated unique Inbox projection ids to the bri
   assert.deepEqual(openedConversationIds(null), []);
 });
 
-test('only active conversations and Saved Messages are writable', () => {
+test('only active, explicitly writable Library, and quick-write scopes are writable', () => {
   assert.equal(isWritable('inbox'), true);
   assert.equal(isWritable('library', {writable:true}), true);
   assert.equal(isWritable('library', {writable:false}), false);
+  assert.equal(isWritable('quick', {writable:true}), true);
 });
 
 test('upload limit rejects empty and oversized files', () => {
@@ -343,19 +325,24 @@ test('deep links resolve only currently allowed conversations and library source
   const id = 'a'.repeat(32);
   const conversations = [{id}];
   const sources = [{id:'saved'}, {id:'s-course'}];
+  const quick = [{id:'s-person'}];
   assert.deepEqual(parseDeepLink(`?conversation=${id}`, conversations, sources),
     {mode:'inbox', id, messageId:null});
   assert.deepEqual(parseDeepLink('?library=s-course&message=42', conversations, sources),
     {mode:'library', id:'s-course', messageId:42});
   assert.equal(parseDeepLink('?library=crafted&message=42', conversations, sources), null);
   assert.equal(parseDeepLink('?conversation=evil', conversations, sources), null);
+  assert.deepEqual(parseDeepLink('?write=s-person', conversations, sources, quick),
+    {mode:'quick', id:'s-person', messageId:null});
   assert.equal(deepLinkFor('library', 's-course', 42), '/?library=s-course&message=42');
   assert.equal(deepLinkFor('inbox', id), `/?conversation=${id}`);
+  assert.equal(deepLinkFor('quick', 's-person'), '/?write=s-person');
 });
 
 test('source endpoints never accept a peer id from a payload helper', () => {
   assert.equal(scopePath('library', 's-course'), '/api/library/s-course');
   assert.equal(scopePath('inbox', 'a'.repeat(32)), `/api/conversations/${'a'.repeat(32)}`);
+  assert.equal(scopePath('quick', 's-person'), '/api/quick-write/s-person');
   assert.equal(scopePath('other', '123'), '');
   assert.equal(isTerminalConversationStatus(404), true);
   assert.equal(isTerminalConversationStatus(410), true);
@@ -377,17 +364,17 @@ test('Mac notifier controls are hidden on iPhone, iPad and non-Mac clients', () 
 test('management preference payload is bounded and bot write is bot-only', () => {
   assert.deepEqual(preferencePayload({
     token:'opaque', selected:true, notifications_muted:true, allow_bot_write:true,
-    digest_excluded:false, is_bot:false,
+    digest_excluded:false, manual_write_enabled:true, is_bot:false,
   }), {
     token:'opaque', library_enabled:true, notifications_muted:true,
-    allow_bot_write:false, digest_excluded:false,
+    allow_bot_write:false, digest_excluded:false, manual_write_enabled:true,
   });
   assert.deepEqual(preferencePayload({
     token:'stale-token', source_id:'s-bot', selected:true, notifications_muted:false,
-    allow_bot_write:true, digest_excluded:true, is_bot:true,
+    allow_bot_write:true, digest_excluded:true, manual_write_enabled:false, is_bot:true,
   }), {
     source_id:'s-bot', library_enabled:true, notifications_muted:false,
-    allow_bot_write:true, digest_excluded:true,
+    allow_bot_write:true, digest_excluded:true, manual_write_enabled:false,
   });
 });
 

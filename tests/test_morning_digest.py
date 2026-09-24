@@ -299,6 +299,38 @@ async def test_next_successful_day_starts_at_previous_canonical_cutoff(settings)
     assert service.windows[1] == (first.astimezone(UTC), second.astimezone(UTC))
 
 
+async def test_reconciliation_recovers_each_missed_daily_window_without_merging(settings):
+    factory = init_db(settings)
+    zone = ZoneInfo(settings.timezone)
+    day20 = datetime(2026, 9, 20, 7, 0, tzinfo=zone)
+    with factory() as session:
+        session.add(MorningDigest(
+            period_start=(day20 - timedelta(days=1)).astimezone(UTC).replace(tzinfo=None),
+            period_end=day20.astimezone(UTC).replace(tzinfo=None),
+            generated_at=day20.astimezone(UTC).replace(tzinfo=None),
+            model="gemini", prompt_version="morning-v1",
+            payload_json='{"title":"20","items":[]}', status="success",
+        ))
+        session.commit()
+    service, provider = Service([row()]), Provider()
+    reconciler = MorningDigestReconciler(service, factory, settings, provider=provider)
+    day22 = day20 + timedelta(days=2)
+
+    assert await reconciler.reconcile(now=day22) == "complete"
+    assert service.windows == [(day20.astimezone(UTC), (day20 + timedelta(days=1)).astimezone(UTC))]
+    assert await reconciler.reconcile(now=day22 + timedelta(minutes=15)) == "complete"
+    assert service.windows[1] == (
+        (day20 + timedelta(days=1)).astimezone(UTC), day22.astimezone(UTC),
+    )
+    with factory() as session:
+        rows = list(session.scalars(select(MorningDigest).where(
+            MorningDigest.status == "success"
+        ).order_by(MorningDigest.period_end)))
+    assert len(rows) == 3
+    assert all(row.period_end - row.period_start == timedelta(days=1) for row in rows)
+    assert len(digest_history(factory, settings.timezone, now=day22)) == 3
+
+
 def test_digest_defaults():
     settings = Settings(_env_file=None)
     assert settings.digest_enabled is True

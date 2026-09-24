@@ -5,7 +5,9 @@ from app.services.mentions import has_exact_fedocc_mention
 from app.telegram.mapper import resolve_reply_to_is_mine
 
 DETERMINISTIC_ALERT_TYPES = frozenset({"mention_only", "direct_reply"})
-INBOX_TRIGGER_TYPES = frozenset({*DETERMINISTIC_ALERT_TYPES, "private_message"})
+INBOX_TRIGGER_TYPES = frozenset({
+    *DETERMINISTIC_ALERT_TYPES, "private_message", "telegram_code",
+})
 
 
 def trigger_from_evidence(text, *, outgoing, reply_to_is_mine=False, reply_id=None):

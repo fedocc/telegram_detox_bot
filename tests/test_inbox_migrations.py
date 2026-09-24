@@ -110,6 +110,23 @@ CREATE INDEX ix_inbox_notifications_conversation_id
     ON inbox_notifications (conversation_id);
 CREATE INDEX ix_inbox_notifications_created_at
     ON inbox_notifications (created_at);
+CREATE TABLE library_sources (
+    id VARCHAR(32) NOT NULL PRIMARY KEY,
+    peer_type VARCHAR(16) NOT NULL,
+    peer_id VARCHAR(128) NOT NULL,
+    access_hash VARCHAR(32),
+    display_title VARCHAR(512) NOT NULL,
+    library_enabled BOOLEAN NOT NULL DEFAULT 1,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    notifications_muted BOOLEAN NOT NULL DEFAULT 0,
+    allow_bot_write BOOLEAN NOT NULL DEFAULT 0,
+    digest_excluded BOOLEAN NOT NULL DEFAULT 0,
+    last_seen_message_id INTEGER NOT NULL DEFAULT 0,
+    is_bot BOOLEAN NOT NULL DEFAULT 0,
+    created_at FLOAT NOT NULL,
+    updated_at FLOAT NOT NULL,
+    CONSTRAINT uq_library_peer UNIQUE (peer_type, peer_id)
+);
 """
 
 
@@ -211,6 +228,17 @@ def build_frozen_database(path, variant):
             (110, "-1000000000123", 50, CHANNEL_ID, "Opened channel", "Topic",
              "already read", "mention", 1050.0),
         ))
+        connection.execute("""
+            INSERT INTO library_sources (
+                id, peer_type, peer_id, access_hash, display_title,
+                library_enabled, sort_order, notifications_muted,
+                allow_bot_write, digest_excluded, last_seen_message_id,
+                is_bot, created_at, updated_at
+            ) VALUES (
+                'legacy-source', 'channel', '-10077', '7700', 'Legacy source',
+                1, 3, 1, 0, 0, 700, 0, 1000.0, 1100.0
+            )
+        """)
         connection.commit()
     finally:
         connection.close()
@@ -308,6 +336,21 @@ def test_frozen_inbox_schema_migrates_losslessly_and_idempotently(
             "chat_id": "-1007", "message_id": 700,
             "text": "durable message", "alert_sent": 1,
         }
+        source = dict(connection.execute("""
+            SELECT id, display_title, sort_order, notifications_muted,
+                   manual_write_enabled, manual_open_date, manual_access_until
+            FROM library_sources WHERE id = 'legacy-source'
+        """).fetchone())
+        assert source == {
+            "id": "legacy-source", "display_title": "Legacy source",
+            "sort_order": 3, "notifications_muted": 1,
+            "manual_write_enabled": 0, "manual_open_date": None,
+            "manual_access_until": 0.0,
+        }
+        indexes = {row[1] for row in connection.execute(
+            "PRAGMA index_list(library_sources)"
+        )}
+        assert "ix_library_sources_manual_write_enabled" in indexes
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     finally:
         connection.close()

@@ -434,7 +434,8 @@ async def test_listener_filters_self_and_pre_start_messages(
 
         async def run_until_disconnected(self):
             for sender, outgoing, age in [(123, False, 0), (456, True, 0),
-                                          (456, False, -60), (456, False, 1)]:
+                                          (456, False, -60), (777000, False, -60),
+                                          (456, False, 1), (777000, False, 1)]:
                 await self.handler(SimpleNamespace(
                     sender_id=sender, out=outgoing,
                     date=datetime.now(UTC) + timedelta(seconds=age),
@@ -446,8 +447,7 @@ async def test_listener_filters_self_and_pre_start_messages(
     monkeypatch.setattr(telegram_client, "make_client", lambda settings: FakeClient())
     monkeypatch.setattr(telegram_client, "ingest_event", ingest)
     await telegram_client.run_listener(mention_settings, session_factory, ignored_chat_ids=set())
-    assert len(seen) == 1
-    assert seen[0].sender_id == 456
+    assert [event.sender_id for event in seen] == [456, 777000]
 
 
 @pytest.mark.parametrize("mine,reply_id,outgoing,ignored", [

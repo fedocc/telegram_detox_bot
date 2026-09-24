@@ -37,7 +37,7 @@ from app.inbox.service import (
     normalize_image,
     rich_text_segments,
 )
-from app.inbox.store import LIFETIME
+from app.inbox.store import LIFETIME, InboxStore, ManualWriteLimitError
 from app.inbox.web import HOST, PORT, create_app, serve_inbox
 
 
@@ -274,7 +274,8 @@ async def test_library_is_paginated_read_only_and_does_not_touch_lifecycle(servi
     assert service.library_json()[0] == {
         "id": "saved", "title": "Избранное", "writable": True,
         "notifications_muted": False, "allow_bot_write": False,
-        "digest_excluded": False, "sort_order": 0, "is_bot": False,
+        "digest_excluded": False, "manual_write_enabled": False,
+        "sort_order": 0, "is_bot": False,
     }
     assert all("peer" not in key for row in service.library_json() for key in row)
 
@@ -362,7 +363,9 @@ async def test_private_trigger_reopens_and_extends_only_active_window(service):
         title="Nikita", trigger_id=1, preview="first", reason="private_message")
     assert row.opened_at is None and row.expires_at == 0
     opened = service.store.open(row.id)
+    assert service.store.refresh_view_lease(row.id)
     service.test_clock[0] += 20
+    assert service.store.refresh_view_lease(row.id)
     extended = service.store.activate(peer_id="2", thread_id=0, is_forum=False,
         title="Nikita", trigger_id=2, preview="second", reason="private_message")
     assert extended.expires_at == service.clock() + LIFETIME
@@ -1020,6 +1023,7 @@ async def test_history_omits_blank_content_but_keeps_service_rows(service):
 
 async def test_meaningful_triggers_reset_window_only(service):
     row = activate(service)
+    assert service.store.refresh_view_lease(row.id)
     assert row.expires_at - service.clock() == LIFETIME == 300
     for mid, text, parent, expected_reset in [
         (101, 'ordinary', None, False),
@@ -1028,6 +1032,7 @@ async def test_meaningful_triggers_reset_window_only(service):
     ]:
         previous = service.store.get(row.id).expires_at
         service.test_clock[0] += 30
+        assert service.store.refresh_view_lease(row.id)
         event = SimpleNamespace(chat_id=-100123, out=False, sender_id=2, raw_text=text,
             id=mid, message=Message(mid, text, parent=parent,
                                    reply_to_msg_id=50 if parent else None),
@@ -1363,6 +1368,131 @@ def test_local_unread_is_persistent_deduplicated_and_open_suppresses_feed(servic
     updated = service.store.get(row.id)
     assert updated.latest_relevant_message_id == 22
     assert updated.unread_count == 2
+
+
+def test_foreground_lease_keeps_new_attention_open_and_restart_loses_lease(service):
+    row = service.store.activate(
+        peer_id="2", peer_type="user", thread_id=0, is_forum=False,
+        title="Nikita", trigger_id=1, preview="one", reason="private_message",
+    )
+    service.store.open(row.id)
+    assert service.store.refresh_view_lease(row.id)
+    service.test_clock[0] += 5
+    viewed = service.store.activate(
+        peer_id="2", peer_type="user", thread_id=0, is_forum=False,
+        title="Nikita", trigger_id=2, preview="two", reason="private_message",
+    )
+    assert viewed.opened_at is not None
+    assert viewed.expires_at == service.clock() + LIFETIME
+    assert viewed.unread_count == 0 and viewed.last_seen_message_id == 2
+    assert service.store.notifications(0)["events"] == []
+
+    restarted = InboxStore(service.store.factory, lambda: set(), service.clock)
+    service.test_clock[0] += 5
+    pending = restarted.activate(
+        peer_id="2", peer_type="user", thread_id=0, is_forum=False,
+        title="Nikita", trigger_id=3, preview="three", reason="private_message",
+    )
+    assert pending.opened_at is None and pending.expires_at == 0
+    assert pending.unread_count == 1
+
+
+async def test_foreground_lease_endpoint_and_history_get_are_separate(service):
+    row = activate(service, opened=False)
+    async with TestClient(TestServer(create_app(service)),
+                          headers={"Host": "127.0.0.1:8787"}) as client:
+        token = (await (await client.get("/api/session")).json())["csrf"]
+        headers = {"Origin": "http://127.0.0.1:8787", "X-Inbox-CSRF": token}
+        await client.post(f"/api/conversations/{row.id}/open", json={}, headers=headers)
+        await client.get(f"/api/conversations/{row.id}/messages")
+        assert not service.store.has_view_lease(row.id)
+        assert (await client.post(
+            f"/api/conversations/{row.id}/lease", json={}, headers=headers,
+        )).status == 200
+        assert service.store.has_view_lease(row.id)
+        assert (await client.post(
+            f"/api/conversations/{row.id}/lease/release", json={}, headers=headers,
+        )).status == 200
+        assert not service.store.has_view_lease(row.id)
+
+
+async def test_manual_write_limit_daily_quota_and_successful_send_extension(service):
+    sources = []
+    for index in range(3):
+        kwargs = dict(
+            source_id=f"write{index}", peer_type="user", peer_id=str(40 + index),
+            access_hash=4000 + index, display_title=f"Person {index}", is_bot=False,
+            library_enabled=False, manual_write_enabled=True,
+        )
+        if index < 2:
+            sources.append(service.store.upsert_library_source(**kwargs))
+        else:
+            with pytest.raises(ManualWriteLimitError):
+                service.store.upsert_library_source(**kwargs)
+
+    opened = service.open_manual_write(sources[0].id)["source"]
+    assert opened["access_until"] == service.clock() + LIFETIME
+    service.test_clock[0] += LIFETIME + 1
+    with pytest.raises(InboxError) as used:
+        service.open_manual_write(sources[0].id)
+    assert used.value.status == 429
+
+    service.open_manual_write(sources[1].id)
+    service.test_clock[0] += 20
+    result = await service.send_manual_write(sources[1].id, str(uuid4()), "hello")
+    assert result == {"message_id": 901}
+    refreshed = next(row for row in service.manual_write_json() if row["id"] == sources[1].id)
+    assert refreshed["access_until"] == service.clock() + LIFETIME
+
+
+@pytest.mark.parametrize("mention_only_mode", [True, False])
+async def test_telegram_code_is_inbox_only_and_notification_is_redacted(
+    service, settings, monkeypatch, mention_only_mode,
+):
+    from sqlalchemy import select
+    from telethon.tl.types import InputPeerUser
+
+    from app.db.tables import AlertJob, InboxNotification, MessageRecord
+    from app.telegram.client import ingest_event
+    from tests.fixtures.messages import msg
+    from tests.test_mention_only import FakeEmail
+
+    code_text = "Login code: 12345"
+    monkeypatch.setattr(
+        "app.telegram.client.event_to_stored_message",
+        AsyncMock(return_value=msg(text=code_text)),
+    )
+    event = SimpleNamespace(
+        chat_id=777000, sender_id=777000, out=False, raw_text=code_text, id=77,
+        message=Message(77, code_text),
+        get_sender=AsyncMock(return_value=SimpleNamespace(id=777000, bot=True)),
+        get_chat=AsyncMock(return_value=SimpleNamespace(
+            id=777000, first_name="Telegram", last_name="", forum=False,
+        )),
+        get_input_chat=AsyncMock(return_value=InputPeerUser(777000, 7000)),
+    )
+    email = FakeEmail()
+    assert await ingest_event(
+        event, settings=settings.model_copy(update={"mention_only_mode": mention_only_mode}),
+        session_factory=service.store.factory, llm=None, email=email,
+        ignored_chat_ids=set(), inbox=service, self_id=1,
+    )
+    notification = service.store.notifications(0)["events"][0]
+    assert notification["title"] == "Telegram"
+    assert notification["preview"] == "Новый код Telegram"
+    assert notification["trigger_reason"] == "telegram_code"
+    assert code_text not in str(notification)
+    assert email.sent == []
+    with service.store.factory() as session:
+        assert list(session.scalars(select(MessageRecord))) == []
+        assert list(session.scalars(select(AlertJob))) == []
+        stored_notification = session.scalar(select(InboxNotification))
+        assert code_text not in stored_notification.preview
+
+    service.client.messages = [Message(77, code_text)]
+    row = service.store.open(service.store.active()[0].id)
+    history = await service.history(row.id)
+    assert history["messages"][-1]["text"] == code_text
 
 
 def test_concurrent_activation_keeps_one_canonical_row_and_all_events(service):
@@ -2084,15 +2214,19 @@ async def test_digest_source_scope_filters_before_fetch_and_ignores_library_memb
         -1000000000030, InputPeerChannel(30, 300), name="Announcements",
     )
     bot = _digest_dialog(2, InputPeerUser(2, 200), name="Utility Bot", bot=True)
+    telegram = _digest_dialog(
+        777000, InputPeerUser(777000, 777), name="Telegram", bot=True,
+    )
     human = _digest_dialog(3, InputPeerUser(3, 300), name="Human")
     saved = _digest_dialog(1, InputPeerUser(1, 100), name="Saved", is_self=True)
-    dialogs = [group, ignored, supergroup, channel, bot, human, saved]
+    dialogs = [group, ignored, supergroup, channel, bot, telegram, human, saved]
     now = datetime(2026, 9, 21, 4, tzinfo=UTC)
     messages = {
         -10: [Message(10, "group news", date=now)],
         -1000000000020: [Message(20, "forum news", date=now)],
         -1000000000030: [Message(30, "channel news", date=now)],
         2: [Message(40, "bot news", date=now)],
+        777000: [Message(41, "LOGIN CODE MARKER", date=now)],
         3: [Message(50, "PRIVATE HUMAN MARKER", date=now)],
         1: [Message(60, "SAVED MARKER", date=now)],
         -11: [Message(70, "IGNORED MARKER", date=now)],
@@ -2115,9 +2249,9 @@ async def test_digest_source_scope_filters_before_fetch_and_ignores_library_memb
     assert selected.id in {row["source_id"] for row in rows}
     assert "PRIVATE HUMAN MARKER" not in text
     assert "SAVED MARKER" not in text and "IGNORED MARKER" not in text
-    assert all(peer not in client.fetch_peers for peer in (3, 1, -11))
+    assert all(peer not in client.fetch_peers for peer in (3, 1, -11, 777000))
     assert service.last_digest_report == {
-        "total_dialogs": 7, "included_groups": 2, "included_channels": 1,
+        "total_dialogs": 8, "included_groups": 2, "included_channels": 1,
         "included_bots": 1, "excluded_human_dms": 1, "ignored": 1,
         "unavailable": 0, "redactions": 0,
     }
