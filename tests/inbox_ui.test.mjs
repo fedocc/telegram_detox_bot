@@ -17,6 +17,7 @@ import {
   isTerminalConversationStatus,
   isWritable,
   localImageClipboardUri,
+  manualOpenButtonVisible,
   maintainMessageViewport,
   mergeMessagePages,
   newPageMessages,
@@ -307,6 +308,13 @@ test('only active, explicitly writable Library, and quick-write scopes are writa
   assert.equal(isWritable('quick', {writable:true}), true);
 });
 
+test('manual open action remains visible until both global daily uses are consumed', () => {
+  assert.equal(manualOpenButtonVisible({used:0, remaining:2, limit:2}), true);
+  assert.equal(manualOpenButtonVisible({used:1, remaining:1, limit:2}), true);
+  assert.equal(manualOpenButtonVisible({used:2, remaining:0, limit:2}), false);
+  assert.equal(manualOpenButtonVisible({used:0, remaining:2, limit:2}, false), false);
+});
+
 test('upload limit rejects empty and oversized files', () => {
   assert.equal(uploadWithinLimit({size:1}, 100), true);
   assert.equal(uploadWithinLimit({size:0}, 100), false);
@@ -325,14 +333,13 @@ test('deep links resolve only currently allowed conversations and library source
   const id = 'a'.repeat(32);
   const conversations = [{id}];
   const sources = [{id:'saved'}, {id:'s-course'}];
-  const quick = [{id:'s-person'}];
   assert.deepEqual(parseDeepLink(`?conversation=${id}`, conversations, sources),
     {mode:'inbox', id, messageId:null});
   assert.deepEqual(parseDeepLink('?library=s-course&message=42', conversations, sources),
     {mode:'library', id:'s-course', messageId:42});
   assert.equal(parseDeepLink('?library=crafted&message=42', conversations, sources), null);
   assert.equal(parseDeepLink('?conversation=evil', conversations, sources), null);
-  assert.deepEqual(parseDeepLink('?write=s-person', conversations, sources, quick),
+  assert.deepEqual(parseDeepLink('?write=s-person', conversations, sources),
     {mode:'quick', id:'s-person', messageId:null});
   assert.equal(deepLinkFor('library', 's-course', 42), '/?library=s-course&message=42');
   assert.equal(deepLinkFor('inbox', id), `/?conversation=${id}`);
@@ -364,17 +371,17 @@ test('Mac notifier controls are hidden on iPhone, iPad and non-Mac clients', () 
 test('management preference payload is bounded and bot write is bot-only', () => {
   assert.deepEqual(preferencePayload({
     token:'opaque', selected:true, notifications_muted:true, allow_bot_write:true,
-    digest_excluded:false, manual_write_enabled:true, is_bot:false,
+    digest_excluded:false, is_bot:false,
   }), {
     token:'opaque', library_enabled:true, notifications_muted:true,
-    allow_bot_write:false, digest_excluded:false, manual_write_enabled:true,
+    allow_bot_write:false, digest_excluded:false,
   });
   assert.deepEqual(preferencePayload({
     token:'stale-token', source_id:'s-bot', selected:true, notifications_muted:false,
-    allow_bot_write:true, digest_excluded:true, manual_write_enabled:false, is_bot:true,
+    allow_bot_write:true, digest_excluded:true, is_bot:true,
   }), {
     source_id:'s-bot', library_enabled:true, notifications_muted:false,
-    allow_bot_write:true, digest_excluded:true, manual_write_enabled:false,
+    allow_bot_write:true, digest_excluded:true,
   });
 });
 

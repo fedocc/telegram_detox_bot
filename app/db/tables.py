@@ -267,6 +267,15 @@ class LibrarySource(Base):
     updated_at: Mapped[float] = mapped_column(Float)
 
 
+class ManualOpenUsage(Base):
+    __tablename__ = "manual_open_usages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    local_date: Mapped[date] = mapped_column(Date, index=True)
+    source_id: Mapped[str] = mapped_column(String(32), index=True)
+    opened_at: Mapped[float] = mapped_column(Float, index=True)
+
+
 class WebPushSubscription(Base):
     __tablename__ = "web_push_subscriptions"
 

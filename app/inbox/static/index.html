@@ -12,13 +12,20 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" type="image/png" sizes="180x180" href="/static/app-icon-180.png">
   <link rel="apple-touch-icon" sizes="180x180" href="/static/app-icon-180.png">
-  <link rel="stylesheet" href="/static/style.css?v=13">
-  <script type="module" src="/static/app.js?v=13"></script>
+  <link rel="stylesheet" href="/static/style.css?v=14">
+  <script type="module" src="/static/app.js?v=14"></script>
 </head>
 <body>
   <div class="shell">
     <aside>
-      <header class="list-header"><strong>Входящие <span id="count" class="count">0</span></strong><span class="list-actions"><button id="home" class="nav-icon" type="button" aria-label="На главный экран" title="На главный экран"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 10 8-7 8 7v10h-6v-6h-4v6H4z"/></svg></button></span></header>
+      <header class="list-header"><strong>Входящие <span id="count" class="count">0</span></strong><span class="list-actions"><button id="manual-open-button" class="nav-icon" type="button" aria-label="Открыть Telegram-чат" title="Открыть Telegram-чат" aria-haspopup="dialog" aria-controls="manual-picker" aria-expanded="false" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><button id="digest-history-button" class="nav-icon" type="button" aria-label="История сводок" title="История сводок"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v15H5zM8 8h8M8 11h8M8 14h5M2 8v10a2 2 0 0 0 2 2h1"/></svg></button><button id="home" class="nav-icon" type="button" aria-label="На главный экран" title="На главный экран"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 10 8-7 8 7v10h-6v-6h-4v6H4z"/></svg></button></span></header>
+      <section id="manual-picker" class="manual-picker" role="dialog" aria-labelledby="manual-picker-title" hidden>
+        <h2 id="manual-picker-title">Открыть чат</h2>
+        <label class="sr-only" for="manual-picker-search">Поиск чатов</label>
+        <input id="manual-picker-search" type="search" placeholder="Поиск чатов…" autocomplete="off">
+        <p id="manual-picker-status" role="status">Загружаю чаты…</p>
+        <nav id="manual-picker-list" aria-label="Доступные Telegram-чаты"></nav>
+      </section>
       <nav id="conversations" aria-label="Активные разговоры"></nav>
       <section class="library">
         <div class="library-heading">
@@ -26,10 +33,6 @@
           <button id="library-manage" type="button" aria-label="Настроить библиотеку" title="Настроить библиотеку" hidden>⚙</button>
         </div>
         <nav id="library-list" aria-label="Библиотека" hidden></nav>
-        <section id="quick-write" class="quick-write" hidden>
-          <strong>Написать</strong>
-          <nav id="quick-write-list" aria-label="Написать"></nav>
-        </section>
       </section>
       <nav id="mobile-dock" aria-label="Основная навигация">
         <button id="mobile-library" type="button" aria-expanded="false"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5.5h5v13H4zM9 5.5h5v13H9zM15.5 5l4.5 12.8-4.2 1.5-4.5-12.8z"/></svg></span> Библиотека</button>

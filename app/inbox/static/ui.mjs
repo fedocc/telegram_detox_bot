@@ -178,6 +178,11 @@ export function isWritable(mode, source) {
   return mode === 'inbox' || (['library', 'quick'].includes(mode) && source?.writable === true);
 }
 
+export function manualOpenButtonVisible(quota, desktop = true) {
+  const remaining = Number(quota?.remaining);
+  return Boolean(desktop && Number.isInteger(remaining) && remaining > 0);
+}
+
 export function uploadWithinLimit(file, maxBytes) {
   return Boolean(file && Number.isSafeInteger(file.size) && file.size > 0
     && file.size <= maxBytes);
@@ -211,7 +216,7 @@ export function advanceOlderCursor(requested, returned) {
   return next;
 }
 
-export function parseDeepLink(search, conversations, sources, quickSources = []) {
+export function parseDeepLink(search, conversations, sources) {
   const params = new URLSearchParams(search || '');
   const messageValue = params.get('message');
   const numericMessage = messageValue && /^[1-9][0-9]*$/.test(messageValue)
@@ -227,7 +232,7 @@ export function parseDeepLink(search, conversations, sources, quickSources = [])
     return {mode: 'library', id: source, messageId};
   }
   const quick = params.get('write');
-  if (quick && quickSources.some(row => row.id === quick)) {
+  if (/^[A-Za-z0-9_-]{1,64}$/.test(quick || '')) {
     return {mode: 'quick', id: quick, messageId};
   }
   return null;
@@ -268,7 +273,6 @@ export function preferencePayload(row) {
     notifications_muted: Boolean(row.notifications_muted),
     allow_bot_write: Boolean(row.is_bot && row.allow_bot_write),
     digest_excluded: Boolean(row.digest_excluded),
-    manual_write_enabled: Boolean(row.manual_write_enabled),
   };
   if (row.source_id) result.source_id = row.source_id;
   else if (row.token) result.token = row.token;

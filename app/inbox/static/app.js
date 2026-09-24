@@ -1,8 +1,8 @@
 'use strict';
 
-import {createPlaybackController} from './playback.mjs?v=13';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=13';
-import {createPushController} from './push.mjs?v=13';
+import {createPlaybackController} from './playback.mjs?v=14';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=14';
+import {createPushController} from './push.mjs?v=14';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
@@ -11,9 +11,10 @@ import {
   openedConversationIds, preferencePayload, retainFocusedMessage, scopePath, uploadWithinLimit,
   canonicalBadge, clipboardFile, createFileDragTracker, digestTitle,
   hasFileTransfer, isDigestHistoryRoute, isNearBottom,
+  manualOpenButtonVisible,
   localImageClipboardUri, maintainMessageViewport, reactionEmojiPresentation,
   settleScrollBottom,
-} from './ui.mjs?v=13';
+} from './ui.mjs?v=14';
 
 const playback = createPlaybackController(document);
 const $ = id => document.getElementById(id);
@@ -25,11 +26,14 @@ const node = (tag, className, text) => {
 };
 
 let csrf = '', selected = null, selectedMode = null, conversations = [], library = [];
-let quickWrite = [], latestDigest = null;
+let manualChat = null, manualQuota = {used: 0, remaining: 0, limit: 2};
+let manualDialogs = [], manualPickerOpen = false, manualPickerLoading = false;
+let manualPickerError = '';
 let serverOffset = 0, polling = false, choosing = 0, shownKey = null;
 let messageNodes = new Map(), nextBefore = null, olderLoading = false;
 let olderCursorInitialized = false;
 let selectedLoadPaused = false, uploadMax = 100 * 1024 * 1024, libraryPollAt = 0;
+let manualQuotaPollAt = 0;
 let libraryLoaded = false, routePending = true, routeWaitStarted = Date.now(), pinsGeneration = 0;
 let searchGeneration = 0, searchTimer = null;
 let searchState = {query: '', results: [], next: null, loading: false};
@@ -68,8 +72,8 @@ const visible = row => row.opened_at === null || row.expires_at > now();
 const minutes = row => `${Math.max(1, Math.ceil((row.expires_at - now()) / 60))} мин`;
 const initials = name => String(name || '').trim().split(/\s+/).slice(0, 2)
   .map(value => value[0] || '').join('').toUpperCase();
-const currentSource = () => (selectedMode === 'quick' ? quickWrite : library)
-  .find(row => row.id === selected);
+const currentSource = () => selectedMode === 'quick' ? manualChat
+  : library.find(row => row.id === selected);
 const currentScope = () => scopePath(selectedMode, selected);
 
 async function api(path, data) {
@@ -203,31 +207,14 @@ function renderLibrary() {
     button.onclick = () => chooseLibrary(row.id);
     return button;
   });
-  if (matchMedia('(min-width: 769px)').matches) {
-    const digest = node('button', `library-row digest-row${appView === 'digests' ? ' selected' : ''}`,
-      latestDigest ? digestTitle(latestDigest.period_end) : 'Сводка');
-    digest.type = 'button'; digest.setAttribute('aria-current', appView === 'digests' ? 'page' : 'false');
-    digest.onclick = () => showDigestHistory();
-    rows.splice(Math.min(1, rows.length), 0, digest);
-  }
   $('library-list').replaceChildren(...rows);
 }
 
-function renderQuickWrite() {
-  const section = $('quick-write');
-  section.hidden = quickWrite.length === 0;
-  $('quick-write-list').replaceChildren(...quickWrite.map(row => {
-    const active = selectedMode === 'quick' && selected === row.id;
-    const button = node('button', `quick-write-row${active ? ' selected' : ''}`);
-    button.type = 'button'; button.disabled = Boolean(row.used_today);
-    button.setAttribute('aria-current', active ? 'true' : 'false');
-    button.append(node('span', 'avatar', initials(row.title)),
-      node('span', 'quick-title', row.title));
-    if (row.used_today) button.append(node('small', '', 'сегодня использовано'));
-    else if (row.access_until) button.append(node('small', '', 'открыт'));
-    button.onclick = () => chooseQuick(row.id);
-    return button;
-  }));
+function renderManualOpenButton() {
+  const desktop = matchMedia('(min-width: 769px)').matches;
+  const available = manualOpenButtonVisible(manualQuota, desktop);
+  $('manual-open-button').hidden = !available;
+  if (!available) closeManualPicker();
 }
 
 function digestNodes(digest, emptyText) {
@@ -258,7 +245,7 @@ function renderDigestHistory(digests) {
 
 function renderHeader() {
   const row = selectedMode === 'library' ? library.find(value => value.id === selected)
-    : selectedMode === 'quick' ? quickWrite.find(value => value.id === selected)
+    : selectedMode === 'quick' ? manualChat
       : conversations.find(value => value.id === selected);
   const history = appView === 'digests';
   $('empty').hidden = Boolean(row) || history;
@@ -350,7 +337,7 @@ function deselect({message = '', removeCurrent = false, replaceUrl = true} = {})
   selected = null; selectedMode = null;
   appView = 'home'; digestHistoryGeneration += 1;
   resetConversationSurface();
-  renderList(); renderLibrary(); renderQuickWrite(); renderHeader();
+  renderList(); renderLibrary(); renderHeader();
   showError('open-error', message); showError('load-error', '');
   if (replaceUrl) updateLocation(null, {replace: true});
 }
@@ -363,7 +350,7 @@ function prepareSelection(mode, key) {
   if (changed) resetConversationSurface();
   selectedLoadPaused = false;
   showError('open-error', ''); showError('load-error', '');
-  renderList(); renderLibrary(); renderQuickWrite(); renderHeader(); renderComposer();
+  renderList(); renderLibrary(); renderHeader(); renderComposer();
   return changed;
 }
 
@@ -393,13 +380,11 @@ async function choose(key, {updateHistory = true, messageId = null} = {}) {
 }
 
 async function chooseQuick(key, {updateHistory = true, messageId = null} = {}) {
-  if (!quickWrite.some(row => row.id === key)) return;
   const request = ++choosing;
   try {
-    const opened = await api(`/api/quick-write/${encodeURIComponent(key)}/open`, {});
-    if (request !== choosing) return;
-    if (opened.source) quickWrite = quickWrite.map(row => row.id === key
-      ? {...row, ...opened.source} : row);
+    if (!manualChat || manualChat.id !== key) {
+      manualChat = {id: key, title: 'Telegram', writable: true, access_until: now() + 300};
+    }
     const changed = prepareSelection('quick', key);
     auxiliaryPanel = 'none'; syncAuxiliaryPanels();
     if (messageId === null) focusedMessageId = null;
@@ -411,7 +396,6 @@ async function chooseQuick(key, {updateHistory = true, messageId = null} = {}) {
     if (matchMedia('(min-width: 769px)').matches) $('text').focus();
   } catch (error) {
     if (request !== choosing) return;
-    await loadQuickWrite().catch(() => {});
     if (isTerminalConversationStatus(error.status) || error.status === 403 || error.status === 429) {
       deselect({message: error.message});
     } else showError(selected ? 'load-error' : 'open-error', error.message);
@@ -440,7 +424,8 @@ async function chooseLibrary(key, {updateHistory = true, messageId = null} = {})
     if (currentSource()?.writable && matchMedia('(min-width: 769px)').matches) $('text').focus();
   } catch (error) {
     if (request !== choosing) return;
-    if (isTerminalConversationStatus(error.status)) {
+    if (isTerminalConversationStatus(error.status) || (mode === 'quick' && error.status === 403)) {
+      if (mode === 'quick') manualChat = null;
       await loadLibrarySources().catch(() => {});
       deselect({message: error.message});
     } else showError(selected ? 'load-error' : 'open-error', error.message);
@@ -902,6 +887,10 @@ async function loadSource(key, before = null, refresh = false, mode = 'library')
     const base = mode === 'quick' ? 'quick-write' : 'library';
     const result = await api(`/api/${base}/${encodeURIComponent(key)}/messages${suffix}`);
     if (selected !== key || selectedMode !== mode) return;
+    if (mode === 'quick' && result.source) {
+      manualChat = result.source;
+      renderHeader(); renderComposer();
+    }
     if (before || !refresh || !olderCursorInitialized) {
       nextBefore = advanceOlderCursor(before, result.next_before);
       olderCursorInitialized = true;
@@ -1028,23 +1017,81 @@ function toggleSearch(open = $('search-panel').hidden) {
 }
 
 async function loadLibrarySources() {
-  const [libraryResult, quickResult, digestResult] = await Promise.all([
-    api('/api/library'), api('/api/quick-write'),
-    matchMedia('(min-width: 769px)').matches
-      ? api('/api/digest/latest').catch(() => ({digest: null})) : {digest: null},
+  const [libraryResult, quotaResult] = await Promise.all([
+    api('/api/library'), api('/api/manual-open/status'),
   ]);
   library = libraryResult.sources || [];
-  quickWrite = quickResult.sources || [];
-  latestDigest = digestResult.digest;
+  manualQuota = quotaResult.quota || manualQuota;
   libraryLoaded = true;
-  renderLibrary(); renderQuickWrite();
+  renderLibrary(); renderManualOpenButton();
   if (selectedMode === 'library' && !library.some(row => row.id === selected)) deselect();
-  if (selectedMode === 'quick' && !quickWrite.some(row => row.id === selected)) deselect();
 }
 
-async function loadQuickWrite() {
-  quickWrite = (await api('/api/quick-write')).sources || [];
-  renderQuickWrite();
+async function loadManualQuota() {
+  const result = await api('/api/manual-open/status');
+  manualQuota = result.quota || manualQuota;
+  renderManualOpenButton();
+}
+
+function closeManualPicker() {
+  manualPickerOpen = false;
+  $('manual-picker').hidden = true;
+  $('manual-open-button').setAttribute('aria-expanded', 'false');
+}
+
+function renderManualPicker() {
+  const query = $('manual-picker-search').value.trim().toLocaleLowerCase('ru-RU');
+  const rows = manualDialogs.filter(row => !query || row.title.toLocaleLowerCase('ru-RU').includes(query));
+  $('manual-picker-list').replaceChildren(...rows.map(row => {
+    const button = node('button', 'manual-picker-row');
+    button.type = 'button'; button.disabled = manualPickerLoading;
+    button.append(node('span', 'avatar', initials(row.title)), node('span', '', row.title));
+    button.onclick = () => selectManualDialog(row);
+    return button;
+  }));
+  $('manual-picker-status').hidden = !manualPickerError && manualPickerLoading === false && rows.length > 0;
+  $('manual-picker-status').textContent = manualPickerError || (manualPickerLoading ? 'Загружаю чаты…'
+    : manualDialogs.length === 0 ? 'Нет доступных чатов.'
+      : rows.length === 0 ? 'Ничего не найдено.' : '');
+}
+
+async function toggleManualPicker() {
+  if (manualPickerOpen) { closeManualPicker(); return; }
+  if (!matchMedia('(min-width: 769px)').matches || manualQuota.remaining <= 0) return;
+  manualPickerOpen = true; manualPickerLoading = true; manualPickerError = ''; manualDialogs = [];
+  $('manual-picker').hidden = false;
+  $('manual-open-button').setAttribute('aria-expanded', 'true');
+  $('manual-picker-search').value = '';
+  renderManualPicker(); $('manual-picker-search').focus();
+  try {
+    const result = await api('/api/manual-open/dialogs');
+    manualQuota = result.quota || manualQuota;
+    manualDialogs = result.dialogs || [];
+    if (manualQuota.remaining <= 0) closeManualPicker();
+  } catch (error) {
+    manualPickerError = error.message;
+  } finally {
+    manualPickerLoading = false; renderManualOpenButton();
+    if (manualPickerOpen) renderManualPicker();
+  }
+}
+
+async function selectManualDialog(row) {
+  if (!manualPickerOpen || manualPickerLoading) return;
+  manualPickerLoading = true; manualPickerError = ''; renderManualPicker();
+  try {
+    const result = await api('/api/manual-open', {token: row.token});
+    manualQuota = result.quota || manualQuota;
+    manualChat = result.source;
+    closeManualPicker(); renderManualOpenButton();
+    await chooseQuick(result.source.id);
+  } catch (error) {
+    if (error.status === 429) await loadManualQuota().catch(() => {});
+    manualPickerError = error.message;
+  } finally {
+    manualPickerLoading = false;
+    if (manualPickerOpen) renderManualPicker();
+  }
 }
 
 async function showDigestHistory({updateHistory = true} = {}) {
@@ -1054,7 +1101,7 @@ async function showDigestHistory({updateHistory = true} = {}) {
   choosing += 1; pinsGeneration += 1;
   selected = null; selectedMode = null; appView = 'digests';
   const generation = ++digestHistoryGeneration;
-  resetConversationSurface(); renderList(); renderLibrary(); renderQuickWrite(); renderHeader();
+  resetConversationSurface(); renderList(); renderLibrary(); renderHeader();
   showError('open-error', ''); showError('digest-history-error', '');
   $('digest-history-list').replaceChildren(node('p', 'digest-empty', 'Загрузка…'));
   if (updateHistory) history.pushState(null, '', '/?view=digests');
@@ -1110,7 +1157,6 @@ async function savePreference(row, container, previous) {
 }
 
 function renderManagement() {
-  const manualCount = managementDialogs.filter(row => row.manual_write_enabled).length;
   $('dialog-list').replaceChildren(...managementRows().map(row => {
     const item = node('section', 'dialog-row'), main = node('div', 'dialog-main');
     const enabled = node('input');
@@ -1139,9 +1185,7 @@ function renderManagement() {
       label.append(input, document.createTextNode(labelText)); return label;
     };
     options.append(option('Без системных уведомлений', 'notifications_muted', !row.selected),
-      option('Не включать в будущий дайджест', 'digest_excluded', !row.selected),
-      option('Разрешить ручное открытие', 'manual_write_enabled',
-        !row.can_manual_write || (!row.manual_write_enabled && manualCount >= 2)));
+      option('Не включать в будущий дайджест', 'digest_excluded', !row.selected));
     if (row.is_bot) options.append(option('Разрешить писать этому боту', 'allow_bot_write', !row.selected));
     options.hidden = false;
     enabled.onchange = () => {
@@ -1186,7 +1230,7 @@ async function applyLocation() {
     routePending = false;
     await showDigestHistory({updateHistory: false}); return;
   }
-  const route = parseDeepLink(location.search, conversations, library, quickWrite);
+  const route = parseDeepLink(location.search, conversations, library);
   if (!route) {
     const params = new URLSearchParams(location.search);
     const hasRoute = params.has('conversation') || params.has('library') || params.has('write');
@@ -1217,6 +1261,10 @@ async function poll() {
       $('empty-description').textContent = `Личные сообщения, @fedocc и ответы ожидают без таймера; после открытия доступны ${session.active_minutes} мин.`;
     }
     if (!libraryLoaded) await loadLibrarySources();
+    if (Date.now() >= manualQuotaPollAt) {
+      manualQuotaPollAt = Date.now() + 30000;
+      await loadManualQuota();
+    }
     const result = await api('/api/conversations');
     serverOffset = result.now - Date.now() / 1000;
     conversations = (result.conversations || []).filter(visible);
@@ -1310,8 +1358,7 @@ $('composer').onsubmit = async event => {
     if (selected === key && selectedMode === mode) {
       if (mode === 'library') await loadLibrary(key, null, true);
       else if (mode === 'quick') {
-        const row = quickWrite.find(item => item.id === key);
-        if (row) row.access_until = now() + 300;
+        if (manualChat?.id === key) manualChat.access_until = now() + 300;
         await loadSource(key, null, true, 'quick');
       } else await loadMessages(key);
     }
@@ -1326,6 +1373,18 @@ $('composer').onsubmit = async event => {
 
 $('close').onclick = () => closeConversation(selected);
 $('home').onclick = () => deselect();
+$('manual-open-button').onclick = toggleManualPicker;
+$('digest-history-button').onclick = () => showDigestHistory();
+$('manual-picker-search').oninput = renderManualPicker;
+document.addEventListener('click', event => {
+  if (manualPickerOpen && !$('manual-picker').contains(event.target)
+      && !$('manual-open-button').contains(event.target)) closeManualPicker();
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && manualPickerOpen) {
+    closeManualPicker(); $('manual-open-button').focus();
+  }
+});
 $('mobile-back').onclick = () => deselect();
 $('reply-target').querySelector('button').onclick = () => { const value = draft(); value.reply = null; renderComposer(); };
 let pauseMenuOpen = false;

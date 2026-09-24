@@ -184,6 +184,35 @@ async def test_library_management_lock_preserves_selected_sources(route_service)
         ]
 
 
+async def test_manual_open_api_consumes_only_successes_and_rejects_third_use(route_service):
+    dialog_key = "route-manual-token"
+    route_service.dialog_tokens[dialog_key] = {
+        "purpose": "manual_open", "peer_type": "user", "peer_id": "42",
+        "access_hash": 4242, "display_title": "Writable bot", "is_bot": True,
+        "can_write": True, "source_id": SOURCE_ID,
+        "expires": route_service.clock() + 300,
+    }
+    async with TestClient(
+        TestServer(create_app(route_service)), headers={"Host": "127.0.0.1:8787"},
+    ) as client:
+        initial = await (await client.get("/api/manual-open/status")).json()
+        assert initial["quota"]["used"] == 0
+        assert (await client.post(
+            "/api/manual-open", json={"token": dialog_key},
+        )).status == 403
+        assert (await (await client.get("/api/manual-open/status")).json())["quota"]["used"] == 0
+
+        headers = await csrf_headers(client)
+        first = await client.post("/api/manual-open", json={"token": dialog_key}, headers=headers)
+        assert first.status == 200
+        assert (await first.json())["quota"]["remaining"] == 1
+        second = await client.post("/api/manual-open", json={"token": dialog_key}, headers=headers)
+        assert second.status == 200
+        assert (await second.json())["quota"]["remaining"] == 0
+        third = await client.post("/api/manual-open", json={"token": dialog_key}, headers=headers)
+        assert third.status == 429
+
+
 async def test_history_pins_exact_and_search_routes_forward_validated_arguments(
         route_service, monkeypatch):
     library_history = AsyncMock(return_value={"messages": [], "next_before": None})

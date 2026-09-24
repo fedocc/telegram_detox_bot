@@ -37,7 +37,7 @@ from app.inbox.service import (
     normalize_image,
     rich_text_segments,
 )
-from app.inbox.store import LIFETIME, InboxStore, ManualWriteLimitError
+from app.inbox.store import LIFETIME, InboxStore
 from app.inbox.web import HOST, PORT, create_app, serve_inbox
 
 
@@ -274,8 +274,7 @@ async def test_library_is_paginated_read_only_and_does_not_touch_lifecycle(servi
     assert service.library_json()[0] == {
         "id": "saved", "title": "Избранное", "writable": True,
         "notifications_muted": False, "allow_bot_write": False,
-        "digest_excluded": False, "manual_write_enabled": False,
-        "sort_order": 0, "is_bot": False,
+        "digest_excluded": False, "sort_order": 0, "is_bot": False,
     }
     assert all("peer" not in key for row in service.library_json() for key in row)
 
@@ -1416,33 +1415,57 @@ async def test_foreground_lease_endpoint_and_history_get_are_separate(service):
         assert not service.store.has_view_lease(row.id)
 
 
-async def test_manual_write_limit_daily_quota_and_successful_send_extension(service):
-    sources = []
-    for index in range(3):
-        kwargs = dict(
-            source_id=f"write{index}", peer_type="user", peer_id=str(40 + index),
-            access_hash=4000 + index, display_title=f"Person {index}", is_bot=False,
-            library_enabled=False, manual_write_enabled=True,
-        )
-        if index < 2:
-            sources.append(service.store.upsert_library_source(**kwargs))
-        else:
-            with pytest.raises(ManualWriteLimitError):
-                service.store.upsert_library_source(**kwargs)
+async def test_manual_open_quota_is_global_persistent_repeatable_and_resets(service):
+    dialog_key = "manual-token"
+    service.dialog_tokens[dialog_key] = {
+        "purpose": "manual_open", "peer_type": "user", "peer_id": "40",
+        "access_hash": 4000, "display_title": "Person", "is_bot": False,
+        "can_write": True, "source_id": None, "expires": service.clock() + 300,
+    }
+    first = await service.open_manual_write(dialog_key)
+    assert first["quota"]["used"] == 1 and first["quota"]["remaining"] == 1
+    assert first["source"]["access_until"] == service.clock() + LIFETIME
+    source_id = first["source"]["id"]
 
-    opened = service.open_manual_write(sources[0].id)["source"]
-    assert opened["access_until"] == service.clock() + LIFETIME
-    service.test_clock[0] += LIFETIME + 1
-    with pytest.raises(InboxError) as used:
-        service.open_manual_write(sources[0].id)
-    assert used.value.status == 429
+    attention = service.store.activate(
+        peer_id="41", peer_type="user", thread_id=0, is_forum=False,
+        title="Incoming", trigger_id=1, preview="hello", reason="private_message",
+    )
+    assert attention is not None and service.manual_open_status()["used"] == 1
 
-    service.open_manual_write(sources[1].id)
     service.test_clock[0] += 20
-    result = await service.send_manual_write(sources[1].id, str(uuid4()), "hello")
+    result = await service.send_manual_write(source_id, str(uuid4()), "hello")
     assert result == {"message_id": 901}
-    refreshed = next(row for row in service.manual_write_json() if row["id"] == sources[1].id)
-    assert refreshed["access_until"] == service.clock() + LIFETIME
+    assert service.manual_write_source(source_id).manual_access_until == service.clock() + LIFETIME
+
+    second = await service.open_manual_write(dialog_key)
+    assert second["source"]["id"] == source_id
+    assert second["quota"]["used"] == 2 and second["quota"]["remaining"] == 0
+    with pytest.raises(InboxError) as exhausted:
+        await service.open_manual_write(dialog_key)
+    assert exhausted.value.status == 429
+
+    restarted = InboxStore(service.store.factory, lambda: set(), service.clock)
+    assert restarted.manual_open_status(service.timezone)["used"] == 2
+    service.test_clock[0] += 24 * 60 * 60
+    service.dialog_tokens[dialog_key]["expires"] = service.clock() + 300
+    assert service.manual_open_status()["used"] == 0
+    next_day = await service.open_manual_write(dialog_key)
+    assert next_day["quota"]["used"] == 1
+
+
+async def test_failed_manual_telegram_open_does_not_consume_quota(service):
+    dialog_key = "failed-token"
+    service.dialog_tokens[dialog_key] = {
+        "purpose": "manual_open", "peer_type": "user", "peer_id": "40",
+        "access_hash": 4000, "display_title": "Person", "is_bot": False,
+        "can_write": True, "source_id": None, "expires": service.clock() + 300,
+    }
+    service.client.get_messages = AsyncMock(side_effect=RuntimeError("telegram failed"))
+    with pytest.raises(RuntimeError):
+        await service.open_manual_write(dialog_key)
+    assert service.manual_open_status()["used"] == 0
+    assert service.store.library_source_for_peer("40", enabled_only=False) is None
 
 
 @pytest.mark.parametrize("mention_only_mode", [True, False])
@@ -1963,6 +1986,46 @@ async def test_library_dialog_tokens_preferences_and_bot_write_are_validated(ser
     assert unsafe.value.status == 422
     with pytest.raises(InboxError):
         await service.update_library("forged-token", {"library_enabled": True})
+
+
+async def test_manual_picker_excludes_unwritable_ignored_self_and_telegram(service):
+    from telethon.tl.types import InputPeerChannel, InputPeerChat, InputPeerUser
+
+    service.test_ignored.add("44")
+    entities = [
+        (42, "Human", SimpleNamespace(id=42, bot=False), InputPeerUser(42, 4200)),
+        (43, "Bot", SimpleNamespace(id=43, bot=True), InputPeerUser(43, 4300)),
+        (1, "Self", SimpleNamespace(id=1, bot=False, is_self=True), InputPeerUser(1, 100)),
+        (777000, "Telegram", SimpleNamespace(id=777000, bot=True),
+         InputPeerUser(777000, 7770)),
+        (44, "Ignored", SimpleNamespace(id=44, bot=False), InputPeerUser(44, 4400)),
+        (-45, "Group", SimpleNamespace(id=45, left=False), InputPeerChat(45)),
+        (-1000000000046, "Read only", SimpleNamespace(
+            id=46, left=False, megagroup=False, gigagroup=False,
+            creator=False, admin_rights=None,
+        ), InputPeerChannel(46, 4600)),
+        (-1000000000047, "Posting", SimpleNamespace(
+            id=47, left=False, megagroup=False, gigagroup=False,
+            creator=False, admin_rights=SimpleNamespace(post_messages=True),
+        ), InputPeerChannel(47, 4700)),
+        (48, "Deleted", SimpleNamespace(id=48, bot=False, deleted=True),
+         InputPeerUser(48, 4800)),
+    ]
+
+    async def iter_dialogs(*, limit):
+        assert limit == 200
+        for dialog_id, name, entity, input_entity in entities:
+            yield SimpleNamespace(
+                id=dialog_id, name=name, entity=entity, input_entity=input_entity,
+            )
+
+    service.client.iter_dialogs = iter_dialogs
+    payload = await service.manual_open_dialogs()
+    assert {row["title"] for row in payload["dialogs"]} == {
+        "Human", "Bot", "Group", "Posting",
+    }
+    assert payload["quota"] == service.manual_open_status()
+    assert all(set(row) == {"token", "title", "is_bot"} for row in payload["dialogs"])
 
 
 async def test_queued_library_disable_wins_before_later_bot_send(service):

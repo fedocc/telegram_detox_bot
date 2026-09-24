@@ -58,9 +58,9 @@ test('native Mac notifier bundle derives its identity icon from the canonical De
 
 test('service worker explicitly bypasses every API request', async () => {
   const worker = await readFile(new URL('sw.js', root), 'utf8');
-  assert.match(worker, /telegram-detox-shell-v13/);
+  assert.match(worker, /telegram-detox-shell-v14/);
   for (const asset of ['style.css', 'app.js', 'ui.mjs', 'notifications.mjs']) {
-    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=13`));
+    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=14`));
   }
   assert.match(worker, /url\.pathname\.startsWith\('\/api\/'\)/);
   assert.doesNotMatch(worker, /SHELL[^;]*\/api\//s);
@@ -77,8 +77,8 @@ test('mobile shell declares safe-area and removes the legacy minimum width', asy
   ]);
   assert.match(page, /viewport-fit=cover/);
   assert.match(page, /manifest\.webmanifest/);
-  assert.match(page, /style\.css\?v=13/);
-  assert.match(page, /app\.js\?v=13/);
+  assert.match(page, /style\.css\?v=14/);
+  assert.match(page, /app\.js\?v=14/);
   assert.match(page, /rel="apple-touch-icon" sizes="180x180" href="\/static\/app-icon-180\.png"/);
   assert.match(style, /@media \(max-width:768px\)/);
   assert.match(style, /safe-area-inset-bottom/);
@@ -159,16 +159,17 @@ test('desktop Home is navigation only and mobile back keeps its existing action'
   assert.match(style, /@media \(max-width:768px\)[\s\S]*?\.list-actions \{ display:none \}/);
 });
 
-test('digest history is a compact desktop Library row and route-aware', async () => {
+test('digest history uses the restored desktop newspaper action and no Library row', async () => {
   const [page, app, style] = await Promise.all([
     readFile(new URL('index.html', root), 'utf8'),
     readFile(new URL('app.js', root), 'utf8'),
     readFile(new URL('style.css', root), 'utf8'),
   ]);
-  assert.doesNotMatch(page, /id="digest-history-button"/);
+  assert.match(page, /id="digest-history-button"[^>]*aria-label="История сводок"/);
   assert.doesNotMatch(page, /id="morning-digest"/);
   assert.match(page, /id="digest-history"[^>]*hidden/);
-  assert.match(app, /library-row digest-row[\s\S]*?showDigestHistory/);
+  assert.match(app, /\$\('digest-history-button'\)\.onclick = \(\) => showDigestHistory\(\)/);
+  assert.doesNotMatch(app, /library-row digest-row/);
   assert.match(app, /matchMedia\('\(min-width: 769px\)'\)\.matches/);
   assert.match(app, /api\('\/api\/digest\/history'\)/);
   assert.match(app, /history\.pushState\(null, '', '\/\?view=digests'\)/);
@@ -178,19 +179,27 @@ test('digest history is a compact desktop Library row and route-aware', async ()
   assert.match(style, /@media \(max-width:768px\)[\s\S]*?\.list-actions \{ display:none \}/);
 });
 
-test('foreground lease requires real visibility and quick-write stays available on mobile', async () => {
-  const [page, app] = await Promise.all([
+test('foreground lease stays safe and manual picker is desktop-only without persistent rows', async () => {
+  const [page, app, style] = await Promise.all([
     readFile(new URL('index.html', root), 'utf8'),
     readFile(new URL('app.js', root), 'utf8'),
+    readFile(new URL('style.css', root), 'utf8'),
   ]);
   assert.match(app, /document\.visibilityState !== 'visible'/);
   assert.match(app, /matchMedia\('\(max-width: 768px\)'\)\.matches \|\| document\.hasFocus\(\)/);
   assert.match(app, /setInterval\(refreshForegroundLease, 5000\)/);
   assert.match(app, /addEventListener\('blur'[\s\S]*?releaseForegroundLease/);
   assert.match(app, /visibilitychange[\s\S]*?releaseForegroundLease/);
-  assert.match(page, /id="quick-write"[\s\S]*?id="quick-write-list"/);
-  assert.match(app, /\/api\/quick-write/);
-  assert.doesNotMatch(page, /digest-history-button|morning-digest/);
+  assert.match(page, /id="manual-open-button"[\s\S]*?id="manual-picker"/);
+  assert.match(app, /api\('\/api\/manual-open', \{token: row\.token\}\)/);
+  assert.match(app, /event\.key === 'Escape'[\s\S]*?closeManualPicker/);
+  assert.match(app, /manual-picker[\s\S]*?contains\(event\.target\)[\s\S]*?closeManualPicker/);
+  const closePicker = app.slice(app.indexOf('function closeManualPicker'),
+    app.indexOf('function renderManualPicker'));
+  assert.doesNotMatch(closePicker, /api\(|fetch\(/);
+  assert.doesNotMatch(page, /id="quick-write"|id="quick-write-list"|>Написать</);
+  assert.match(style, /@media \(max-width:768px\)[\s\S]*?\.list-actions \{ display:none \}/);
+  assert.match(style, /@media \(max-width:768px\)[\s\S]*?\.manual-picker \{ display:none!important \}/);
 });
 
 test('desktop and mobile chat back share navigation-only deselection', async () => {
@@ -297,7 +306,8 @@ test('custom emoji remains stable and digest renders only on its page', async ()
   assert.match(app, /stickerObserver\?\.observe\(video\)/);
   assert.match(style, /\.custom-emoji \{/);
   assert.doesNotMatch(page, /id="morning-digest"/);
-  assert.match(app, /latestDigest \? digestTitle\(latestDigest\.period_end\) : 'Сводка'/);
+  assert.match(app, /\$\('digest-history-button'\)\.onclick/);
+  assert.doesNotMatch(app, /library-row digest-row/);
   assert.doesNotMatch(app, /localStorage|dismissDigest/);
   assert.doesNotMatch(app, /☀️ Утро/);
   assert.match(app, /\/?library=|item\.links\?\.\[0\]/);
@@ -311,9 +321,9 @@ test('all frontend shell references use the same cache version', async () => {
     readFile(new URL('sw.js', root), 'utf8'),
   ]);
   for (const source of [page, app, worker]) assert.doesNotMatch(source, /\?v=(?:[1-9])(?:\D|$)|shell-v[1-9](?:\D|$)/);
-  assert.match(worker, /telegram-detox-shell-v13/);
-  assert.match(page, /app\.js\?v=13/);
-  assert.match(app, /ui\.mjs\?v=13/);
+  assert.match(worker, /telegram-detox-shell-v14/);
+  assert.match(page, /app\.js\?v=14/);
+  assert.match(app, /ui\.mjs\?v=14/);
 });
 
 test('aggregate reactions render compactly and message reconciliation replaces only changed nodes', async () => {

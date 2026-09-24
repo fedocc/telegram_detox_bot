@@ -159,8 +159,14 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
     async def library(request):
         return web.json_response({"sources": service.library_json()})
 
-    async def manual_write(request):
-        return web.json_response({"sources": service.manual_write_json()})
+    async def manual_open_status(request):
+        return web.json_response({"quota": service.manual_open_status()})
+
+    async def manual_open_dialogs(request):
+        async with asyncio.timeout(45):
+            return web.json_response(await service.manual_open_dialogs(
+                request.query.get("q", "")
+            ))
 
     async def morning_digest(request):
         from app.inbox.digest import latest_digest
@@ -187,7 +193,7 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         body = await request.json()
         fields = {
             "token", "source_id", "library_enabled", "notifications_muted",
-            "allow_bot_write", "digest_excluded", "manual_write_enabled",
+            "allow_bot_write", "digest_excluded",
         }
         if not isinstance(body, dict) or set(body) - fields:
             raise InboxError("Некорректные настройки библиотеки.")
@@ -214,8 +220,13 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
             return web.json_response(service.open_library(request.match_info["source"]))
 
     async def open_manual_write(request):
+        body = await request.json()
+        if not isinstance(body, dict) or set(body) != {"token"} or not isinstance(
+            body.get("token"), str
+        ):
+            raise InboxError("Сначала выберите Telegram-чат.")
         async with service.action_lock:
-            return web.json_response(service.open_manual_write(request.match_info["source"]))
+            return web.json_response(await service.open_manual_write(body["token"]))
 
     async def manual_write_history(request):
         return web.json_response(await service.manual_write_history(
@@ -503,14 +514,15 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         web.get("/api/conversations", conversations),
         web.get("/api/badge", badge),
         web.get("/api/library", library),
-        web.get("/api/quick-write", manual_write),
+        web.get("/api/manual-open/status", manual_open_status),
+        web.get("/api/manual-open/dialogs", manual_open_dialogs),
+        web.post("/api/manual-open", open_manual_write),
         web.get("/api/digest/latest", morning_digest),
         web.get("/api/digest/history", morning_digest_history),
         web.get("/api/library/dialogs", library_dialogs),
         web.post("/api/library/preferences", library_preferences),
         web.post("/api/library/reorder", library_reorder),
         web.post(r"/api/library/{source:[A-Za-z0-9_-]{1,64}}/open", open_library),
-        web.post(r"/api/quick-write/{source:[A-Za-z0-9_-]{1,64}}/open", open_manual_write),
         web.get(r"/api/quick-write/{source:[A-Za-z0-9_-]{1,64}}/messages", manual_write_history),
         web.get(r"/api/quick-write/{source:[A-Za-z0-9_-]{1,64}}/pins", manual_write_pins),
         web.get(r"/api/quick-write/{source:[A-Za-z0-9_-]{1,64}}/messages/"

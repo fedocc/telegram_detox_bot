@@ -9,7 +9,12 @@ from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
-from app.db.tables import InboxConversation, InboxNotification, LibrarySource
+from app.db.tables import (
+    InboxConversation,
+    InboxNotification,
+    LibrarySource,
+    ManualOpenUsage,
+)
 from app.inbox.library import SAVED_MESSAGES, peer_type_for_marked_id, source_token
 
 ACTIVE_MINUTES = 5
@@ -24,11 +29,7 @@ NOTIFICATION_REASONS = {
 }
 
 VIEW_LEASE_SECONDS = 15
-MAX_MANUAL_WRITE_CHATS = 2
-
-
-class ManualWriteLimitError(ValueError):
-    pass
+MANUAL_OPEN_LIMIT = 2
 
 
 class InboxStore:
@@ -495,7 +496,6 @@ class InboxStore:
         notifications_muted=False,
         allow_bot_write=False,
         digest_excluded=False,
-        manual_write_enabled=False,
         sort_order=None,
     ):
         peer_id = str(int(peer_id))
@@ -503,13 +503,6 @@ class InboxStore:
         with self.factory() as session:
             if session.get_bind().dialect.name == "sqlite":
                 session.execute(text("BEGIN IMMEDIATE"))
-            if manual_write_enabled:
-                selected = session.scalar(select(func.count(LibrarySource.id)).where(
-                    LibrarySource.manual_write_enabled.is_(True),
-                    LibrarySource.peer_id != peer_id,
-                )) or 0
-                if selected >= MAX_MANUAL_WRITE_CHATS:
-                    raise ManualWriteLimitError("manual write limit reached")
             source = session.scalar(select(LibrarySource).where(
                 LibrarySource.peer_type == peer_type,
                 LibrarySource.peer_id == peer_id,
@@ -533,7 +526,7 @@ class InboxStore:
                     notifications_muted=bool(notifications_muted),
                     allow_bot_write=bool(allow_bot_write and is_bot),
                     digest_excluded=bool(digest_excluded),
-                    manual_write_enabled=bool(manual_write_enabled),
+                    manual_write_enabled=False,
                     manual_open_date=None,
                     manual_access_until=0,
                     last_seen_message_id=0,
@@ -552,7 +545,6 @@ class InboxStore:
                 source.notifications_muted = bool(notifications_muted)
                 source.allow_bot_write = bool(allow_bot_write and is_bot)
                 source.digest_excluded = bool(digest_excluded)
-                source.manual_write_enabled = bool(manual_write_enabled)
                 if sort_order is not None:
                     source.sort_order = int(sort_order)
                 source.updated_at = now
@@ -569,7 +561,7 @@ class InboxStore:
     def update_library_source(self, source_id, **values):
         allowed = {
             "library_enabled", "sort_order", "notifications_muted",
-            "allow_bot_write", "digest_excluded", "manual_write_enabled",
+            "allow_bot_write", "digest_excluded",
             "display_title", "access_hash", "is_bot",
         }
         if set(values) - allowed:
@@ -580,12 +572,6 @@ class InboxStore:
             source = session.get(LibrarySource, source_id)
             if source is None:
                 return None
-            if values.get("manual_write_enabled") and not source.manual_write_enabled:
-                selected = session.scalar(select(func.count(LibrarySource.id)).where(
-                    LibrarySource.manual_write_enabled.is_(True)
-                )) or 0
-                if selected >= MAX_MANUAL_WRITE_CHATS:
-                    raise ManualWriteLimitError("manual write limit reached")
             for key, value in values.items():
                 setattr(source, key, value)
             if source.allow_bot_write and not source.is_bot:
@@ -600,13 +586,7 @@ class InboxStore:
             session.commit()
             return source
 
-    def manual_write_sources(self):
-        with self.factory() as session:
-            return list(session.scalars(select(LibrarySource).where(
-                LibrarySource.manual_write_enabled.is_(True)
-            ).order_by(LibrarySource.updated_at, LibrarySource.id)))
-
-    def open_manual_write(self, source_id, timezone):
+    def manual_open_status(self, timezone):
         now = self.clock()
         zone = ZoneInfo(timezone)
         local_now = datetime.fromtimestamp(now, zone)
@@ -614,25 +594,46 @@ class InboxStore:
         tomorrow = datetime.combine(today + timedelta(days=1), datetime.min.time(), zone)
         retry_after = max(1, int(tomorrow.timestamp() - now))
         with self.factory() as session:
+            used = session.scalar(select(func.count(ManualOpenUsage.id)).where(
+                ManualOpenUsage.local_date == today,
+            )) or 0
+        return self._manual_status(used, retry_after)
+
+    @staticmethod
+    def _manual_status(used, retry_after):
+        return {"used": min(int(used), MANUAL_OPEN_LIMIT),
+                "remaining": max(0, MANUAL_OPEN_LIMIT - int(used)),
+                "limit": MANUAL_OPEN_LIMIT, "retry_after": retry_after}
+
+    def consume_manual_open(self, source_id, timezone):
+        now = self.clock()
+        zone = ZoneInfo(timezone)
+        today = datetime.fromtimestamp(now, zone).date()
+        tomorrow = datetime.combine(today + timedelta(days=1), datetime.min.time(), zone)
+        retry_after = max(1, int(tomorrow.timestamp() - now))
+        with self.factory() as session:
             if session.get_bind().dialect.name == "sqlite":
                 session.execute(text("BEGIN IMMEDIATE"))
             source = session.get(LibrarySource, source_id)
-            if source is None or not source.manual_write_enabled:
-                return None, None
-            if source.manual_open_date == today:
-                if float(source.manual_access_until or 0) <= now:
-                    return source, retry_after
-            else:
-                source.manual_open_date = today
-                source.manual_access_until = now + LIFETIME
-                source.updated_at = now
-                session.commit()
-            return source, 0
+            if source is None:
+                return None, self._manual_status(used=0, retry_after=retry_after), False
+            used = session.scalar(select(func.count(ManualOpenUsage.id)).where(
+                ManualOpenUsage.local_date == today,
+            )) or 0
+            if used >= MANUAL_OPEN_LIMIT:
+                return source, self._manual_status(used, retry_after), False
+            session.add(ManualOpenUsage(
+                local_date=today, source_id=source.id, opened_at=now,
+            ))
+            source.manual_access_until = now + LIFETIME
+            source.updated_at = now
+            session.commit()
+            return source, self._manual_status(used + 1, retry_after), True
 
     def manual_write_source(self, source_id, *, require_access=False):
         with self.factory() as session:
             source = session.get(LibrarySource, source_id)
-            if source is None or not source.manual_write_enabled:
+            if source is None:
                 return None
             if require_access and float(source.manual_access_until or 0) <= self.clock():
                 return None
@@ -641,7 +642,7 @@ class InboxStore:
     def extend_manual_write(self, source_id):
         with self.factory() as session:
             source = session.get(LibrarySource, source_id)
-            if source is None or not source.manual_write_enabled:
+            if source is None:
                 return None
             source.manual_access_until = self.clock() + LIFETIME
             source.updated_at = self.clock()

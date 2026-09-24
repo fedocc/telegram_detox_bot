@@ -351,6 +351,12 @@ def test_frozen_inbox_schema_migrates_losslessly_and_idempotently(
             "PRAGMA index_list(library_sources)"
         )}
         assert "ix_library_sources_manual_write_enabled" in indexes
+        assert {row[1] for row in connection.execute(
+            "PRAGMA table_info(manual_open_usages)"
+        )} == {"id", "local_date", "source_id", "opened_at"}
+        assert connection.execute(
+            "SELECT COUNT(*) FROM manual_open_usages"
+        ).fetchone()[0] == 0
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     finally:
         connection.close()
