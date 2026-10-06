@@ -372,6 +372,9 @@ main {
   display:block;
   color:var(--primary);
   font-size:11px}
+.quote[role="button"] { cursor:pointer }
+.quote[role="button"]:hover { background:#ffffff09 }
+.quote[role="button"]:focus-visible { outline-offset:0 }
 .photo-button {
   display:block;
   padding:0;

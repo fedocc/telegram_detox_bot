@@ -58,9 +58,9 @@ test('native Mac notifier bundle derives its identity icon from the canonical De
 
 test('service worker explicitly bypasses every API request', async () => {
   const worker = await readFile(new URL('sw.js', root), 'utf8');
-  assert.match(worker, /telegram-detox-shell-v15/);
+  assert.match(worker, /telegram-detox-shell-v16/);
   for (const asset of ['style.css', 'app.js', 'ui.mjs', 'notifications.mjs']) {
-    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=15`));
+    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=16`));
   }
   assert.match(worker, /url\.pathname\.startsWith\('\/api\/'\)/);
   assert.doesNotMatch(worker, /SHELL[^;]*\/api\//s);
@@ -77,8 +77,8 @@ test('mobile shell declares safe-area and removes the legacy minimum width', asy
   ]);
   assert.match(page, /viewport-fit=cover/);
   assert.match(page, /manifest\.webmanifest/);
-  assert.match(page, /style\.css\?v=15/);
-  assert.match(page, /app\.js\?v=15/);
+  assert.match(page, /style\.css\?v=16/);
+  assert.match(page, /app\.js\?v=16/);
   assert.match(page, /rel="apple-touch-icon" sizes="180x180" href="\/static\/app-icon-180\.png"/);
   assert.match(style, /@media \(max-width:768px\)/);
   assert.match(style, /safe-area-inset-bottom/);
@@ -326,9 +326,9 @@ test('all frontend shell references use the same cache version', async () => {
     readFile(new URL('sw.js', root), 'utf8'),
   ]);
   for (const source of [page, app, worker]) assert.doesNotMatch(source, /\?v=(?:[1-9])(?:\D|$)|shell-v[1-9](?:\D|$)/);
-  assert.match(worker, /telegram-detox-shell-v15/);
-  assert.match(page, /app\.js\?v=15/);
-  assert.match(app, /ui\.mjs\?v=15/);
+  assert.match(worker, /telegram-detox-shell-v16/);
+  assert.match(page, /app\.js\?v=16/);
+  assert.match(app, /ui\.mjs\?v=16/);
 });
 
 test('aggregate reactions render compactly and message reconciliation replaces only changed nodes', async () => {

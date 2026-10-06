@@ -88,6 +88,23 @@ class PeerRefreshUnavailable(Exception):
     """A transient Telegram failure, distinct from a completed no-match scan."""
 
 
+def reply_preview_text(message) -> str:
+    text = getattr(message, "raw_text", None)
+    if text:
+        return text[:500]
+    system = service_message_text(message)
+    if system:
+        return system[:500]
+    for kind, label in (
+        ("sticker", "Стикер"), ("photo", "Фото"), ("voice", "Голосовое"),
+        ("audio", "Аудиофайл"), ("video_note", "Видеосообщение"), ("video", "Видео"),
+    ):
+        if getattr(message, kind, None):
+            return label
+    file = getattr(message, "file", None)
+    return (getattr(file, "name", None) or "[Вложение]")[:500]
+
+
 def _service_person(entity) -> str:
     if entity is None:
         return ""
@@ -1490,12 +1507,18 @@ class InboxService:
             parent = by_id.get(reply_id)
             if parent is None:
                 parent = await message.get_reply_message()
-            if parent and await self.belongs(parent, row):
-                reply_text = (parent.raw_text or "[Вложение]")[:500]
-                result["reply"] = {"sender": display_name(parent.sender) if parent.sender else "",
+            if parent is None or isinstance(parent, tl_types.MessageEmpty):
+                result["reply"] = {"id": None, "sender": "",
+                                   "text": "Сообщение недоступно", "segments": []}
+            elif await self.belongs(parent, row):
+                reply_text = reply_preview_text(parent)
+                parent_sender = getattr(parent, "sender", None)
+                result["reply"] = {"id": parent.id,
+                                   "sender": display_name(parent_sender) if parent_sender else "",
                                    "text": reply_text,
                                    "segments": safe_link_segments(
-                                       reply_text, getattr(parent, "entities", None))}
+                                       reply_text, getattr(parent, "entities", None)
+                                       if getattr(parent, "raw_text", None) else None)}
         if file:
             kind = "file"
             sticker_format = None
