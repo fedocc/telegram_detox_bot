@@ -167,6 +167,23 @@ export function retainFocusedMessage(messages, focusedId, focusedMessage) {
   return mergeMessagePages([focusedMessage], page);
 }
 
+export function bindReplyNavigation(quote, replyId, openMessage) {
+  const id = Number(replyId);
+  if (!Number.isSafeInteger(id) || id <= 0) return;
+  quote.setAttribute('role', 'button');
+  quote.setAttribute('aria-label', 'Открыть исходное сообщение');
+  quote.tabIndex = 0;
+  quote.title = 'Открыть исходное сообщение';
+  quote.onclick = event => {
+    if (!event.target.closest?.('a')) return openMessage(id);
+  };
+  quote.onkeydown = event => {
+    if (event.target !== quote || !['Enter', ' '].includes(event.key)) return;
+    event.preventDefault();
+    return openMessage(id);
+  };
+}
+
 export function openedConversationIds(result) {
   if (!Array.isArray(result?.opened_conversation_ids)) return [];
   return [...new Set(result.opened_conversation_ids.filter(

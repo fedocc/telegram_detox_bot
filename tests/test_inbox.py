@@ -18,6 +18,7 @@ from telethon.errors import ChatWriteForbiddenError
 from telethon.tl.types import (
     DocumentAttributeCustomEmoji,
     InputStickerSetEmpty,
+    MessageEmpty,
     MessageEntityCustomEmoji,
     MessageEntityTextUrl,
     MessageReactions,
@@ -515,6 +516,98 @@ async def test_closed_expired_ignored_cannot_send(service):
     with pytest.raises(InboxError):
         await service.send(row.id, str(uuid4()), "reply")
     service.client.send_message.assert_not_called()
+
+
+@pytest.mark.parametrize("kind,label", [
+    ("photo", "Фото"), ("voice", "Голосовое"), ("audio", "Аудиофайл"),
+    ("video_note", "Видеосообщение"), ("video", "Видео"), ("sticker", "Стикер"),
+    ("file", "assignment.pdf"),
+])
+async def test_reply_preview_identifies_media_and_exposes_original_id(service, kind, label):
+    row = activate(service)
+    parent = Message(7, "", file=SimpleNamespace(name="assignment.pdf"))
+    if kind != "file":
+        setattr(parent, kind, True)
+    if kind == "video_note":
+        parent.video = True
+    message = Message(100, "answer", reply_to_msg_id=7, parent=parent)
+    serialized = await service.serialize(message, row, {})
+    assert serialized["reply"]["id"] == 7
+    assert serialized["reply"]["text"] == label
+    assert serialized["reply"]["sender"] == "Никита"
+    assert service.client.downloads == 0
+
+
+async def test_reply_preserves_caption_and_safe_links_from_loaded_parent(service):
+    row = activate(service)
+    parent = Message(7, "Задание", photo=True, file=SimpleNamespace(name=None),
+                     entities=[MessageEntityTextUrl(0, 7, "https://example.org/task")])
+    message = Message(100, "answer", reply_to_msg_id=7)
+    message.get_reply_message = AsyncMock(side_effect=AssertionError("Already loaded"))
+    result = await service.serialize(message, row, {7: parent})
+    assert result["reply"]["id"] == 7
+    assert result["reply"]["text"] == "Задание"
+    assert result["reply"]["segments"] == [{"text": "Задание",
+                                            "url": "https://example.org/task"}]
+    message.get_reply_message.assert_not_awaited()
+
+
+@pytest.mark.parametrize("parent", [None, MessageEmpty(id=7, peer_id=PeerChannel(123))])
+async def test_unavailable_reply_keeps_answer_visible(service, parent):
+    row = activate(service)
+    message = Message(100, "answer", reply_to_msg_id=7, parent=parent)
+    result = await service.serialize(message, row, {})
+    assert result["text"] == "answer"
+    assert result["reply"] == {"id": None, "sender": "",
+                               "text": "Сообщение недоступно", "segments": []}
+
+
+@pytest.mark.parametrize("scope", ["inbox", "library"])
+async def test_reply_original_outside_history_opens_with_downloadable_media(service, scope):
+    row = activate(service, trigger=200)
+    parent = Message(7, "", photo=True, file=SimpleNamespace(
+        name=None, size=10, mime_type="image/jpeg", duration=0))
+    answer = Message(200, "answer", reply_to_msg_id=7, parent=parent)
+    service.client.messages = [parent, *[Message(mid) for mid in range(100, 200)], answer]
+    if scope == "inbox":
+        path = f"/api/conversations/{row.id}"
+    else:
+        source = service.store.upsert_library_source(
+            source_id="a" * 32, peer_type="channel", peer_id="-100123",
+            display_title="Team", library_enabled=True, access_hash=123, is_bot=False,
+        )
+        path = f"/api/library/{source.id}"
+    async with TestClient(TestServer(create_app(service)),
+                          headers={"Host": "127.0.0.1:8787"}) as client:
+        history_response = await client.get(f"{path}/messages")
+        assert history_response.status == 200
+        history = (await history_response.json())["messages"]
+        assert 7 not in [message["id"] for message in history]
+        reply = next(message for message in history if message["id"] == 200)["reply"]
+        assert reply["id"] == 7 and reply["text"] == "Фото"
+        original_response = await client.get(f"{path}/messages/{reply['id']}")
+        assert original_response.status == 200
+        original = (await original_response.json())["message"]
+        assert original["id"] == 7
+        assert original["media"]["url"] == f"{path}/media/7"
+        assert service.client.downloads == 0
+        media = await client.get(original["media"]["url"])
+        assert media.status == 200 and await media.read() == b"fake media"
+        assert service.client.downloads == 1
+    service.client.send_message.assert_not_awaited()
+    service.client.send_file.assert_not_awaited()
+
+
+async def test_reply_navigation_cannot_fetch_another_topic(service):
+    row = activate(service, thread=42, forum=True)
+    other = Message(7, "other topic", thread=77)
+    message = Message(100, "answer", thread=42, reply_to_msg_id=7, parent=other)
+    service.client.messages = [message, other]
+    result = await service.serialize(message, row, {})
+    assert result["reply"] is None
+    with pytest.raises(InboxError) as failure:
+        await service.conversation_message(row.id, 7)
+    assert failure.value.status == 404
 
 
 async def test_topic_history_reply_and_media_isolation(service):

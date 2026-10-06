@@ -75,8 +75,10 @@ async def main():
                     "sender":"Никита Тарасов" if index==3 else "Алексей Романов",
                     "timestamp":datetime.now(UTC).replace(hour=11, minute=19+index).isoformat(),
                     "mention":index==3, "media":media,
-                    "reply":{"sender":"Алексей Романов", "text":
-                        "Подготовил ветку fix/auth-signature для стейджа"} if index==1 else None})
+                    "reply": {"id": 1 if index == 3 else 4,
+                              "sender": "Алексей Романов",
+                              "text": "Пулл-реквест готов к деплою" if index == 3 else "Фото"}
+                    if index in {3, 6} else None})
 
             async def history(key):
                 from app.inbox.service import conversation_json

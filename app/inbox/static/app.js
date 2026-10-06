@@ -1,8 +1,8 @@
 'use strict';
 
-import {createPlaybackController} from './playback.mjs?v=15';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=15';
-import {createPushController} from './push.mjs?v=15';
+import {createPlaybackController} from './playback.mjs?v=16';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=16';
+import {createPushController} from './push.mjs?v=16';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
@@ -13,8 +13,8 @@ import {
   hasFileTransfer, isDigestHistoryRoute, isNearBottom,
   manualOpenButtonVisible,
   localImageClipboardUri, maintainMessageViewport, reactionEmojiPresentation,
-  settleScrollBottom,
-} from './ui.mjs?v=15';
+  settleScrollBottom, bindReplyNavigation,
+} from './ui.mjs?v=16';
 
 const playback = createPlaybackController(document);
 const $ = id => document.getElementById(id);
@@ -38,6 +38,7 @@ let libraryLoaded = false, routePending = true, routeWaitStarted = Date.now(), p
 let searchGeneration = 0, searchTimer = null;
 let searchState = {query: '', results: [], next: null, loading: false};
 let managementDialogs = [], focusedMessageId = null;
+let messageFocusGeneration = 0;
 let libraryManagementEnabled = false;
 let pushController = null;
 let auxiliaryPanel = 'none';
@@ -657,6 +658,7 @@ function messageNode(message) {
   if (message.reply) {
     const quote = node('div', 'quote'), text = node('span');
     appendSegments(text, message.reply.segments, message.reply.text);
+    bindReplyNavigation(quote, message.reply.id, focusMessage);
     quote.append(node('strong', '', message.reply.sender), text); bubble.append(quote);
   }
   if (message.media) bubble.append(attachment(message.media));
@@ -918,16 +920,23 @@ async function loadPins(mode, key) {
 
 async function focusMessage(messageId, {replaceUrl = false} = {}) {
   const numeric = Number(messageId);
-  if (!Number.isSafeInteger(numeric) || numeric <= 0 || !selected) return;
-  if (focusLoadedMessage(numeric, {replaceUrl})) return;
+  const mode = selectedMode, key = selected, selection = choosing;
+  const scope = scopePath(mode, key), request = ++messageFocusGeneration;
+  if (!Number.isSafeInteger(numeric) || numeric <= 0 || !key || !scope) return;
+  const current = () => request === messageFocusGeneration && selection === choosing
+    && selected === key && selectedMode === mode;
+  if (focusLoadedMessage(numeric, {replaceUrl})) {
+    showError('load-error', ''); return;
+  }
   try {
-    const result = await api(`${currentScope()}/messages/${numeric}`);
+    const result = await api(`${scope}/messages/${numeric}`);
+    if (!current()) return;
     const messages = result.messages || (result.message ? [result.message] : []);
     if (!messages.some(value => Number(value.id) === numeric)) throw new Error('Сообщение недоступно.');
-    const key = selectedMode === 'library' ? `library:${selected}` : selected;
-    renderMessages(messages, key, {merge: true});
+    renderMessages(messages, mode === 'library' ? `library:${key}` : key, {merge: true});
     focusLoadedMessage(numeric, {replaceUrl});
-  } catch (error) { showError('load-error', error.message); }
+    showError('load-error', '');
+  } catch (error) { if (current()) showError('load-error', error.message); }
 }
 
 function renderSearchResults() {
