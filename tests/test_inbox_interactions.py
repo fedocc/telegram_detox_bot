@@ -73,6 +73,9 @@ class FeatureTelegram(FakeTelegram):
         return await super().__call__(request)
 
     def iter_download(self, media, *, offset, request_size, file_size):
+        assert 4096 <= request_size <= 512 * 1024
+        assert 1048576 % request_size == 0
+        assert offset % request_size == 0
         stream = Chunks(self.body, offset)
         self.streams.append(stream)
         return stream
@@ -347,3 +350,31 @@ async def test_digest_can_show_deselected_source_without_reenabling_its_library(
     with pytest.raises(InboxError):
         await service.library_history("dtest")
     assert not service.store.active()
+
+
+@pytest.mark.parametrize(("size", "span"), [
+    (33402, None),
+    (135432, None),
+    (33402, "bytes=0-"),
+    (1600000, "bytes=1048000-1081000"),
+    (1600000, "bytes=999999-1500000"),
+])
+async def test_streaming_uses_telegram_legal_parts_for_voice_and_unaligned_seeks(
+    feature_service, size, span,
+):
+    service = feature_service
+    row = activate(service, peer="42")
+    service.client.body = (bytes(range(256)) * ((size + 255) // 256))[:size]
+    service.client.messages[0].file = SimpleNamespace(
+        size=size, mime_type="audio/ogg", name="voice.ogg")
+    service.client.messages[0].media = SimpleNamespace()
+    async with TestClient(TestServer(create_app(service)),
+                          headers={"Host": "127.0.0.1:8787"}) as client:
+        response = await client.get(f"/api/conversations/{row.id}/media/100?stream=1",
+                                    headers={"Range": span} if span else {})
+        assert response.status == (206 if span else 200), await response.text()
+        start, stop = (0, size)
+        if span:
+            left, right = span.removeprefix("bytes=").split("-")
+            start, stop = int(left), min(int(right) + 1, size) if right else size
+        assert await response.read() == service.client.body[start:stop]

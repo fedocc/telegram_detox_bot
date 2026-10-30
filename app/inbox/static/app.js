@@ -1,8 +1,8 @@
 'use strict';
 
-import {createPlaybackController} from './playback.mjs?v=17';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=17';
-import {createPushController} from './push.mjs?v=17';
+import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=18';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=18';
+import {createPushController} from './push.mjs?v=18';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
@@ -14,9 +14,9 @@ import {
   manualOpenButtonVisible,
   localImageClipboardUri, maintainMessageViewport, reactionEmojiPresentation,
   settleScrollBottom, bindReplyNavigation,
-} from './ui.mjs?v=17';
+} from './ui.mjs?v=18';
 
-import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=17';
+import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=18';
 
 const playback = createPlaybackController(document);
 const $ = id => document.getElementById(id);
@@ -545,12 +545,22 @@ function voice(media) {
   const time = node('div', 'voice-time', duration(media.duration));
   progress.type = 'range'; progress.min = 0; progress.max = media.duration || 1;
   progress.value = 0; progress.step = .1; progress.setAttribute('aria-label', 'Позиция воспроизведения');
+  let attempt = 0;
   play.onclick = async () => {
-    if (!audio.paused) audio.pause();
-    else try { await audio.play(); } catch (_) { time.textContent = 'Аудио недоступно в этом браузере'; }
+    if (!audio.paused) { audio.pause(); return; }
+    const current = ++attempt;
+    if (audio.error) audio.load();
+    time.textContent = 'Загружаю…';
+    try { await audio.play(); } catch (error) {
+      const message = await playbackFailureMessage(audio, error);
+      if (message && current === attempt && audio.isConnected) time.textContent = message;
+    }
   };
   audio.onplay = () => { play.textContent = 'Ⅱ'; play.setAttribute('aria-label', 'Пауза'); };
-  audio.onpause = () => { play.textContent = '▷'; play.setAttribute('aria-label', 'Воспроизвести голосовое'); };
+  audio.onpause = () => {
+    play.textContent = '▷'; play.setAttribute('aria-label', 'Воспроизвести голосовое');
+    time.textContent = `${duration(audio.currentTime)} / ${duration(media.duration)}`;
+  };
   audio.ontimeupdate = () => {
     progress.max = audio.duration || media.duration || 1; progress.value = audio.currentTime;
     time.textContent = `${duration(audio.currentTime)} / ${duration(audio.duration || media.duration)}`;
@@ -569,7 +579,13 @@ function videoNote(media) {
   toggle.type = 'button'; toggle.setAttribute('aria-label', 'Воспроизвести видеосообщение');
   toggle.onclick = async () => {
     if (!video.paused) video.pause();
-    else try { await video.play(); } catch (_) { time.textContent = 'Видео недоступно в этом браузере'; }
+    else {
+      if (video.error) video.load();
+      try { await video.play(); } catch (error) {
+        const message = await playbackFailureMessage(video, error);
+        if (message && video.isConnected) time.textContent = message;
+      }
+    }
   };
   video.onplay = () => { circle.classList.add('playing'); toggle.textContent = 'Ⅱ'; };
   video.onpause = () => { circle.classList.remove('playing'); toggle.textContent = '▷'; };
@@ -632,6 +648,15 @@ function attachment(media) {
     video.controls = true; video.playsInline = true; video.preload = 'none'; video.src = media.url;
     video.setAttribute('aria-label', media.name); wrap.append(video);
   } else if (media.kind === 'voice') wrap.append(voice(media));
+  if (['audio', 'video'].includes(media.kind)) {
+    const player = wrap.querySelector('audio,video'), status = node('div', 'media-note');
+    status.setAttribute('role', 'status'); wrap.append(status);
+    player.addEventListener('error', async () => {
+      const message = await playbackFailureMessage(player, player.error);
+      if (message && player.isConnected) status.textContent = message;
+    });
+    player.addEventListener('playing', () => { status.textContent = ''; });
+  }
   if (media.kind === 'file') {
     const link = node('a', 'file'); link.href = media.url; link.download = media.name;
     const label = node('span');

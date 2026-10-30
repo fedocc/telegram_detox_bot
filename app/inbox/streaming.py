@@ -59,11 +59,14 @@ async def stream_media(request, service, scope, key, message_id):
 
     async with service.stream_slots:
         revalidate()
-        offset = start - start % 4096
+        # Telegram requires a 4 KiB multiple that divides 1 MiB, and a request
+        # must stay inside one 1 MiB block. Align to a power-of-two part size.
+        request_size = min(512 * 1024, 1 << (max(4096, stop - start) - 1).bit_length())
+        offset = start - start % request_size
         skip, remaining = start - offset, stop - start
         stream = service.client.iter_download(
             message.media, offset=offset,
-            request_size=min(512 * 1024, max(4096, ((stop - offset + 4095) // 4096) * 4096)),
+            request_size=request_size,
             file_size=size,
         )
         try:
