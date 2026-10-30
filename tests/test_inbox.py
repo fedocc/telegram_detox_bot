@@ -2491,7 +2491,7 @@ async def test_digest_source_scope_filters_before_fetch_and_ignores_library_memb
     await run_digest(service, service.store.factory, settings, now, provider)
     assert "PRIVATE HUMAN MARKER" not in str(provider.calls)
     link = latest_digest(service.store.factory)["items"][0]["links"][0]
-    assert link.startswith("/?library=") and "-100" not in link
+    assert link.startswith("/?digest_source=") and "-100" not in link
 
 
 async def test_digest_permanent_source_failure_isolated_and_library_soft_disabled(
@@ -2600,3 +2600,29 @@ async def test_digest_503_does_not_disable_library_source(settings, tmp_path):
         await service.digest_rows(now - timedelta(days=1), now)
     assert failure.value.status == 503
     assert service.store.library_source(source.id, enabled_only=False).library_enabled is True
+
+
+async def test_reply_uses_selected_quote_and_its_own_entities(service):
+    row = activate(service)
+    parent = Message(7, "Полный текст с другой ссылкой", entities=[
+        MessageEntityTextUrl(0, 6, "https://example.org/wrong")])
+    message = Message(100, "ответ", reply_to_msg_id=7, reply_to=SimpleNamespace(
+        quote_text="фрагмент", quote_entities=[
+            MessageEntityTextUrl(0, 8, "https://example.org/quote")]))
+    result = await service.serialize(message, row, {7: parent})
+    assert result["reply"]["text"] == "фрагмент"
+    assert result["reply"]["segments"] == [
+        {"text": "фрагмент", "url": "https://example.org/quote"}]
+    assert result["reply"]["id"] == 7
+
+
+@pytest.mark.parametrize("parent", [None, MessageEmpty(id=7, peer_id=PeerChannel(123))])
+async def test_selected_quote_survives_unavailable_original(service, parent):
+    row = activate(service)
+    message = Message(100, "ответ", reply_to_msg_id=7, parent=parent,
+                      reply_to=SimpleNamespace(quote_text="выделенный фрагмент"))
+    result = await service.serialize(message, row, {})
+    assert result["reply"] == {
+        "id": None, "sender": "", "text": "выделенный фрагмент",
+        "segments": [],
+    }

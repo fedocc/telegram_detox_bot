@@ -44,6 +44,8 @@ from telethon.tl.types import (
 )
 
 from app.db.tables import InboxSend
+from app.inbox.errors import InboxError
+from app.inbox.interactions import InteractionMixin
 from app.inbox.library import SAVED_MESSAGES, LibraryChat, peer_type_for_marked_id
 from app.inbox.push import WebPushService
 from app.inbox.store import InboxStore
@@ -75,13 +77,6 @@ RESOLUTION_ERRORS = (ValueError, *PEER_ERRORS)
 logger = logging.getLogger(__name__)
 DIGEST_DIALOG_CONCURRENCY = 4
 DIGEST_PAGE_SIZE = 100
-
-
-class InboxError(Exception):
-    def __init__(self, message, status=400, *, retry_after=None):
-        super().__init__(message)
-        self.status = status
-        self.retry_after = retry_after
 
 
 class PeerRefreshUnavailable(Exception):
@@ -317,7 +312,7 @@ def safe_link_segments(text, entities):
     return rich_text_segments(text, entities)
 
 
-class InboxService:
+class InboxService(InteractionMixin):
     def __init__(self, client, factory, ignored, cache_dir, self_id, clock=time.time,
                  library=None, upload_max_mb=100, upload_concurrency=2,
                  upload_stale_hours=24, web_push_private_key="", web_push_subject="",
@@ -334,6 +329,7 @@ class InboxService:
         self.history_lock = asyncio.Lock()
         self.action_lock = asyncio.Lock()
         self.media_lock = asyncio.Lock()
+        self.stream_slots = asyncio.Semaphore(2)
         self.library = tuple(library or (SAVED_MESSAGES,))
         self.library_by_id = {row.id: row for row in self.library}
         self.store.seed_library(self.library)
@@ -760,6 +756,8 @@ class InboxService:
                 output.append({"type": "paid", "emoji": "⭐", "count": count})
             else:
                 output.append({"type": "unknown", "emoji": "◉", "count": count})
+            if getattr(result, "chosen_order", None) is not None:
+                output[-1]["chosen"] = True
         return output
 
     async def library_history(self, source_id, before=None):
@@ -948,6 +946,9 @@ class InboxService:
                         )
                         rows.append({
                             "source_id": source.id,
+                            "source_peer": {"peer_type": source.peer_type,
+                                "peer_id": source.peer_id, "access_hash": source.access_hash,
+                                "display_title": source.display_title},
                             "source_title": source.display_title,
                             "message_id": int(message.id),
                             "timestamp": date.isoformat(),
@@ -1504,21 +1505,28 @@ class InboxService:
         }
         reply_id = getattr(message, "reply_to_msg_id", None)
         if reply_id:
+            header = getattr(message, "reply_to", None)
+            quote = getattr(header, "quote_text", None)
+            quote_entities = getattr(header, "quote_entities", None)
             parent = by_id.get(reply_id)
             if parent is None:
                 parent = await message.get_reply_message()
             if parent is None or isinstance(parent, tl_types.MessageEmpty):
                 result["reply"] = {"id": None, "sender": "",
-                                   "text": "Сообщение недоступно", "segments": []}
+                                   "text": quote or "Сообщение недоступно",
+                                   "segments": safe_link_segments(quote, quote_entities)
+                                   if quote else []}
             elif await self.belongs(parent, row):
-                reply_text = reply_preview_text(parent)
+                reply_text = quote if quote else reply_preview_text(parent)
+                reply_entities = quote_entities if quote else (
+                    getattr(parent, "entities", None)
+                    if getattr(parent, "raw_text", None) else None)
                 parent_sender = getattr(parent, "sender", None)
                 result["reply"] = {"id": parent.id,
                                    "sender": display_name(parent_sender) if parent_sender else "",
                                    "text": reply_text,
                                    "segments": safe_link_segments(
-                                       reply_text, getattr(parent, "entities", None)
-                                       if getattr(parent, "raw_text", None) else None)}
+                                       reply_text, reply_entities)}
         if file:
             kind = "file"
             sticker_format = None
@@ -1669,7 +1677,8 @@ class InboxService:
             session.commit()
 
     async def send(self, key, request_id, text, image=None, *, file_path=None,
-                   filename=None, mime_type=None, reply_to=None):
+                   filename=None, mime_type=None, reply_to=None,
+                   quote_text=None, quote_offset=None):
         async with self.action_lock:
             previous = await self._claim_send(request_id, key, insert=False)
             if previous:
@@ -1703,9 +1712,15 @@ class InboxService:
             await self._claim_send(request_id, key)
 
             async def send_to_conversation(peer):
-                target_reply = await self.validate_reply(peer, reply_to, row)
+                target_reply = await self.quoted_reply(
+                    peer, reply_to, quote_text, quote_offset, row)
                 default_reply = row.thread_id or None
                 async with asyncio.timeout(180):
+                    if isinstance(target_reply, tl_types.InputReplyToMessage):
+                        return await self.send_quote(peer, text, target_reply,
+                            attachment=photo or attachment,
+                            photo=photo is not None or not force_document,
+                            mime_type=mime_type, filename=filename)
                     if photo is None and file_path is None:
                         return await self.client.send_message(
                             peer, text, reply_to=target_reply or default_reply,
@@ -1777,7 +1792,7 @@ class InboxService:
         return await asyncio.to_thread(normalize_image, raw), False
 
     async def send_saved(self, request_id, text, *, file_path=None, filename=None,
-                         mime_type=None):
+                         mime_type=None, reply_to=None, quote_text=None, quote_offset=None):
         scope = "library:saved"
         async with self.action_lock:
             previous = await self._claim_send(request_id, scope, insert=False)
@@ -1799,16 +1814,22 @@ class InboxService:
             )))
             schedule = timedelta(seconds=delay)
             attachment, force_document = await self._attachment(file_path, mime_type)
+            target_reply = await self.quoted_reply("me", reply_to, quote_text, quote_offset)
             await self._claim_send(request_id, scope)
             try:
                 async with asyncio.timeout(180):
-                    if file_path is None:
+                    if isinstance(target_reply, tl_types.InputReplyToMessage):
+                        sent = await self.send_quote("me", text, target_reply,
+                            attachment=attachment, photo=not force_document,
+                            mime_type=mime_type, filename=filename, schedule=schedule)
+                    elif file_path is None:
                         sent = await self.client.send_message(
                             "me", text, parse_mode=None, link_preview=False, schedule=schedule,
+                            reply_to=target_reply,
                         )
                     else:
                         sent = await self.client.send_file(
-                            "me", attachment, caption=text, parse_mode=None,
+                            "me", attachment, caption=text, parse_mode=None, reply_to=target_reply,
                             force_document=force_document, mime_type=mime_type,
                             attributes=(self._file_attributes(filename)
                                         if force_document else None),
@@ -1837,13 +1858,15 @@ class InboxService:
     async def send_library(
         self, source_id, request_id, text, image=None, *, file_path=None,
         filename=None, mime_type=None, reply_to=None, manual=False,
+        quote_text=None, quote_offset=None,
     ):
         if source_id == SAVED_MESSAGES.id:
             if image is not None:
                 raise InboxError("Для Избранного используйте загрузку файла.")
             return await self.send_saved(
                 request_id, text, file_path=file_path, filename=filename,
-                mime_type=mime_type,
+                mime_type=mime_type, reply_to=reply_to,
+                quote_text=quote_text, quote_offset=quote_offset,
             )
         async with self.action_lock:
             # Reload after acquiring the shared permission/send boundary. A
@@ -1872,8 +1895,13 @@ class InboxService:
             await self._claim_send(request_id, scope)
 
             async def send_to_bot(peer):
-                target_reply = await self.validate_reply(peer, reply_to)
+                target_reply = await self.quoted_reply(peer, reply_to, quote_text, quote_offset)
                 async with asyncio.timeout(180):
+                    if isinstance(target_reply, tl_types.InputReplyToMessage):
+                        return await self.send_quote(peer, text, target_reply,
+                            attachment=photo or attachment,
+                            photo=photo is not None or not force_document,
+                            mime_type=mime_type, filename=filename)
                     if photo is None and file_path is None:
                         return await self.client.send_message(
                             peer, text, reply_to=target_reply, parse_mode=None,

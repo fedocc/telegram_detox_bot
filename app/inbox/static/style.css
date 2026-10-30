@@ -788,3 +788,49 @@ dialog img {
   #search-form { gap:4px }
   #search-form button { padding:5px 7px }
 }
+
+/* Message actions follow Telegram's emoji strip; cards use the existing palette. */
+.message-actions { position:fixed; z-index:80; width:min(340px,calc(100vw - 16px)); padding:6px; background:var(--panel); border:1px solid var(--border); border-radius:14px; box-shadow:0 12px 40px #0008 }
+.reaction-picker { display:flex; flex-wrap:wrap; padding:3px; gap:1px; border-bottom:1px solid var(--border); margin-bottom:4px }
+.reaction-picker button { font-size:25px; width:44px; height:44px; border-radius:50%; line-height:1 }
+.reaction-picker button:hover { background:var(--outgoing); transform:translateY(-2px) }
+.message-menu-item { display:block; width:100%; min-height:40px; text-align:left; padding:8px 12px; border-radius:7px }
+.message-actions-button { float:right; opacity:0; font-size:20px; min-width:32px; min-height:28px; border-radius:6px }
+.bubble:hover .message-actions-button,.bubble:focus-within .message-actions-button { opacity:1 }
+button.sender { padding:0; display:block; text-align:left; border-radius:3px }
+#chat-title { cursor:pointer }
+.details-dialog { color:var(--text); background:var(--canvas); border:1px solid var(--border); border-radius:16px; width:min(480px,calc(100vw - 24px)); max-height:85dvh; padding:0; overscroll-behavior:contain }
+.details-dialog::backdrop { background:#0009 }
+.details-dialog header { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px 20px; border-bottom:1px solid var(--border) }
+.details-dialog h2 { font-size:17px; margin:0; overflow-wrap:anywhere }
+.details-dialog header button { font-size:25px; width:44px; height:44px; border-radius:50%; flex:none }
+.details-dialog .management-search { padding:14px 20px 6px }
+.details-dialog input { width:100%; min-height:40px; color:var(--text); background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:8px }
+.details-note,#contacts-status { color:var(--muted); font-size:12px; padding:12px 20px }
+#profile-content { padding:20px; overflow-wrap:anywhere }
+#profile-content .details-note { padding:16px 0 0 }
+.profile-avatar { width:64px; height:64px; font-size:24px }
+.profile-field { margin-top:16px }
+.profile-field small,.contact-row small { display:block; color:var(--muted); font-size:12px }
+.profile-field p { white-space:pre-wrap; user-select:text }
+.contact-row { display:flex; align-items:center; gap:12px; width:100%; padding:10px 20px; min-height:60px; text-align:left; border-top:1px solid #ffffff0a }
+.contact-row .avatar { flex:none }
+.contact-row span:last-child { min-width:0; overflow-wrap:anywhere }
+#contacts-list { content-visibility:auto }
+#digest-message-content { padding:4px 20px 20px }
+#digest-message-content .bubble { width:100%; max-width:100%; margin:0; overflow-wrap:anywhere }
+@media (hover:none) { .message-actions-button { opacity:1; min-width:44px; min-height:44px } }
+@media (prefers-reduced-motion:reduce) { .reaction-picker button:hover { transform:none } }
+
+.list-header strong { white-space:nowrap }
+.list-header { padding-left:8px; padding-right:8px }
+.list-header .nav-icon { width:28px }
+.list-header .list-actions { gap:0 }
+.reaction-picker button[aria-pressed="true"] { background:var(--outgoing); outline:1px solid var(--primary) }
+@media (max-width:768px) { .list-header .nav-icon { width:44px; min-height:44px } }
+
+.contact-row { content-visibility:auto; contain-intrinsic-size:auto 60px }
+
+.all-reactions { max-height:min(240px,35dvh); overflow-y:auto; overscroll-behavior:contain; margin-top:4px }
+
+@media (max-width:768px) { .list-header .list-actions { display:flex } }

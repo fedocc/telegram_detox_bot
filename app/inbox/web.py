@@ -30,6 +30,20 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
     allowed_origins = frozenset(allowed_origins or (local_origin,)) | {local_origin}
     allowed_hosts = frozenset(urlsplit(origin).netloc for origin in allowed_origins)
 
+    def security_headers(request):
+        return {
+            "Cache-Control": ("no-store" if request.path.startswith("/api/")
+                              else "no-cache" if request.path in {"/", "/sw.js"}
+                              else "public, max-age=3600"),
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
+            "Cross-Origin-Resource-Policy": "same-origin",
+            "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; "
+                "img-src 'self' blob:; media-src 'self' blob:; manifest-src 'self'; "
+                "connect-src 'self' http://127.0.0.1:8788; worker-src 'self'; "
+                "base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+        }
+
     @web.middleware
     async def security(request, handler):
         try:
@@ -60,18 +74,7 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
             logger.warning("Inbox request failed (%s)", type(exc).__name__)
             response = web.json_response({"error": "Не удалось загрузить данные Telegram. "
                 "Попробуйте ещё раз; черновик сохранён."}, status=503)
-        response.headers.update({
-            "Cache-Control": ("no-store" if request.path.startswith("/api/")
-                              else "no-cache" if request.path in {"/", "/sw.js"}
-                              else "public, max-age=3600"),
-            "X-Content-Type-Options": "nosniff",
-            "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
-            "Cross-Origin-Resource-Policy": "same-origin",
-            "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; "
-                "img-src 'self' blob:; media-src 'self' blob:; manifest-src 'self'; "
-                "connect-src 'self' http://127.0.0.1:8788; worker-src 'self'; "
-                "base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
-        })
+        response.headers.update(security_headers(request))
         return response
 
     async def index(request):
@@ -80,7 +83,7 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
     async def asset(request):
         name = request.match_info["name"]
         if name not in {"app.js", "style.css", "playback.mjs", "notifications.mjs",
-                        "push.mjs", "ui.mjs",
+                        "push.mjs", "ui.mjs", "actions.mjs",
                         "app-icon.svg", "app-icon-180.png", "app-icon-512.png"}:
             raise web.HTTPNotFound()
         return web.FileResponse(STATIC / name)
@@ -322,7 +325,8 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
 
     async def send(request):
         body = await request.json()
-        if not isinstance(body, dict) or set(body) - {"request_id", "text", "image", "reply_to"}:
+        if not isinstance(body, dict) or set(body) - {
+                "request_id", "text", "image", "reply_to", "quote_text", "quote_offset"}:
             raise InboxError("Допустимы только текст и изображение.")
         request_id = str(UUID(body.get("request_id", "")))
         raw = body.get("image")
@@ -332,8 +336,14 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
             raw = base64.b64decode(raw, validate=True)
         return web.json_response(await service.send(
             request.match_info["key"], request_id, body.get("text", ""), raw,
-            reply_to=body.get("reply_to"),
+            reply_to=body.get("reply_to"), quote_text=body.get("quote_text"),
+            quote_offset=body.get("quote_offset"),
         ))
+
+    def quote_fields(values):
+        offset = values.get("quote_offset")
+        return {"quote_text": values.get("quote_text"),
+                "quote_offset": int(offset) if offset is not None else None}
 
     async def read_upload(request):
         if request.content_type != "multipart/form-data":
@@ -349,11 +359,12 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
 
         try:
             async for part in reader:
-                if part.name in {"request_id", "text", "reply_to"} and part.filename is None:
+                if (part.name in {"request_id", "text", "reply_to", "quote_text", "quote_offset"}
+                        and part.filename is None):
                     if part.name in values:
                         raise InboxError("Поле отправлено дважды.")
                     values[part.name] = await small_text(
-                        part, 9000 if part.name == "text" else 100,
+                        part, 9000 if part.name in {"text", "quote_text"} else 100,
                     )
                 elif part.name == "file" and part.filename and upload is None:
                     path = service.upload_dir / f"{secrets.token_hex(16)}.upload"
@@ -396,7 +407,7 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
                     request.match_info["key"], request_id, values.get("text", ""),
                     file_path=item[0] if item else None,
                     filename=item[1] if item else None,
-                    mime_type=item[2] if item else None, reply_to=reply,
+                    mime_type=item[2] if item else None, reply_to=reply, **quote_fields(values),
                 ))
             finally:
                 if item:
@@ -410,6 +421,8 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
                 return web.json_response(await service.send_saved(
                     request_id, values.get("text", ""), file_path=item[0] if item else None,
                     filename=item[1] if item else None, mime_type=item[2] if item else None,
+                    reply_to=int(values["reply_to"]) if values.get("reply_to") else None,
+                    **quote_fields(values),
                 ))
             finally:
                 if item:
@@ -430,7 +443,7 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
                     file_path=item[0] if item else None,
                     filename=item[1] if item else None,
                     mime_type=item[2] if item else None,
-                    reply_to=reply,
+                    reply_to=reply, **quote_fields(values),
                 ))
             finally:
                 if item:
@@ -449,13 +462,18 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
                     file_path=item[0] if item else None,
                     filename=item[1] if item else None,
                     mime_type=item[2] if item else None,
-                    reply_to=reply,
+                    reply_to=reply, **quote_fields(values),
                 ))
             finally:
                 if item:
                     item[0].unlink(missing_ok=True)
 
     async def media(request):
+        if request.query.get("stream") == "1":
+            from app.inbox.streaming import stream_media
+
+            return await stream_media(request, service, "conversations",
+                request.match_info["key"], int(request.match_info["message_id"]))
         path, mime, name, inline = await service.media(
             request.match_info["key"], int(request.match_info["message_id"]),
         )
@@ -467,6 +485,11 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         return response
 
     async def library_media(request):
+        if request.query.get("stream") == "1":
+            from app.inbox.streaming import stream_media
+
+            return await stream_media(request, service, "library",
+                request.match_info["source"], int(request.match_info["message_id"]))
         path, mime, name, inline = await service.library_media(
             request.match_info["source"], int(request.match_info["message_id"]),
         )
@@ -479,6 +502,11 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         return response
 
     async def manual_write_media(request):
+        if request.query.get("stream") == "1":
+            from app.inbox.streaming import stream_media
+
+            return await stream_media(request, service, "quick-write",
+                request.match_info["source"], int(request.match_info["message_id"]))
         path, mime, name, inline = await service.manual_write_media(
             request.match_info["source"], int(request.match_info["message_id"]),
         )
@@ -502,7 +530,57 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         response.headers["Cache-Control"] = "private, max-age=31536000, immutable"
         return response
 
+    async def available_reactions(request):
+        return web.json_response(await service.available_reactions())
+
+    async def contacts(request):
+        return web.json_response(await service.contacts())
+
+    async def contact_profile(request):
+        return web.json_response(await service.contact_profile(request.match_info["token"]))
+
+    async def profile(request):
+        return web.json_response(await service.profile(
+            request.match_info["scope"], request.match_info["key"],
+            positive_query(request, "message")))
+
+    async def message_reaction(request):
+        body = await request.json()
+        if not isinstance(body, dict) or set(body) != {"emoji"}:
+            raise InboxError("Выберите реакцию.")
+        return web.json_response(await service.set_reaction(
+            request.match_info["scope"], request.match_info["key"],
+            int(request.match_info["message_id"]), body["emoji"]))
+
+    async def digest_preview(request):
+        return web.json_response(await service.digest_preview(
+            request.match_info["source"], int(request.match_info["message_id"])))
+
+    async def digest_media(request):
+        from app.inbox.streaming import stream_media
+
+        return await stream_media(request, service, "digest",
+            request.match_info["source"], int(request.match_info["message_id"]))
+
+    async def prepare_headers(request, response):
+        response.headers.update(security_headers(request))
+
     app = web.Application(middlewares=[security], client_max_size=service.upload_max + 1024 * 1024)
+    app.on_response_prepare.append(prepare_headers)
+    app.add_routes([
+        web.get("/api/reactions", available_reactions),
+        web.get("/api/contacts", contacts),
+        web.get(r"/api/contacts/{token:[A-Za-z0-9_-]{1,64}}", contact_profile),
+        web.get(r"/api/{scope:conversations|library|quick-write}/"
+                r"{key:[A-Za-z0-9_-]{1,64}}/profile", profile),
+        web.post(r"/api/{scope:conversations|library|quick-write}/"
+                 r"{key:[A-Za-z0-9_-]{1,64}}/messages/"
+                 r"{message_id:[1-9][0-9]*}/reaction", message_reaction),
+        web.get(r"/api/digest/{source:[A-Za-z0-9_-]{1,64}}/messages/"
+                r"{message_id:[1-9][0-9]*}", digest_preview),
+        web.get(r"/api/digest/{source:[A-Za-z0-9_-]{1,64}}/media/"
+                r"{message_id:[1-9][0-9]*}", digest_media),
+    ])
     app.add_routes([
         web.get("/", index), web.get("/static/{name}", asset),
         web.get("/manifest.webmanifest", manifest), web.get("/sw.js", service_worker),

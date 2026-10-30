@@ -1,8 +1,8 @@
 'use strict';
 
-import {createPlaybackController} from './playback.mjs?v=16';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=16';
-import {createPushController} from './push.mjs?v=16';
+import {createPlaybackController} from './playback.mjs?v=17';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=17';
+import {createPushController} from './push.mjs?v=17';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
@@ -14,7 +14,9 @@ import {
   manualOpenButtonVisible,
   localImageClipboardUri, maintainMessageViewport, reactionEmojiPresentation,
   settleScrollBottom, bindReplyNavigation,
-} from './ui.mjs?v=16';
+} from './ui.mjs?v=17';
+
+import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=17';
 
 const playback = createPlaybackController(document);
 const $ = id => document.getElementById(id);
@@ -227,6 +229,15 @@ function digestNodes(digest, emptyText) {
     const copy = node('span');
     copy.append(node('b', '', item.title), node('small', '', `${item.summary}  ↗`));
     link.append(copy);
+    link.onclick = event => {
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      const url = new URL(link.href);
+      const source = url.searchParams.get('digest_source') || url.searchParams.get('library');
+      const messageId = Number(url.searchParams.get('message'));
+      if (source && messageId > 0) {
+        event.preventDefault(); openDigestMessage(source, messageId);
+      }
+    };
     return link;
   }) : [node('p', 'digest-empty', emptyText)];
 }
@@ -292,7 +303,7 @@ function renderComposer() {
   $('send').setAttribute('aria-label', value.sending ? 'Отправка…' : 'Отправить сообщение');
   showError('send-error', value.error); resize();
   $('reply-target').hidden = !value.reply;
-  $('reply-target').querySelector('span').textContent = value.reply ? `Ответ: ${value.reply.text}` : '';
+  $('reply-target').querySelector('span').textContent = value.reply ? `${value.reply.quote_text ? 'Цитата' : 'Ответ'}: ${value.reply.text}` : '';
 }
 
 function updateLocation(messageId = null, {replace = false} = {}) {
@@ -570,6 +581,9 @@ function videoNote(media) {
 }
 
 function attachment(media) {
+  if (['audio', 'voice', 'video', 'video_note'].includes(media.kind)) {
+    media = {...media, url: `${media.url}${media.url.includes('?') ? '&' : '?'}stream=1`};
+  }
   const wrap = node('div');
   if (media.kind === 'sticker') {
     wrap.className = 'sticker-wrap';
@@ -640,18 +654,27 @@ function messageNode(message) {
   const stickerOnly = message.media?.kind === 'sticker' && !message.text;
   const bubble = node('article', `bubble${message.own ? ' own' : ''}${message.mention ? ' mention' : ''}${stickerOnly ? ' sticker-bubble' : ''}`);
   bubble.dataset.id = message.id;
-  if (selectedMode === 'inbox' && !message.own) {
+  bubble.oncontextmenu = event => {
+    event.preventDefault(); showMessageActions(event, message, bubble);
+  };
+  const actions = node('button', 'message-actions-button', '···');
+  actions.type = 'button'; actions.setAttribute('aria-label', 'Действия с сообщением');
+  actions.onclick = event => showMessageActions(event, message, bubble);
+  bubble.append(actions);
+  if (isWritable(selectedMode, currentSource()) && !message.own) {
     const reply = node('button', 'reply-action', '↩');
     reply.type = 'button'; reply.title = 'Ответить';
     reply.onclick = () => {
       const value = draft();
       value.reply = {id: message.id, text: (message.text || message.media?.name || 'Вложение').slice(0, 120)};
-      renderComposer(); $('text').focus();
+      value.requestId = null; renderComposer(); $('text').focus();
     };
     bubble.append(reply);
   }
   if (!message.own) {
-    const sender = node('div', 'sender', message.sender);
+    const sender = node('button', 'sender', message.sender);
+    sender.type = 'button'; sender.title = 'Открыть профиль';
+    sender.onclick = () => openProfile(message.id);
     if (message.mention) sender.append(node('span', 'mention-badge', '@ упом.'));
     bubble.append(sender);
   }
@@ -1206,6 +1229,14 @@ async function openLibraryManagement() {
 }
 
 async function applyLocation() {
+  const digestParams = new URLSearchParams(location.search);
+  const digestSource = digestParams.get('digest_source');
+  if (digestSource && /^[A-Za-z0-9_-]{1,64}$/.test(digestSource)
+      && /^[1-9][0-9]*$/.test(digestParams.get('message') || '')) {
+    routePending = false;
+    await openDigestMessage(digestSource, Number(digestParams.get('message')), false);
+    return;
+  }
   if (isDigestHistoryRoute(location.search)) {
     routePending = false;
     await showDigestHistory({updateHistory: false}); return;
@@ -1218,7 +1249,11 @@ async function applyLocation() {
       routePending = false;
       if (selected || appView === 'digests') deselect({replaceUrl: false});
     } else if (Date.now() - routeWaitStarted > 30000 || params.has('library')) {
-      routePending = false; deselect({message: 'Ссылка недоступна.', replaceUrl: true});
+      routePending = false;
+      if (/^[A-Za-z0-9_-]{1,64}$/.test(params.get('library') || '')
+          && /^[1-9][0-9]*$/.test(params.get('message') || '')) {
+        await openDigestMessage(params.get('library'), Number(params.get('message')), false);
+      } else deselect({message: 'Ссылка недоступна.', replaceUrl: true});
     }
     return;
   }
@@ -1323,7 +1358,13 @@ $('composer').onsubmit = async event => {
     const form = new FormData();
     form.set('request_id', value.requestId); form.set('text', value.text);
     if (value.file) form.set('file', value.file, value.file.name);
-    if (value.reply) form.set('reply_to', String(value.reply.id));
+    if (value.reply) {
+      form.set('reply_to', String(value.reply.id));
+      if (value.reply.quote_text) {
+        form.set('quote_text', value.reply.quote_text);
+        form.set('quote_offset', String(value.reply.quote_offset));
+      }
+    }
     const path = mode === 'library' ? `/api/library/${encodeURIComponent(key)}/send`
       : `/api/conversations/${key}/upload`;
     await multipartApi(path, form);
@@ -1548,3 +1589,219 @@ $('push-disable').onclick = () => pushController?.disable();
 
 syncAuxiliaryPanels();
 poll();
+
+
+let actionOrigin = null, reactionCatalog = null, reactionCatalogAt = 0, actionGeneration = 0;
+function hideMessageActions(restoreFocus = false) {
+  actionGeneration++;
+  $('message-actions').hidden = true;
+  if (restoreFocus) actionOrigin?.focus();
+  actionOrigin = null;
+}
+function showMessageActions(event, message, bubble) {
+  if (!selected) return;
+  const generation = ++actionGeneration;
+  const mode = selectedMode, key = selected, path = currentScope();
+  const quote = selectedQuote(message.text || '', window.getSelection(), bubble.querySelector('.message-text'));
+  const menu = $('message-actions');
+  menu.replaceChildren();
+  const reactions = node('div', 'reaction-picker');
+  reactions.setAttribute('role', 'group'); reactions.setAttribute('aria-label', 'Реакции');
+  const react = async emoji => {
+    hideMessageActions();
+    if (selected !== key || selectedMode !== mode) return;
+    try {
+      await api(`${path}/messages/${message.id}/reaction`, {emoji});
+      if (selected !== key || selectedMode !== mode) return;
+      if (mode === 'library') await loadLibrary(key, null, true);
+      else await loadMessages(key);
+    } catch (error) { showError('load-error', error.message); }
+  };
+  const fullPicker = node('div', 'reaction-picker all-reactions'); fullPicker.hidden = true;
+  fullPicker.setAttribute('role', 'group'); fullPicker.setAttribute('aria-label', 'Все стандартные реакции');
+  const emojiButton = (emoji, title = '') => {
+    const button = node('button', '', reactionEmojiPresentation(emoji));
+    button.type = 'button'; button.setAttribute('aria-label', `Реакция ${title || emoji}`);
+    button.title = title || emoji;
+    const chosen = message.reactions?.some(value => value.chosen
+      && value.emoji.replace(/\uFE0F/g, '') === emoji.replace(/\uFE0F/g, ''));
+    button.setAttribute('aria-pressed', String(Boolean(chosen)));
+    button.onclick = () => react(chosen ? '' : emoji);
+    return button;
+  };
+  for (const emoji of BASIC_REACTIONS) reactions.append(emojiButton(emoji));
+  const more = node('button', 'message-menu-item', 'Все реакции'); more.type = 'button';
+  more.setAttribute('aria-expanded', 'false');
+  more.onclick = async () => {
+    if (!fullPicker.hidden) {
+      fullPicker.hidden = true; more.textContent = 'Все реакции';
+      more.setAttribute('aria-expanded', 'false'); return;
+    }
+    more.disabled = true; more.textContent = 'Загружаю реакции…';
+    try {
+      if (!reactionCatalog || Date.now() - reactionCatalogAt > 3600000) {
+        const result = await api('/api/reactions');
+        reactionCatalog = result.reactions || []; reactionCatalogAt = Date.now();
+      }
+      if (generation !== actionGeneration || menu.hidden) return;
+      fullPicker.replaceChildren(...reactionCatalog.map(item => emojiButton(item.emoji, item.title)));
+      fullPicker.hidden = false; more.textContent = 'Свернуть реакции';
+      more.setAttribute('aria-expanded', 'true');
+      menu.style.top = `${Math.max(8, Math.min(menu.getBoundingClientRect().top,
+        innerHeight - menu.offsetHeight - 8))}px`;
+    } catch (error) {
+      if (generation === actionGeneration) more.textContent = 'Повторить загрузку реакций';
+      showError('load-error', error.message);
+    } finally { more.disabled = false; }
+  };
+  menu.append(reactions, more, fullPicker);
+  const addAction = (label, handler, disabled = false) => {
+    const button = node('button', 'message-menu-item', label);
+    button.type = 'button'; button.disabled = disabled;
+    button.onclick = () => { hideMessageActions(); handler(); }; menu.append(button);
+  };
+  if (isWritable(mode, currentSource())) {
+    const reply = fragment => {
+      if (selected !== key || selectedMode !== mode) return;
+      const value = draft();
+      value.reply = {id: message.id,
+        text: fragment?.quote_text || (message.text || message.media?.name || 'Вложение').slice(0, 120),
+        ...(fragment || {})};
+      value.requestId = null; renderComposer(); $('text').focus();
+    };
+    addAction('Ответить', () => reply(null));
+    addAction(quote ? 'Цитировать выделенное' : 'Для цитаты выделите текст', () => reply(quote), !quote);
+  }
+  addAction('Убрать мою реакцию', () => react(''));
+  addAction('Профиль отправителя', () => openProfile(message.id));
+  menu.hidden = false;
+  const bounds = bubble.getBoundingClientRect();
+  const x = event.clientX || bounds.left, y = event.clientY || bounds.top;
+  menu.style.left = `${Math.max(8, Math.min(x, innerWidth - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y, innerHeight - menu.offsetHeight - 8))}px`;
+  actionOrigin = bubble.querySelector('.message-actions-button');
+  menu.querySelector('button')?.focus();
+}
+document.addEventListener('pointerdown', event => {
+  if (!$('message-actions').contains(event.target)) hideMessageActions();
+});
+document.addEventListener('keydown', event => {
+  const menu = $('message-actions');
+  if (menu.hidden) return;
+  if (event.key === 'Escape') { event.preventDefault(); hideMessageActions(true); }
+  if (['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown', 'Tab'].includes(event.key)) {
+    const buttons = [...menu.querySelectorAll('button:not(:disabled)')];
+    const direction = event.key === 'ArrowLeft' || event.key === 'ArrowUp' || event.shiftKey ? -1 : 1;
+    const index = buttons.indexOf(document.activeElement);
+    buttons[(index + direction + buttons.length) % buttons.length]?.focus();
+    event.preventDefault();
+  }
+});
+$('messages').addEventListener('scroll', () => hideMessageActions(), {passive: true});
+window.addEventListener('resize', () => hideMessageActions());
+
+let profileGeneration = 0, contactRows = [], contactsGeneration = 0;
+function showProfileCard(card) {
+  const content = $('profile-content'); content.replaceChildren();
+  content.append(node('div', 'profile-avatar avatar', initials(card.title || '')),
+    node('h3', '', card.title));
+  for (const [label, value] of [['Имя пользователя', card.username ? `@${card.username}` : ''],
+    ['Телефон', card.phone ? `+${card.phone.replace(/^\+/, '')}` : ''],
+    ['День рождения', birthdayLabel(card.birthday)], ['О себе', card.about],
+    ['Участников', card.members]]) {
+    if (!value) continue;
+    const field = node('div', 'profile-field');
+    field.append(node('small', '', label), node('p', '', String(value))); content.append(field);
+  }
+  content.append(node('p', 'details-note', 'Показаны только данные, которые доступны вашему аккаунту в Telegram.'));
+}
+async function loadProfile(path) {
+  const generation = ++profileGeneration;
+  $('profile-content').replaceChildren(node('p', 'details-note', 'Загружаю профиль…'));
+  if (!$('profile-dialog').open) $('profile-dialog').showModal();
+  try {
+    const card = await api(path);
+    if (generation === profileGeneration && $('profile-dialog').open) showProfileCard(card);
+  } catch (error) {
+    if (generation === profileGeneration) $('profile-content').replaceChildren(node('p', 'error', error.message));
+  }
+}
+function openProfile(messageId = null) {
+  if (!selected) return;
+  const suffix = messageId ? `?message=${messageId}` : '';
+  loadProfile(`${currentScope()}/profile${suffix}`);
+}
+$('chat-avatar').onclick = () => openProfile();
+$('chat-title').onclick = () => openProfile();
+$('chat-title').onkeydown = event => {
+  if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openProfile(); }
+};
+function renderContacts() {
+  const query = $('contacts-search').value.trim().toLocaleLowerCase('ru-RU');
+  const rows = contactRows.filter(row => `${row.title} ${row.phone} ${row.username}`.toLocaleLowerCase('ru-RU').includes(query));
+  $('contacts-list').replaceChildren(...rows.map(row => {
+    const button = node('button', 'contact-row'); button.type = 'button';
+    const copy = node('span'); copy.append(node('strong', '', row.title),
+      node('small', '', row.username ? `@${row.username}` : row.phone ? `+${row.phone}` : 'Контакт Telegram'));
+    button.append(node('span', 'avatar', initials(row.title)), copy);
+    button.onclick = () => loadProfile(`/api/contacts/${encodeURIComponent(row.token)}`);
+    return button;
+  }));
+  $('contacts-status').textContent = rows.length ? `${rows.length} контактов` : 'Ничего не найдено.';
+}
+$('contacts-search').oninput = renderContacts;
+$('contacts-button').onclick = async () => {
+  const generation = ++contactsGeneration;
+  $('contacts-search').value = ''; contactRows = [];
+  $('contacts-list').replaceChildren(); $('contacts-status').textContent = 'Загружаю контакты…';
+  $('contacts-dialog').showModal();
+  try {
+    const result = await api('/api/contacts');
+    if (generation !== contactsGeneration || !$('contacts-dialog').open) return;
+    contactRows = result.contacts || []; renderContacts();
+  } catch (error) {
+    if (generation === contactsGeneration) $('contacts-status').textContent = error.message;
+  }
+};
+$('contacts-dialog').addEventListener('close', () => {
+  contactsGeneration++; contactRows = []; $('contacts-list').replaceChildren();
+});
+$('profile-dialog').addEventListener('close', () => {
+  profileGeneration++; $('profile-content').replaceChildren();
+});
+let digestReturnUrl = '/', digestMessageGeneration = 0;
+async function openDigestMessage(source, messageId, updateHistory = true) {
+  hideMessageActions();
+  if (selected) deselect({replaceUrl: false});
+  const generation = ++digestMessageGeneration;
+  if (updateHistory) {
+    digestReturnUrl = location.pathname + location.search;
+    history.pushState(null, '', `/?digest_source=${encodeURIComponent(source)}&message=${messageId}`);
+  }
+  $('digest-message-title').textContent = 'Сообщение из сводки';
+  $('digest-message-content').replaceChildren(node('p', 'details-note', 'Загружаю сообщение…'));
+  if (!$('digest-message-dialog').open) $('digest-message-dialog').showModal();
+  try {
+    const result = await api(`/api/digest/${encodeURIComponent(source)}/messages/${messageId}`);
+    if (generation !== digestMessageGeneration || !$('digest-message-dialog').open) return;
+    const message = result.message, card = node('article', 'bubble');
+    $('digest-message-title').textContent = result.title || 'Сообщение из сводки';
+    card.append(node('strong', 'sender', message.sender));
+    if (message.media) card.append(attachment(message.media));
+    const text = node('p', 'message-text');
+    appendSegments(text, message.segments, message.text); card.append(text);
+    card.append(node('time', 'timestamp', new Date(message.timestamp).toLocaleString('ru-RU')));
+    $('digest-message-content').replaceChildren(card);
+  } catch (error) {
+    if (generation === digestMessageGeneration) $('digest-message-content').replaceChildren(node('p', 'error', error.message));
+  }
+}
+$('digest-message-dialog').addEventListener('close', () => {
+  digestMessageGeneration++; playback.pauseWithin($('digest-message-content'));
+  $('digest-message-content').replaceChildren();
+  const params = new URLSearchParams(location.search);
+  if (params.has('digest_source')) history.replaceState(null, '', digestReturnUrl);
+});
+for (const button of document.querySelectorAll('[data-dismiss]')) {
+  button.onclick = () => $(button.dataset.dismiss).close();
+}
