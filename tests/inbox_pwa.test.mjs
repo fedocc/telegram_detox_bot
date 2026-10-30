@@ -58,9 +58,9 @@ test('native Mac notifier bundle derives its identity icon from the canonical De
 
 test('service worker explicitly bypasses every API request', async () => {
   const worker = await readFile(new URL('sw.js', root), 'utf8');
-  assert.match(worker, /telegram-detox-shell-v22/);
+  assert.match(worker, /telegram-detox-shell-v23/);
   for (const asset of ['style.css', 'app.js', 'ui.mjs', 'notifications.mjs']) {
-    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=22`));
+    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=23`));
   }
   assert.match(worker, /url\.pathname\.startsWith\('\/api\/'\)/);
   assert.doesNotMatch(worker, /SHELL[^;]*\/api\//s);
@@ -77,8 +77,8 @@ test('mobile shell declares safe-area and removes the legacy minimum width', asy
   ]);
   assert.match(page, /viewport-fit=cover/);
   assert.match(page, /manifest\.webmanifest/);
-  assert.match(page, /style\.css\?v=22/);
-  assert.match(page, /app\.js\?v=22/);
+  assert.match(page, /style\.css\?v=23/);
+  assert.match(page, /app\.js\?v=23/);
   assert.match(page, /rel="apple-touch-icon" sizes="180x180" href="\/static\/app-icon-180\.png"/);
   assert.match(style, /@media \(max-width:768px\)/);
   assert.match(style, /safe-area-inset-bottom/);
@@ -326,9 +326,9 @@ test('all frontend shell references use the same cache version', async () => {
     readFile(new URL('sw.js', root), 'utf8'),
   ]);
   for (const source of [page, app, worker]) assert.doesNotMatch(source, /\?v=(?:[1-9])(?:\D|$)|shell-v[1-9](?:\D|$)/);
-  assert.match(worker, /telegram-detox-shell-v22/);
-  assert.match(page, /app\.js\?v=22/);
-  assert.match(app, /ui\.mjs\?v=22/);
+  assert.match(worker, /telegram-detox-shell-v23/);
+  assert.match(page, /app\.js\?v=23/);
+  assert.match(app, /ui\.mjs\?v=23/);
 });
 
 test('aggregate reactions render compactly and message reconciliation replaces only changed nodes', async () => {
@@ -340,8 +340,8 @@ test('aggregate reactions render compactly and message reconciliation replaces o
   assert.match(app, /'reaction-emoji', reactionEmojiPresentation\(fallback\)/);
   assert.match(app, /'reaction-count', String\(Number\(reaction\.count\)\)/);
   assert.match(app, /const meta = node\('div', 'message-meta'\)/);
-  assert.match(app, /meta\.append\(reactions, timestamp\)/);
-  assert.match(app, /else bubble\.append\(timestamp\)/);
+  assert.match(app, /meta\.append\(reactions, details\)/);
+  assert.match(app, /else bubble\.append\(details\)/);
   assert.match(app, /for \(const reaction of reactions \|\| \[\]\)/);
   assert.match(app, /custom\?\.available && custom\.format === 'static'/);
   assert.match(app, /custom\?\.available && custom\.format === 'video'/);

@@ -1,8 +1,8 @@
 'use strict';
 
-import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=22';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=22';
-import {createPushController} from './push.mjs?v=22';
+import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=23';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=23';
+import {createPushController} from './push.mjs?v=23';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
@@ -14,11 +14,11 @@ import {
   manualOpenButtonVisible,
   localImageClipboardUri, maintainMessageViewport, reactionEmojiPresentation,
   settleScrollBottom, bindReplyNavigation, reconcileKeyedRows,
-} from './ui.mjs?v=22';
+} from './ui.mjs?v=23';
 
-import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=22';
+import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=23';
 
-import {createAvatars} from './avatars.mjs?v=22';
+import {createAvatars} from './avatars.mjs?v=23';
 
 const playback = createPlaybackController(document);
 const avatars = createAvatars(document);
@@ -710,23 +710,19 @@ function messageNode(message) {
   const stickerOnly = message.media?.kind === 'sticker' && !message.text;
   const bubble = node('article', `bubble${message.own ? ' own' : ''}${message.mention ? ' mention' : ''}${stickerOnly ? ' sticker-bubble' : ''}`);
   bubble.dataset.id = message.id;
+  bubble.tabIndex = 0;
+  bubble.onkeydown = event => {
+    if (event.target === bubble && (event.key === 'ContextMenu'
+        || (event.shiftKey && event.key === 'F10'))) {
+      event.preventDefault(); showMessageActions(event, message, bubble);
+    }
+  };
   bubble.oncontextmenu = event => {
     event.preventDefault(); showMessageActions(event, message, bubble);
   };
   const actions = node('button', 'message-actions-button', '···');
   actions.type = 'button'; actions.setAttribute('aria-label', 'Действия с сообщением');
   actions.onclick = event => showMessageActions(event, message, bubble);
-  bubble.append(actions);
-  if (isWritable(selectedMode, currentSource()) && !message.own) {
-    const reply = node('button', 'reply-action', '↩');
-    reply.type = 'button'; reply.title = 'Ответить';
-    reply.onclick = () => {
-      const value = draft();
-      value.reply = {id: message.id, text: (message.text || message.media?.name || 'Вложение').slice(0, 120)};
-      value.requestId = null; renderComposer(); $('text').focus();
-    };
-    bubble.append(reply);
-  }
   if (!message.own) {
     const sender = node('button', 'sender', message.sender);
     sender.type = 'button'; sender.title = 'Открыть профиль';
@@ -751,10 +747,12 @@ function messageNode(message) {
       + (message.own ? ' ✓' : ''));
   timestamp.dateTime = message.timestamp;
   timestamp.title = new Date(message.timestamp).toLocaleString('ru-RU');
+  const details = node('span', 'message-details');
+  details.append(timestamp, actions);
   if (reactions) {
     const meta = node('div', 'message-meta');
-    meta.append(reactions, timestamp); bubble.append(meta);
-  } else bubble.append(timestamp);
+    meta.append(reactions, details); bubble.append(meta);
+  } else bubble.append(details);
   return bubble;
 }
 
@@ -1740,13 +1738,12 @@ function showMessageActions(event, message, bubble) {
     addAction(quote ? 'Цитировать выделенное' : 'Для цитаты выделите текст', () => reply(quote), !quote);
   }
   addAction('Убрать мою реакцию', () => react(''));
-  addAction('Профиль отправителя', () => openProfile(message.id));
   menu.hidden = false;
   const bounds = bubble.getBoundingClientRect();
   const x = event.clientX || bounds.left, y = event.clientY || bounds.top;
   menu.style.left = `${Math.max(8, Math.min(x, innerWidth - menu.offsetWidth - 8))}px`;
   menu.style.top = `${Math.max(8, Math.min(y, innerHeight - menu.offsetHeight - 8))}px`;
-  actionOrigin = bubble.querySelector('.message-actions-button');
+  actionOrigin = event.currentTarget || bubble;
   menu.querySelector('button')?.focus();
 }
 document.addEventListener('pointerdown', event => {
