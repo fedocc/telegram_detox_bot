@@ -1,8 +1,8 @@
 'use strict';
 
-import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=23';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=23';
-import {createPushController} from './push.mjs?v=23';
+import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=24';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=24';
+import {createPushController} from './push.mjs?v=24';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
@@ -10,15 +10,15 @@ import {
   normalizedSearchQuery, parseDeepLink, renderableMessages, restoreScrollAnchor,
   openedConversationIds, preferencePayload, retainFocusedMessage, scopePath, uploadWithinLimit,
   canonicalBadge, clipboardFile, createFileDragTracker, digestTitle,
-  hasFileTransfer, isDigestHistoryRoute, isNearBottom,
+  hasFileTransfer, isDigestHistoryRoute,
   manualOpenButtonVisible,
   localImageClipboardUri, maintainMessageViewport, reactionEmojiPresentation,
-  settleScrollBottom, bindReplyNavigation, reconcileKeyedRows,
-} from './ui.mjs?v=23';
+  createMessageViewport, bindReplyNavigation, reconcileKeyedRows,
+} from './ui.mjs?v=24';
 
-import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=23';
+import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=24';
 
-import {createAvatars} from './avatars.mjs?v=23';
+import {createAvatars} from './avatars.mjs?v=24';
 
 const playback = createPlaybackController(document);
 const avatars = createAvatars(document);
@@ -29,6 +29,7 @@ const avatar = (title, url, className = 'avatar', eager = false) => {
   return element;
 };
 const $ = id => document.getElementById(id);
+const messageViewport = createMessageViewport($('messages'));
 const node = (tag, className, text) => {
   const element = document.createElement(tag);
   if (className) element.className = className;
@@ -355,6 +356,7 @@ function resetSearch() {
 }
 
 function resetConversationSurface() {
+  messageViewport.reset();
   shownKey = null; nextBefore = null; olderLoading = false; olderCursorInitialized = false;
   selectedLoadPaused = false; focusedMessageId = null;
   messageNodes.clear();
@@ -409,8 +411,8 @@ async function choose(key, {updateHistory = true, messageId = null} = {}) {
     await Promise.all([loadMessages(key), loadPins('inbox', key)]);
     if (request !== choosing) return;
     if (messageId) await focusMessage(messageId, {replaceUrl: true});
-    else settleScrollBottom($('messages'), requestAnimationFrame);
-    if (matchMedia('(min-width: 769px)').matches) $('text').focus();
+    else messageViewport.follow();
+    if (matchMedia('(min-width: 769px)').matches) $('text').focus({preventScroll: true});
   } catch (error) {
     if (request !== choosing) return;
     if (isTerminalConversationStatus(error.status)) {
@@ -437,8 +439,8 @@ async function chooseLibrary(key, {updateHistory = true, messageId = null} = {})
     await Promise.all([loadLibrary(key, null, !changed), loadPins('library', key)]);
     if (request !== choosing) return;
     if (messageId) await focusMessage(messageId, {replaceUrl: true});
-    else settleScrollBottom($('messages'), requestAnimationFrame);
-    if (currentSource()?.writable && matchMedia('(min-width: 769px)').matches) $('text').focus();
+    else messageViewport.follow();
+    if (currentSource()?.writable && matchMedia('(min-width: 769px)').matches) $('text').focus({preventScroll: true});
   } catch (error) {
     if (request !== choosing) return;
     if (isTerminalConversationStatus(error.status)) {
@@ -784,6 +786,14 @@ function visibleAnchor(list) {
         top: element.getBoundingClientRect().top};
     }
   }
+  // Short bubbles can miss all horizontal hit-test points on a wide desktop.
+  for (const element of list.children) {
+    const rect = element.getBoundingClientRect();
+    if (rect.bottom > bounds.top && rect.top < bounds.bottom) {
+      const id = element.dataset.id || element.dataset.anchor;
+      if (id) return {id, top: rect.top};
+    }
+  }
   return null;
 }
 
@@ -794,7 +804,7 @@ function incrementalMessagePage(messages, key, {preserveAnchor = false} = {}) {
   const additions = newPageMessages(existingIds, messages);
   if (!additions.length) return false;
   const list = $('messages');
-  const atBottom = isNearBottom(list);
+  const atBottom = messageViewport.following;
   const anchor = preserveAnchor ? visibleAnchor(list) : null, oldHeight = list.scrollHeight;
   const current = [...messageNodes.values()].filter(value => value.message)
     .map(value => value.message);
@@ -824,6 +834,7 @@ function incrementalMessagePage(messages, key, {preserveAnchor = false} = {}) {
   for (const [id, grouped] of incrementalGrouping(combined, inserted)) {
     messageNodes.get(id).node.classList.toggle('grouped', grouped);
   }
+  messageViewport.watch();
   if (preserveAnchor) restoreScrollAnchor(list, messageNodes, anchor, oldHeight);
   else if (atBottom) list.scrollTop = list.scrollHeight;
   return true;
@@ -837,6 +848,7 @@ function focusLoadedMessage(messageId, {replaceUrl = false} = {}) {
   const item = messageNodes.get(String(messageId));
   if (!item?.node) return false;
   focusedMessageId = Number(messageId);
+  messageViewport.release();
   item.node.scrollIntoView({block: 'center'});
   item.node.classList.remove('message-focus');
   requestAnimationFrame(() => item.node.classList.add('message-focus'));
@@ -856,7 +868,7 @@ function renderMessages(messages, key, {prepend = false, merge = false, focusId 
   if (!initial && !prepend && appendOnlyMessages(signatures, unique)) {
     return incrementalMessagePage(unique, key);
   }
-  const atBottom = isNearBottom(list);
+  const atBottom = messageViewport.following;
   const oldHeight = list.scrollHeight;
   const anchor = !initial && !atBottom ? visibleAnchor(list) : null;
   const keep = new Set(), order = [];
@@ -896,6 +908,7 @@ function renderMessages(messages, key, {prepend = false, merge = false, focusId 
     if (list.children[index] !== element) list.insertBefore(element, list.children[index] || null);
   });
   shownKey = key;
+  messageViewport.watch();
   if (prepend) {
     const anchored = anchor && messageNodes.get(anchor.id)?.node;
     if (anchored) list.scrollTop += anchored.getBoundingClientRect().top - anchor.top;

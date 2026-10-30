@@ -41,12 +41,74 @@ export function maintainMessageViewport(list, entries, {atBottom, anchor, oldHei
   else if (anchor) restoreScrollAnchor(list, entries, anchor, oldHeight);
 }
 
-export function settleScrollBottom(list, scheduleFrame) {
+export function settleScrollBottom(list, scheduleFrame, shouldFollow = () => true) {
+  if (!shouldFollow()) return;
   list.scrollTop = list.scrollHeight;
   scheduleFrame(() => {
+    if (!shouldFollow()) return;
     list.scrollTop = list.scrollHeight;
-    scheduleFrame(() => { list.scrollTop = list.scrollHeight; });
+    scheduleFrame(() => { if (shouldFollow()) list.scrollTop = list.scrollHeight; });
   });
+}
+
+export function createMessageViewport(list, {
+  observeResize = callback => new ResizeObserver(callback),
+  scheduleFrame = requestAnimationFrame,
+} = {}) {
+  let following = false, generation = 0, touchY = null;
+  const observed = new Set();
+  const bottom = () => {
+    const target = Math.max(0, list.scrollHeight - list.clientHeight);
+    if (following && Math.abs(list.scrollTop - target) > 1) list.scrollTop = target;
+  };
+  const observer = observeResize(() => bottom());
+  const onScroll = () => { following = isNearBottom(list, 2); };
+  const onWheel = event => { if (event.deltaY < 0) following = false; };
+  const onTouchStart = event => { touchY = event.touches[0]?.clientY ?? null; };
+  const onTouchMove = event => {
+    const y = event.touches[0]?.clientY;
+    if (touchY !== null && y > touchY) following = false;
+    touchY = y ?? null;
+  };
+  const onKeyDown = event => {
+    if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)
+        || event.key === ' ' && event.shiftKey) following = false;
+  };
+  list.addEventListener('scroll', onScroll, {passive: true});
+  list.addEventListener('wheel', onWheel, {passive: true});
+  list.addEventListener('touchstart', onTouchStart, {passive: true});
+  list.addEventListener('touchmove', onTouchMove, {passive: true});
+  list.addEventListener('keydown', onKeyDown);
+  return {
+    get following() { return following; },
+    follow() {
+      following = true;
+      const current = ++generation;
+      settleScrollBottom(list, scheduleFrame, () => following && current === generation);
+    },
+    release() { following = false; generation++; },
+    watch() {
+      const targets = new Set([list, ...list.children]);
+      for (const target of observed) if (!targets.has(target)) {
+        observer.unobserve(target); observed.delete(target);
+      }
+      for (const target of targets) if (!observed.has(target)) {
+        observer.observe(target); observed.add(target);
+      }
+    },
+    reset() {
+      following = false; generation++; touchY = null;
+      observer.disconnect(); observed.clear();
+    },
+    destroy() {
+      this.reset();
+      list.removeEventListener('scroll', onScroll);
+      list.removeEventListener('wheel', onWheel);
+      list.removeEventListener('touchstart', onTouchStart);
+      list.removeEventListener('touchmove', onTouchMove);
+      list.removeEventListener('keydown', onKeyDown);
+    },
+  };
 }
 
 export function clipboardFile(data) {
