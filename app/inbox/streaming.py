@@ -54,9 +54,7 @@ async def stream_media(request, service, scope, key, message_id):
         if scope != "digest":
             service.interaction_target(scope, key)
         else:
-            source = service.store.library_source(key, enabled_only=False)
-            if (str(target.peer_id) in service.store.ignored()
-                    or (source is not None and not source.library_enabled)):
+            if str(target.peer_id) in service.store.ignored():
                 raise InboxError("Источник отключён.", 404)
 
     async with service.stream_slots:

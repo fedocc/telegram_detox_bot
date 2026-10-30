@@ -191,8 +191,6 @@ class InteractionMixin:
         if reference is None:
             raise InboxError("В сводке нет такого сообщения.", 404)
         source = self.store.library_source(source_id, enabled_only=False)
-        if source is not None and not source.library_enabled:
-            raise InboxError("Источник отключён.", 404)
         if source is None:
             identity = reference.get("_peer")
             if identity:
