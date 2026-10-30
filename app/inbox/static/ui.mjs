@@ -300,3 +300,20 @@ export function moveSelectedSource(rows, sourceId, direction) {
   [selected[index], selected[target]] = [selected[target], selected[index]];
   return selected.map(row => row.source_id);
 }
+
+// Retain row nodes (and their loaded images/focus) across server snapshots.
+export function reconcileKeyedRows(container, rows, views, create, update) {
+  const keep = new Set(rows.map(row => String(row.id)));
+  for (const [key, view] of views) if (!keep.has(key)) {
+    view.element.remove(); views.delete(key);
+  }
+  rows.forEach((row, index) => {
+    const key = String(row.id);
+    if (!views.has(key)) views.set(key, create(row));
+    const view = views.get(key);
+    if (container.children[index] !== view.element) {
+      container.insertBefore(view.element, container.children[index] || null);
+    }
+    update(view, row);
+  });
+}

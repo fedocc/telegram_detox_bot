@@ -28,6 +28,7 @@ import {
   parseDeepLink,
   preferencePayload,
   reactionEmojiPresentation,
+  reconcileKeyedRows,
   retainFocusedMessage,
   renderableMessages,
   restoreScrollAnchor,
@@ -391,4 +392,43 @@ test('selected source ordering changes without including unselected dialogs', ()
   ];
   assert.deepEqual(moveSelectedSource(rows, 'b', -1), ['saved', 'b', 'a']);
   assert.deepEqual(moveSelectedSource(rows, 'saved', -1), ['saved', 'a', 'b']);
+});
+
+
+test('polling retains chat rows and their avatars while preview, order and membership change', () => {
+  const container = {children: [], moves: 0, insertBefore(element, before) {
+    const old = this.children.indexOf(element);
+    if (old >= 0) this.children.splice(old, 1);
+    const index = before ? this.children.indexOf(before) : this.children.length;
+    this.children.splice(index, 0, element); this.moves++;
+  }};
+  const views = new Map(); let created = 0;
+  const create = row => {
+    created++;
+    const element = {image: {}, remove() {
+      container.children.splice(container.children.indexOf(this), 1);
+    }};
+    return {element};
+  };
+  const update = (view, row) => {
+    assert.ok(container.children.includes(view.element));
+    view.preview = row.preview;
+  };
+  const render = rows => reconcileKeyedRows(container, rows, views, create, update);
+  render([{id:'a',preview:'first'}, {id:'b',preview:'second'}]);
+  const a = views.get('a'), b = views.get('b'), photo = a.element.image;
+  const moves = container.moves;
+  for (let i = 0; i < 5; i++) render([{id:'a',preview:'first'}, {id:'b',preview:'second'}]);
+  assert.equal(container.moves, moves);
+  assert.equal(created, 2);
+  render([{id:'a',preview:'Вы: ответ'}, {id:'b',preview:'second'}]);
+  assert.equal(views.get('a'), a);
+  assert.equal(a.element.image, photo);
+  assert.equal(a.preview, 'Вы: ответ');
+  render([{id:'b',preview:'second'}, {id:'a',preview:'Вы: ответ'}]);
+  assert.deepEqual(container.children, [b.element, a.element]);
+  render([{id:'b',preview:'second'}]);
+  assert.equal(views.has('a'), false);
+  assert.deepEqual(container.children, [b.element]);
+  assert.equal(created, 2);
 });

@@ -1,8 +1,8 @@
 'use strict';
 
-import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=20';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=20';
-import {createPushController} from './push.mjs?v=20';
+import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=21';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=21';
+import {createPushController} from './push.mjs?v=21';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
@@ -13,12 +13,12 @@ import {
   hasFileTransfer, isDigestHistoryRoute, isNearBottom,
   manualOpenButtonVisible,
   localImageClipboardUri, maintainMessageViewport, reactionEmojiPresentation,
-  settleScrollBottom, bindReplyNavigation,
-} from './ui.mjs?v=20';
+  settleScrollBottom, bindReplyNavigation, reconcileKeyedRows,
+} from './ui.mjs?v=21';
 
-import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=20';
+import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=21';
 
-import {createAvatars} from './avatars.mjs?v=20';
+import {createAvatars} from './avatars.mjs?v=21';
 
 const playback = createPlaybackController(document);
 const avatars = createAvatars(document);
@@ -56,6 +56,11 @@ let auxiliaryPanel = 'none';
 let fileDrag = null;
 let appView = 'home', digestHistoryGeneration = 0;
 const drafts = new Map();
+const conversationRows = new Map();
+const setText = (element, value) => {
+  const text = String(value ?? '');
+  if (element.textContent !== text) element.textContent = text;
+};
 
 window.addEventListener('pagehide', () => {
   playback.stopAll(); releaseForegroundLease(selectedMode === 'inbox' ? selected : null, true);
@@ -176,34 +181,46 @@ function saveDraft(value) {
 }
 
 function renderList() {
-  $('count').textContent = conversations.length;
-  const activeElement = document.activeElement?.dataset.key;
-  const rows = conversations.map(row => {
-    const active = selectedMode === 'inbox' && selected === row.id;
-    const button = node('button', `chat-row${active ? ' selected' : ''}`);
+  setText($('count'), conversations.length);
+  const focused = $('conversations').contains(document.activeElement) ? document.activeElement : null;
+  reconcileKeyedRows($('conversations'), conversations, conversationRows, row => {
+    const button = node('button', 'chat-row');
     button.type = 'button'; button.dataset.key = row.id;
-    button.setAttribute('aria-current', active ? 'true' : 'false');
-    const top = node('div', 'row-top');
-    top.append(avatar(row.title, `/api/conversations/${row.id}/photo`), node('span', 'row-title', row.title),
-      node('span', 'age', `${Math.max(0, Math.floor((now() - row.activated_at) / 60))}м`));
-    if (row.unread_count) {
-      const unread = node('span', 'unread', row.unread_count > 9 ? '9+' : String(row.unread_count));
-      unread.setAttribute('aria-label', `${row.unread_count} непрочитанных`);
-      top.append(unread);
-    }
-    button.append(top, node('p', 'preview', row.preview),
-      node('span', 'row-time', row.opened_at === null ? 'Новое' : `${minutes(row)} осталось`));
     button.onclick = () => choose(row.id);
-    const item = node('div', 'sidebar-item');
+    const face = node('span', 'avatar'), title = node('span', 'row-title');
+    const age = node('span', 'age'), unread = node('span', 'unread');
+    const top = node('div', 'row-top'); top.append(face, title, age, unread);
+    const preview = node('p', 'preview'), time = node('span', 'row-time');
+    button.append(top, preview, time);
+    const element = node('div', 'sidebar-item');
     const close = node('button', 'sidebar-close', '×');
-    close.type = 'button'; close.setAttribute('aria-label', `Закрыть ${row.title}`);
-    close.onclick = () => closeConversation(row.id);
-    item.append(button, close);
-    return item;
+    close.type = 'button'; close.onclick = () => closeConversation(row.id);
+    element.append(button, close);
+    return {element, button, face, title, age, unread, preview, time, close};
+  }, (view, row) => {
+    const active = selectedMode === 'inbox' && selected === row.id;
+    view.button.classList.toggle('selected', active);
+    if (view.button.getAttribute('aria-current') !== String(active)) {
+      view.button.setAttribute('aria-current', String(active));
+    }
+    avatars.set(view.face, row.title, `/api/conversations/${row.id}/photo`);
+    setText(view.title, row.title);
+    setText(view.age, `${Math.max(0, Math.floor((now() - row.activated_at) / 60))}м`);
+    const unread = Math.max(0, Number(row.unread_count) || 0);
+    if (view.unread.hidden !== !unread) view.unread.hidden = !unread;
+    setText(view.unread, unread > 9 ? '9+' : unread);
+    const unreadLabel = `${unread} непрочитанных`;
+    if (view.unread.getAttribute('aria-label') !== unreadLabel) {
+      view.unread.setAttribute('aria-label', unreadLabel);
+    }
+    setText(view.preview, row.preview);
+    setText(view.time, row.opened_at === null ? 'Новое' : `${minutes(row)} осталось`);
+    const closeLabel = `Закрыть ${row.title}`;
+    if (view.close.getAttribute('aria-label') !== closeLabel) {
+      view.close.setAttribute('aria-label', closeLabel);
+    }
   });
-  $('conversations').replaceChildren(...rows);
-  if (activeElement) [...$('conversations').querySelectorAll('[data-key]')]
-    .find(element => element.dataset.key === activeElement)?.focus();
+  if (focused?.isConnected && document.activeElement !== focused) focused.focus({preventScroll: true});
 }
 
 function renderLibrary() {
@@ -273,13 +290,13 @@ function renderHeader() {
   $('conversation').hidden = !row;
   document.body.classList.toggle('conversation-open', Boolean(row));
   document.body.classList.toggle('digest-history-open', history);
-  $('empty-title').textContent = conversations.length ? 'Выберите разговор' : 'Нет активных разговоров';
+  setText($('empty-title'), conversations.length ? 'Выберите разговор' : 'Нет активных разговоров');
   if (!row) return;
-  $('chat-title').textContent = row.title
-    + (row.topic_title ? ` · ${row.topic_title}` : row.thread_id ? ` · Тема ${row.thread_id}` : '');
+  setText($('chat-title'), row.title
+    + (row.topic_title ? ` · ${row.topic_title}` : row.thread_id ? ` · Тема ${row.thread_id}` : ''));
   avatars.set($('chat-avatar'), row.title, `${currentScope()}/photo`, true);
   $('remaining').hidden = selectedMode === 'library';
-  $('remaining').textContent = selectedMode === 'library' ? '' : minutes(row);
+  setText($('remaining'), selectedMode === 'library' ? '' : minutes(row));
   $('close').hidden = selectedMode !== 'inbox';
   $('older').hidden = selectedMode !== 'library' || !nextBefore;
 }

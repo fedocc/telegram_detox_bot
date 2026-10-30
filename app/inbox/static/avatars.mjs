@@ -50,12 +50,18 @@ export function createAvatars(document) {
     const target = targets.get(element);
     if (!target || !element.isConnected) return;
     const image = await load(target.url);
-    if (!image || !element.isConnected || targets.get(element) !== target) return;
+    if (!element.isConnected || targets.get(element) !== target) return;
+    const previous = element.querySelector('img');
+    if (!image) { previous?.remove(); return; }
+    if (previous?.getAttribute('src') === image) return;
     const img = document.createElement('img');
     img.alt = ''; img.src = image; img.decoding = 'async'; img.draggable = false;
     img.referrerPolicy = 'no-referrer';
+    try { if (img.decode) await img.decode(); } catch (_) { return; }
+    if (!element.isConnected || targets.get(element) !== target) return;
     img.onerror = () => img.remove();
-    element.append(img);
+    if (previous?.parentNode === element) previous.replaceWith(img);
+    else element.append(img);
   };
   const observer = typeof IntersectionObserver !== 'undefined' ? new IntersectionObserver(entries => {
     for (const entry of entries) if (entry.isIntersecting) {
@@ -67,8 +73,13 @@ export function createAvatars(document) {
       const previous = targets.get(element), cached = cache.get(url);
       if (previous?.url === url && previous.title === title && cached?.expires > Date.now()) return;
       observer?.unobserve(element);
-      element.textContent = String(title || '').trim().split(/\s+/).slice(0, 2)
-        .map(value => value[0] || '').join('').toUpperCase();
+      const samePhoto = previous?.url === url;
+      if (!samePhoto || previous.title !== title) {
+        const picture = samePhoto ? element.querySelector('img') : null;
+        element.textContent = String(title || '').trim().split(/\s+/).slice(0, 2)
+          .map(value => value[0] || '').join('').toUpperCase();
+        if (picture) element.append(picture);
+      }
       if (!url || !/^\/api\//.test(url)) { targets.delete(element); return; }
       targets.set(element, {url, title});
       if (eager || !observer) show(element); else observer.observe(element);
