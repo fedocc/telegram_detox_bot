@@ -340,7 +340,7 @@ async def test_quoted_reply_with_attachment_uses_native_send_media(feature_servi
 async def test_digest_can_show_deselected_source_without_reenabling_its_library(feature_service):
     service = feature_service
     service.store.upsert_library_source(source_id="dtest", peer_type="user", peer_id="42",
-        access_hash=987654321, display_title="Источник", library_enabled=False)
+        access_hash=987654321, display_title="Источник", library_enabled=False, is_bot=False)
     seed_digest(service)
     assert (await service.digest_preview("dtest", 100))["message"]["id"] == 100
     assert not service.store.library_source("dtest", enabled_only=False).library_enabled
