@@ -83,7 +83,7 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
     async def asset(request):
         name = request.match_info["name"]
         if name not in {"app.js", "style.css", "playback.mjs", "notifications.mjs",
-                        "push.mjs", "ui.mjs", "actions.mjs",
+                        "push.mjs", "ui.mjs", "actions.mjs", "avatars.mjs",
                         "app-icon.svg", "app-icon-180.png", "app-icon-512.png"}:
             raise web.HTTPNotFound()
         return web.FileResponse(STATIC / name)
@@ -544,6 +544,16 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
             request.match_info["scope"], request.match_info["key"],
             positive_query(request, "message")))
 
+    async def profile_photo(request):
+        content = await service.profile_photo(
+            request.match_info["scope"], request.match_info["key"],
+            positive_query(request, "message"))
+        return web.Response(body=content, content_type="image/jpeg", status=200 if content else 204)
+
+    async def contact_photo(request):
+        content = await service.contact_photo(request.match_info["token"])
+        return web.Response(body=content, content_type="image/jpeg", status=200 if content else 204)
+
     async def message_reaction(request):
         body = await request.json()
         if not isinstance(body, dict) or set(body) != {"emoji"}:
@@ -571,6 +581,9 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         web.get("/api/reactions", available_reactions),
         web.get("/api/contacts", contacts),
         web.get(r"/api/contacts/{token:[A-Za-z0-9_-]{1,64}}", contact_profile),
+        web.get(r"/api/contacts/{token:[A-Za-z0-9_-]{1,64}}/photo", contact_photo),
+        web.get(r"/api/{scope:conversations|library|quick-write}/"
+                r"{key:[A-Za-z0-9_-]{1,64}}/photo", profile_photo),
         web.get(r"/api/{scope:conversations|library|quick-write}/"
                 r"{key:[A-Za-z0-9_-]{1,64}}/profile", profile),
         web.post(r"/api/{scope:conversations|library|quick-write}/"

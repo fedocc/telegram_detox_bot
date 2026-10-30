@@ -116,7 +116,8 @@ class InteractionMixin:
                 continue
             token = secrets.token_urlsafe(24)
             tokens[token] = (user, now + 600)
-            rows.append({"token": token, **self.contact_card(user)})
+            rows.append({"token": token, "photo_url": f"/api/contacts/{token}/photo",
+                         **self.contact_card(user)})
         while len(tokens) > max(10000, len(rows)):
             tokens.popitem(last=False)
         self.contact_tokens = tokens
@@ -129,7 +130,9 @@ class InteractionMixin:
         user = item[0]
         if str(user.id) in self.store.ignored():
             raise InboxError("Контакт недоступен.", 404)
-        return await self._profile_entity(user)
+        card = await self._profile_entity(user)
+        card["photo_url"] = f"/api/contacts/{token}/photo"
+        return card
 
     async def profile(self, scope, key, message_id=None):
         target = self.interaction_target(scope, key)
@@ -142,6 +145,46 @@ class InteractionMixin:
             raise InboxError("Профиль недоступен.", 404)
         result = await self._profile_entity(entity)
         self.interaction_target(scope, key)
+        suffix = f"?message={message_id}" if message_id is not None else ""
+        result["photo_url"] = f"/api/{scope}/{key}/photo{suffix}"
+        return result
+
+    async def profile_photo(self, scope, key, message_id=None):
+        target = self.interaction_target(scope, key)
+        if message_id is not None:
+            _, message = await self.interaction_message(scope, key, message_id)
+            entity = getattr(message, "sender", None) or await message.get_sender()
+            if entity is None or str(utils.get_peer_id(entity)) in self.store.ignored():
+                raise InboxError("Фотография недоступна.", 404)
+            identity = str(utils.get_peer_id(entity))
+            async def get_entity():
+                return await self.client.get_entity(entity)
+        else:
+            identity = str(self.self_id if str(target.peer_id) == "me" else target.peer_id)
+            async def get_entity():
+                return await self._peer_call(target, self.client.get_entity)
+        self._check_telegram_cooldown()
+        try:
+            result = await self.avatars.get(identity, get_entity)
+        except FloodWaitError as exc:
+            raise self._flood_wait_error(exc) from None
+        self.interaction_target(scope, key)
+        return result
+
+    async def contact_photo(self, token):
+        item = getattr(self, "contact_tokens", {}).get(token)
+        if not item or item[1] <= self.clock():
+            raise InboxError("Обновите список контактов.", 404)
+        user = item[0]
+        if str(user.id) in self.store.ignored():
+            raise InboxError("Контакт недоступен.", 404)
+        self._check_telegram_cooldown()
+        try:
+            result = await self.avatars.get(str(user.id), lambda: self.client.get_entity(user))
+        except FloodWaitError as exc:
+            raise self._flood_wait_error(exc) from None
+        if item[1] <= self.clock() or str(user.id) in self.store.ignored():
+            raise InboxError("Контакт недоступен.", 404)
         return result
 
     async def _profile_entity(self, entity):

@@ -44,6 +44,7 @@ from telethon.tl.types import (
 )
 
 from app.db.tables import InboxSend
+from app.inbox.avatars import AvatarCache
 from app.inbox.errors import InboxError
 from app.inbox.interactions import InteractionMixin
 from app.inbox.library import SAVED_MESSAGES, LibraryChat, peer_type_for_marked_id
@@ -325,6 +326,7 @@ class InboxService(InteractionMixin):
         self.timezone = timezone
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.avatars = AvatarCache(client, self.cache_dir.parent / "avatar_cache", clock)
         self.snapshots = OrderedDict()
         self.history_lock = asyncio.Lock()
         self.action_lock = asyncio.Lock()

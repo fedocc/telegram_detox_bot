@@ -207,6 +207,8 @@ main {
   border-bottom:1px solid var(--border);
   flex:none}
 .chat-header .avatar {
+  border-radius:50%;
+  padding:0;
   width:28px;
   height:28px;
   font-size:12px}
@@ -834,3 +836,7 @@ button.sender { padding:0; display:block; text-align:left; border-radius:3px }
 .all-reactions { max-height:min(240px,35dvh); overflow-y:auto; overscroll-behavior:contain; margin-top:4px }
 
 @media (max-width:768px) { .list-header .list-actions { display:flex } }
+
+/* Photos replace initials without changing chat or profile layout. */
+.avatar { position:relative; overflow:hidden }
+.avatar img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; border-radius:inherit }

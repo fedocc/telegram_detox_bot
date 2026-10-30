@@ -1,8 +1,8 @@
 'use strict';
 
-import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=18';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=18';
-import {createPushController} from './push.mjs?v=18';
+import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=19';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=19';
+import {createPushController} from './push.mjs?v=19';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
@@ -14,11 +14,20 @@ import {
   manualOpenButtonVisible,
   localImageClipboardUri, maintainMessageViewport, reactionEmojiPresentation,
   settleScrollBottom, bindReplyNavigation,
-} from './ui.mjs?v=18';
+} from './ui.mjs?v=19';
 
-import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=18';
+import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=19';
+
+import {createAvatars} from './avatars.mjs?v=19';
 
 const playback = createPlaybackController(document);
+const avatars = createAvatars(document);
+const avatar = (title, url, className = 'avatar', eager = false) => {
+  const element = document.createElement('span'); element.className = className;
+  // Observe after insertion: list rows and dialog contents are assembled off-screen.
+  queueMicrotask(() => avatars.set(element, title, url, eager));
+  return element;
+};
 const $ = id => document.getElementById(id);
 const node = (tag, className, text) => {
   const element = document.createElement(tag);
@@ -61,6 +70,7 @@ new MutationObserver(records => {
   for (const record of records) for (const removed of record.removedNodes) {
     if (removed.nodeType === 1 && !removed.isConnected) {
       playback.pauseWithin(removed);
+      avatars.forgetWithin(removed);
       if (removed.matches?.('.sticker-video')) stickerObserver?.unobserve(removed);
       if (removed.matches?.('.custom-emoji-video')) stickerObserver?.unobserve(removed);
       for (const video of removed.querySelectorAll?.('.sticker-video,.custom-emoji-video') || []) {
@@ -174,7 +184,7 @@ function renderList() {
     button.type = 'button'; button.dataset.key = row.id;
     button.setAttribute('aria-current', active ? 'true' : 'false');
     const top = node('div', 'row-top');
-    top.append(node('span', 'avatar', initials(row.title)), node('span', 'row-title', row.title),
+    top.append(avatar(row.title, `/api/conversations/${row.id}/photo`), node('span', 'row-title', row.title),
       node('span', 'age', `${Math.max(0, Math.floor((now() - row.activated_at) / 60))}м`));
     if (row.unread_count) {
       const unread = node('span', 'unread', row.unread_count > 9 ? '9+' : String(row.unread_count));
@@ -267,7 +277,7 @@ function renderHeader() {
   if (!row) return;
   $('chat-title').textContent = row.title
     + (row.topic_title ? ` · ${row.topic_title}` : row.thread_id ? ` · Тема ${row.thread_id}` : '');
-  $('chat-avatar').textContent = initials(row.title);
+  avatars.set($('chat-avatar'), row.title, `${currentScope()}/photo`, true);
   $('remaining').hidden = selectedMode === 'library';
   $('remaining').textContent = selectedMode === 'library' ? '' : minutes(row);
   $('close').hidden = selectedMode !== 'inbox';
@@ -1728,7 +1738,7 @@ window.addEventListener('resize', () => hideMessageActions());
 let profileGeneration = 0, contactRows = [], contactsGeneration = 0;
 function showProfileCard(card) {
   const content = $('profile-content'); content.replaceChildren();
-  content.append(node('div', 'profile-avatar avatar', initials(card.title || '')),
+  content.append(avatar(card.title, card.photo_url, 'profile-avatar avatar', true),
     node('h3', '', card.title));
   for (const [label, value] of [['Имя пользователя', card.username ? `@${card.username}` : ''],
     ['Телефон', card.phone ? `+${card.phone.replace(/^\+/, '')}` : ''],
@@ -1768,7 +1778,7 @@ function renderContacts() {
     const button = node('button', 'contact-row'); button.type = 'button';
     const copy = node('span'); copy.append(node('strong', '', row.title),
       node('small', '', row.username ? `@${row.username}` : row.phone ? `+${row.phone}` : 'Контакт Telegram'));
-    button.append(node('span', 'avatar', initials(row.title)), copy);
+    button.append(avatar(row.title, row.photo_url), copy);
     button.onclick = () => loadProfile(`/api/contacts/${encodeURIComponent(row.token)}`);
     return button;
   }));
