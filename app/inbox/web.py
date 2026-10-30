@@ -661,6 +661,7 @@ async def serve_inbox(service, *, port=PORT, allowed_origins=None,
     site = web.TCPSite(runner, HOST, port)
     cleanup_task = None
     push_task = None
+    preview_task = None
 
     async def maintenance():
         while True:
@@ -670,6 +671,13 @@ async def serve_inbox(service, *, port=PORT, allowed_origins=None,
                     await service.cleanup()
             except Exception as exc:
                 logger.warning("Inbox cleanup failed (%s)", type(exc).__name__)
+
+    async def refresh_previews():
+        try:
+            async with asyncio.timeout(300):
+                await service.refresh_previews()
+        except Exception as exc:
+            logger.warning("Inbox preview refresh failed (%s)", type(exc).__name__)
 
     async def push_maintenance():
         while True:
@@ -686,9 +694,10 @@ async def serve_inbox(service, *, port=PORT, allowed_origins=None,
         logger.info("Mention inbox listening on http://127.0.0.1:%s", port)
         cleanup_task = asyncio.create_task(maintenance())
         push_task = asyncio.create_task(push_maintenance())
+        preview_task = asyncio.create_task(refresh_previews())
         yield
     finally:
-        for task in (cleanup_task, push_task):
+        for task in (cleanup_task, push_task, preview_task):
             if task:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

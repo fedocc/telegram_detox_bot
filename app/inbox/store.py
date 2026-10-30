@@ -83,6 +83,16 @@ class InboxStore:
         with self.factory() as session:
             return session.get(InboxConversation, key)
 
+    def update_preview(self, key, message_id, preview):
+        # Updating display text never activates a chat or changes unread state.
+        with self.factory() as session:
+            session.execute(update(InboxConversation).where(
+                InboxConversation.id == key,
+                InboxConversation.preview_message_id <= int(message_id),
+                InboxConversation.trigger_id <= int(message_id),
+            ).values(preview=preview[:256], preview_message_id=int(message_id)))
+            session.commit()
+
     def unread_total(self, rows=None):
         return sum(max(0, int(row.unread_count or 0)) for row in (
             self.active() if rows is None else rows
@@ -240,7 +250,9 @@ class InboxStore:
                         row.manually_closed = False
                     if int(trigger_id) >= int(row.trigger_id or 0):
                         row.title = title[:512]
-                        row.preview = preview[:256]
+                        if int(trigger_id) >= int(row.preview_message_id or 0):
+                            row.preview = preview[:256]
+                            row.preview_message_id = int(trigger_id)
                         row.trigger_id = int(trigger_id)
                         if event_is_new:
                             row.activated_at = now

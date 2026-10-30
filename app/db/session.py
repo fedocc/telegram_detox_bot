@@ -30,7 +30,7 @@ def _merge_inbox_duplicates(connection) -> None:
     """Normalize legacy identities and merge rows without losing durable references."""
     rows = list(connection.execute(text(
         "SELECT id, peer_type, peer_id, access_hash, thread_id, is_forum, title, "
-        "topic_title, preview, trigger_id, activated_at, opened_at, "
+        "topic_title, preview, preview_message_id, trigger_id, activated_at, opened_at, "
         "latest_relevant_message_id, last_seen_message_id, unread_count, expires_at, "
         "manually_closed, library_source_id, quarantined_at, quarantine_reason "
         "FROM inbox_conversations"
@@ -168,10 +168,15 @@ def _merge_inbox_duplicates(connection) -> None:
                 "DELETE FROM inbox_conversations WHERE id = :duplicate"
             ), {"duplicate": duplicate["id"]})
 
+        preview_row = max(members, key=lambda row: (
+            max(int(row["preview_message_id"] or 0), int(row["trigger_id"] or 0)),
+            float(row["activated_at"] or 0),
+        ))
         connection.execute(text(
             "UPDATE inbox_conversations SET peer_type = :peer_type, peer_id = :peer_id, "
             "access_hash = :access_hash, thread_id = :thread_id, is_forum = :is_forum, "
             "title = :title, topic_title = :topic_title, preview = :preview, "
+            "preview_message_id = :preview_message_id, "
             "trigger_id = :trigger_id, activated_at = :activated_at, opened_at = :opened_at, "
             "latest_relevant_message_id = :latest, last_seen_message_id = :last_seen, "
             "unread_count = :unread, expires_at = :expires_at, "
@@ -182,7 +187,10 @@ def _merge_inbox_duplicates(connection) -> None:
             "peer_type": peer_type, "peer_id": peer_id, "access_hash": access_hash,
             "thread_id": thread_id, "is_forum": int(bool(newest["is_forum"])),
             "title": newest["title"], "topic_title": newest["topic_title"],
-            "preview": newest["preview"], "trigger_id": newest["trigger_id"],
+            "preview": preview_row["preview"],
+            "preview_message_id": max(int(preview_row["preview_message_id"] or 0),
+                                      int(preview_row["trigger_id"] or 0)),
+            "trigger_id": newest["trigger_id"],
             "activated_at": newest["activated_at"], "opened_at": opened_at,
             "latest": latest, "last_seen": last_seen, "unread": unread,
             "expires_at": expires_at, "manually_closed": int(manually_closed),
@@ -231,6 +239,7 @@ def init_db(settings: Settings) -> sessionmaker[Session]:
                         f"ALTER TABLE inbox_conversations ADD COLUMN {name} INTEGER DEFAULT 0"
                     ))
             inbox_additions = {
+                "preview_message_id": "INTEGER DEFAULT 0",
                 "peer_type": "VARCHAR(16) DEFAULT 'unknown'",
                 "access_hash": "VARCHAR(32)",
                 "library_source_id": "VARCHAR(32)",

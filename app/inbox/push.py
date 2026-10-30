@@ -137,10 +137,10 @@ class WebPushService:
             "telegram_code": "Новый код Telegram",
         }.get(event.trigger_reason, "Новое сообщение")
         subtitle = f"{count} новых сообщений" if count > 1 else reason
-        preview = " ".join((event.preview or "").split())[:180]
+        preview = " ".join((event.preview or "").split())[:180] or "Новое сообщение"
         return json.dumps({
             "title": event.title[:100], "subtitle": subtitle,
-            "body": f"Последнее: {preview}" if count > 1 else preview,
+            "body": preview,
             "tag": f"conversation:{event.conversation_id}",
             "conversation_id": event.conversation_id,
             "url": f"/?conversation={event.conversation_id}",

@@ -194,6 +194,7 @@ class InboxConversation(Base):
     title: Mapped[str] = mapped_column(String(512))
     topic_title: Mapped[str] = mapped_column(String(512), default="")
     preview: Mapped[str] = mapped_column(String(256), default="")
+    preview_message_id: Mapped[int] = mapped_column(Integer, default=0)
     trigger_id: Mapped[int] = mapped_column(Integer)
     activated_at: Mapped[float] = mapped_column(Float)
     opened_at: Mapped[float | None] = mapped_column(Float, nullable=True)

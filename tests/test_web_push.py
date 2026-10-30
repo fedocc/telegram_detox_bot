@@ -136,7 +136,7 @@ async def test_burst_uses_latest_preview_and_one_push_per_conversation(push_fixt
     assert len(push_fixture.sent) == 1
     payload = json.loads(push_fixture.sent[0]["data"])
     assert payload["subtitle"] == "3 новых сообщений"
-    assert payload["body"] == "Последнее: message 12"
+    assert payload["body"] == "message 12"
 
 
 async def test_real_push_uses_current_canonical_badge_after_other_chat_was_read(

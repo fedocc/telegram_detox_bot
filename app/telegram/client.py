@@ -192,10 +192,16 @@ async def run_listener(
 
     @client.on(events.NewMessage(incoming=None, outgoing=None))
     async def handler(event) -> None:
-        if settings.mention_only_mode and (
-            event.out or event.sender_id == me.id or event.date < started_at
-        ):
-            return
+        if settings.mention_only_mode:
+            if event.date < started_at:
+                return
+            if event.out or event.sender_id == me.id:
+                if inbox is not None:
+                    try:
+                        await inbox.observe(event)
+                    except Exception as exc:
+                        logger.warning("Inbox preview update failed (%s)", type(exc).__name__)
+                return
         await ingest_event(
             event, settings=settings, session_factory=session_factory, llm=llm, email=email,
             ignored_chat_ids=(load_ignored_chats_from_settings(settings).chat_ids

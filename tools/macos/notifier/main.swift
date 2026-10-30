@@ -49,6 +49,14 @@ final class Notifier: NSObject, NSApplicationDelegate, UNUserNotificationCenterD
             try save()
             let center = UNUserNotificationCenter.current()
             center.delegate = self
+            // Dismiss the old one-item-per-chat format; preserve the new stacks on restart.
+            center.getDeliveredNotifications { notifications in
+                let legacy = notifications.filter {
+                    $0.request.identifier.range(of: "^conversation:[a-f0-9]{32}$",
+                                                options: .regularExpression) != nil
+                }.map { $0.request.identifier }
+                center.removeDeliveredNotifications(withIdentifiers: legacy)
+            }
             center.requestAuthorization(options: [.alert, .sound]) { _, _ in self.refreshPermission() }
             try startBridge()
             log("Notifier started; bridge=\(bridgeHost)")
@@ -101,28 +109,17 @@ final class Notifier: NSObject, NSApplicationDelegate, UNUserNotificationCenterD
         }.resume()
     }
     func notify(_ event: AttentionEvent) {
-        guard let identifier = notificationIdentifier(event.conversation_id) else { return }
+        guard let identifier = notificationRequestIdentifier(event),
+              let group = notificationIdentifier(event.conversation_id) else { return }
         let content = UNMutableNotificationContent()
-        content.title = "Telegram — " + plain(event.title, limit: 100)
-        if event.unread_count > 1 {
-            content.subtitle = "\(event.unread_count) новых сообщений"
-        } else if event.trigger_reason == "direct_reply" {
-            content.subtitle = "Ответ на ваше сообщение"
-        } else if event.trigger_reason == "private_message" {
-            content.subtitle = "Личное сообщение"
-        } else {
-            content.subtitle = "Упоминание"
-        }
-        if !event.topic_title.isEmpty { content.subtitle += " · " + plain(event.topic_title, limit: 60) }
-        let preview = plain(event.preview, limit: event.unread_count > 1 ? 228 : 240)
-        content.body = event.unread_count > 1 ? "Последнее: \(preview)" : preview
+        let title = plain(event.title, limit: 100)
+        content.title = title.isEmpty ? "Telegram" : title
+        content.subtitle = plain(event.topic_title, limit: 80)
+        content.body = notificationBody(event)
+        content.threadIdentifier = group
         content.sound = .default
         content.userInfo = ["conversation": event.conversation_id]
         let center = UNUserNotificationCenter.current()
-        // The stable identifier replaces pending and delivered requests on macOS;
-        // explicit removal keeps the one-current-item invariant deterministic.
-        center.removePendingNotificationRequests(withIdentifiers: [identifier])
-        center.removeDeliveredNotifications(withIdentifiers: [identifier])
         center.add(UNNotificationRequest(
             identifier: identifier, content: content, trigger: nil
         )) { error in
@@ -132,10 +129,30 @@ final class Notifier: NSObject, NSApplicationDelegate, UNUserNotificationCenterD
             }
         }
     }
+    func clearNotifications(_ conversation: String) {
+        guard let group = notificationIdentifier(conversation) else { return }
+        let center = UNUserNotificationCenter.current()
+        center.getDeliveredNotifications { notifications in
+            let identifiers = notifications.filter {
+                $0.request.content.threadIdentifier == group
+                    || $0.request.content.userInfo["conversation"] as? String == conversation
+                    || $0.request.identifier == group
+            }.map { $0.request.identifier }
+            center.removeDeliveredNotifications(withIdentifiers: identifiers)
+        }
+        center.getPendingNotificationRequests { requests in
+            let identifiers = requests.filter {
+                $0.content.threadIdentifier == group
+                    || $0.content.userInfo["conversation"] as? String == conversation
+                    || $0.identifier == group
+            }.map { $0.identifier }
+            center.removePendingNotificationRequests(withIdentifiers: identifiers)
+        }
+    }
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                 withCompletionHandler completion: @escaping (UNNotificationPresentationOptions) -> Void) {
         DispatchQueue.main.async { completion(self.state.effectiveEnabled(
-            now: Date().timeIntervalSince1970) ? [.banner, .sound] : []) }
+            now: Date().timeIntervalSince1970) ? [.banner, .sound, .list] : []) }
     }
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                 withCompletionHandler completion: @escaping () -> Void) {
@@ -219,9 +236,8 @@ final class Notifier: NSObject, NSApplicationDelegate, UNUserNotificationCenterD
                 } else if request.path == "/conversation-opened" {
                     valid = valid && json?.count == 1
                     let conversation = json?["conversation_id"] as? String ?? ""
-                    if let identifier = notificationIdentifier(conversation), valid {
-                        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [identifier])
-                        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [identifier])
+                    if validConversationID(conversation), valid {
+                        self.clearNotifications(conversation)
                     } else { valid = false }
                 }
                 if !valid { state = previous; code = 400 }

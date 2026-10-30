@@ -1,17 +1,17 @@
 'use strict';
 
-const CACHE = 'telegram-detox-shell-v19';
+const CACHE = 'telegram-detox-shell-v20';
 const SHELL = new Set([
   '/',
   '/manifest.webmanifest',
-  '/static/style.css?v=19',
-  '/static/app.js?v=19',
-  '/static/ui.mjs?v=19',
-  '/static/actions.mjs?v=19',
-  '/static/avatars.mjs?v=19',
-  '/static/playback.mjs?v=19',
-  '/static/notifications.mjs?v=19',
-  '/static/push.mjs?v=19',
+  '/static/style.css?v=20',
+  '/static/app.js?v=20',
+  '/static/ui.mjs?v=20',
+  '/static/actions.mjs?v=20',
+  '/static/avatars.mjs?v=20',
+  '/static/playback.mjs?v=20',
+  '/static/notifications.mjs?v=20',
+  '/static/push.mjs?v=20',
   '/static/app-icon-180.png',
   '/static/app-icon-512.png',
 ]);
@@ -39,7 +39,7 @@ self.addEventListener('push', event => {
       ? self.navigator.clearAppBadge().catch(() => {}) : Promise.resolve();
   event.waitUntil(Promise.all([
     self.registration.showNotification(title, {
-      body: `${subtitle}${body ? `\n${body}` : ''}`,
+      body: body || subtitle || 'Новое сообщение',
       tag, renotify: true, icon: '/static/app-icon-180.png',
       data: {url},
     }),
