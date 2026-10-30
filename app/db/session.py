@@ -218,6 +218,14 @@ def init_db(settings: Settings) -> sessionmaker[Session]:
     Base.metadata.create_all(engine)
     if engine.dialect.name == "sqlite":
         with engine.begin() as connection:
+            push_columns = {row[1] for row in connection.execute(
+                text("PRAGMA table_info(web_push_subscriptions)"))}
+            if "trusted_device_id" not in push_columns:
+                connection.execute(text(
+                    "ALTER TABLE web_push_subscriptions ADD COLUMN trusted_device_id VARCHAR(32)"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS "
+                "ix_web_push_subscriptions_trusted_device_id "
+                "ON web_push_subscriptions (trusted_device_id)"))
             inbox_columns = {row[1] for row in connection.execute(
                 text("PRAGMA table_info(inbox_conversations)")
             )}

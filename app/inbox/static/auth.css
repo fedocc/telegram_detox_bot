@@ -1,0 +1,29 @@
+.auth-page { display:block; overflow:auto; min-height:100dvh; height:auto; padding:32px 20px; background:var(--canvas); color:var(--text) }
+.auth-page main { display:block; height:auto; min-width:0; flex:none }
+.auth-card { width:min(100%,420px); margin:5vh auto; padding:28px; border:1px solid var(--border); border-radius:16px; background:var(--panel) }
+.auth-icon { display:block; border-radius:14px; margin-bottom:20px }
+.auth-eyebrow { color:var(--muted); font-size:13px; margin-bottom:8px }
+.auth-page h1 { font-size:25px; margin:0 0 16px; line-height:1.2 }
+.auth-page h2 { font-size:18px; margin:24px 0 12px }
+.auth-page p { line-height:1.5; margin:12px 0 }
+.auth-page label { display:block; font-size:14px; margin-top:20px }
+.auth-page input { display:block; width:100%; margin-top:8px; min-height:48px; border:1px solid var(--border); border-radius:8px; padding:10px 12px; background:var(--canvas); color:var(--text); font-size:16px }
+.auth-primary,.auth-secondary { min-height:46px; padding:12px 16px; border-radius:8px; margin-top:12px; font-size:15px; font-weight:600 }
+.auth-primary { background:var(--primary); color:#141618; border:1px solid var(--primary) }
+.auth-secondary { border:1px solid var(--border); color:var(--text); background:transparent }
+.auth-card .auth-primary,.auth-card .auth-secondary { width:100% }
+.auth-page button:disabled { opacity:.5; cursor:wait }
+.auth-page .auth-note { color:var(--muted); font-size:13px }
+.pair-code { display:block; margin:16px 0; font-size:28px; font-weight:700; font-variant-numeric:tabular-nums; letter-spacing:2px }
+#auth-status,#device-status { color:var(--amber); overflow-wrap:anywhere }
+.device-panel { width:min(100%,760px); margin:0 auto }
+.device-heading a { display:inline-block; margin-bottom:16px; color:var(--primary) }
+.invite-box { padding:20px; margin-top:20px; border:1px solid var(--border); border-radius:12px; background:var(--panel) }
+.invite-box h2 { margin-top:0 }
+.invite-box img { display:block; max-width:100%; height:auto; border-radius:8px }
+.invite-box a { color:var(--primary); overflow-wrap:anywhere }
+.device-row { padding:16px 0; border-bottom:1px solid var(--border) }
+.device-row p { margin:6px 0; color:var(--muted); font-size:14px }
+.device-row .device-confirm-code { color:var(--text); font-size:20px; font-variant-numeric:tabular-nums }
+.audit-row { font-size:13px; color:var(--muted); padding:8px 0; border-bottom:1px solid var(--border) }
+@media (max-width:480px) { .auth-page { padding:20px 16px } .auth-card { margin:3vh auto; padding:24px 20px } .pair-code { font-size:25px } }

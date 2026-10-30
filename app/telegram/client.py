@@ -223,11 +223,18 @@ async def run_listener(
     else:
         from app.inbox.web import serve_inbox
 
+        device_auth = None
+        if settings.inbox_public_origin:
+            from app.inbox.device_auth import DeviceAuth
+            device_auth = DeviceAuth(session_factory, settings.inbox_public_origin,
+                                     proxy_ip=settings.inbox_public_proxy_ip)
         try:
             async with serve_inbox(
                 inbox,
                 allowed_origins=settings.allowed_inbox_origins,
                 library_management_enabled=settings.inbox_library_management_enabled,
+                device_auth=device_auth, public_host=settings.inbox_public_bind_host,
+                public_port=settings.inbox_public_port,
             ):
                 await client.run_until_disconnected()
         finally:

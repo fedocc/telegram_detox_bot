@@ -1,8 +1,8 @@
 'use strict';
 
-import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=21';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=21';
-import {createPushController} from './push.mjs?v=21';
+import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=22';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=22';
+import {createPushController} from './push.mjs?v=22';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
@@ -14,11 +14,11 @@ import {
   manualOpenButtonVisible,
   localImageClipboardUri, maintainMessageViewport, reactionEmojiPresentation,
   settleScrollBottom, bindReplyNavigation, reconcileKeyedRows,
-} from './ui.mjs?v=21';
+} from './ui.mjs?v=22';
 
-import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=21';
+import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=22';
 
-import {createAvatars} from './avatars.mjs?v=21';
+import {createAvatars} from './avatars.mjs?v=22';
 
 const playback = createPlaybackController(document);
 const avatars = createAvatars(document);
@@ -106,6 +106,10 @@ async function api(path, data) {
   }
   const result = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 401 && result.auth_required) {
+      playback.stopAll();
+      location.replace('/login?next=' + encodeURIComponent(location.pathname + location.search));
+    }
     const error = new Error(result.error || 'Ошибка соединения.');
     error.status = response.status;
     throw error;
@@ -1324,6 +1328,8 @@ async function poll() {
       const session = await api('/api/session');
       csrf = session.csrf; uploadMax = session.upload_max_mb * 1024 * 1024;
       libraryManagementEnabled = session.library_management_enabled === true;
+      $('devices-link').hidden = !session.device_management;
+      $('auth-logout').hidden = !session.public_auth;
       $('library-manage').hidden = !libraryManagementEnabled;
       $('empty-description').textContent = `Личные сообщения, @fedocc и ответы ожидают без таймера; после открытия доступны ${session.active_minutes} мин.`;
     }
@@ -1435,6 +1441,15 @@ $('composer').onsubmit = async event => {
     value.sending = false;
     if (selected === key && selectedMode === mode) renderComposer();
   }
+};
+
+$('auth-logout').onclick = async () => {
+  try {
+    await api('/auth/logout', {});
+    playback.stopAll();
+    for (const key of Object.keys(sessionStorage)) if (key.startsWith('draft:')) sessionStorage.removeItem(key);
+    location.replace('/login');
+  } catch (error) { showError('open-error', error.message); }
 };
 
 $('close').onclick = () => closeConversation(selected);
@@ -1579,7 +1594,7 @@ const notificationToggle = createNotificationToggle({
   },
 });
 
-const notifierClient = isMacNotifierClient({
+const notifierClient = ['127.0.0.1','localhost'].includes(location.hostname) && isMacNotifierClient({
   platform: navigator.userAgentData?.platform || navigator.platform,
   userAgent: navigator.userAgent,
   maxTouchPoints: navigator.maxTouchPoints,

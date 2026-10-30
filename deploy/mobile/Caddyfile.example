@@ -1,0 +1,16 @@
+# Append this site only after testing the authenticated listener.
+# Preserve other applications and validate before reloading Caddy.
+detox.45-80-228-215.sslip.io {
+    encode zstd gzip
+    header Strict-Transport-Security "max-age=31536000"
+    @admin path /devices /api/devices /api/devices/*
+    respond @admin 404
+    @ceremony path /auth/*
+    request_body @ceremony {
+        max_size 64KB
+    }
+    reverse_proxy 172.19.0.1:8789 {
+        header_up Host detox.45-80-228-215.sslip.io
+        header_up X-Real-IP {remote_host}
+    }
+}

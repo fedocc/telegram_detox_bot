@@ -12,8 +12,8 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" type="image/png" sizes="180x180" href="/static/app-icon-180.png">
   <link rel="apple-touch-icon" sizes="180x180" href="/static/app-icon-180.png">
-  <link rel="stylesheet" href="/static/style.css?v=21">
-  <script type="module" src="/static/app.js?v=21"></script>
+  <link rel="stylesheet" href="/static/style.css?v=22">
+  <script type="module" src="/static/app.js?v=22"></script>
 </head>
 <body>
   <div class="shell">
@@ -44,6 +44,8 @@
           <button id="push-disable" type="button" hidden>Выключить на этом устройстве</button>
         </section>
       </nav>
+      <a id="devices-link" class="settings-link" href="/devices" hidden>Доверенные устройства</a>
+      <button id="auth-logout" class="settings-link" type="button" aria-label="Выйти на этом устройстве" hidden>Выйти</button>
       <div id="notifications-control" class="notifications-control" hidden>
         <div class="notifications-heading">
           <span>Уведомления</span><small id="notifications-status" role="status"></small>

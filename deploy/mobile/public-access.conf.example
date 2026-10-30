@@ -1,0 +1,7 @@
+# /etc/systemd/system/telegram-detox.service.d/public-access.conf
+# The bridge address and Caddy peer IP must match this server's Docker network.
+[Service]
+Environment=INBOX_PUBLIC_ORIGIN=https://detox.45-80-228-215.sslip.io
+Environment=INBOX_PUBLIC_BIND_HOST=172.19.0.1
+Environment=INBOX_PUBLIC_PORT=8789
+Environment=INBOX_PUBLIC_PROXY_IP=172.19.0.2

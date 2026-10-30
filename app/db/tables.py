@@ -9,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -280,6 +281,8 @@ class ManualOpenUsage(Base):
 class WebPushSubscription(Base):
     __tablename__ = "web_push_subscriptions"
 
+    trusted_device_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     endpoint: Mapped[str] = mapped_column(Text, unique=True)
     p256dh: Mapped[str] = mapped_column(String(256))
@@ -302,3 +305,68 @@ class WebPushDelivery(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     next_attempt_at: Mapped[float] = mapped_column(Float, default=0)
     completed_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class InboxTrustedDevice(Base):
+    __tablename__ = "inbox_trusted_devices"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    label: Mapped[str] = mapped_column(String(64))
+    binding_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    credential_id: Mapped[bytes] = mapped_column(LargeBinary, unique=True)
+    credential_key: Mapped[bytes] = mapped_column(LargeBinary)
+    user_handle: Mapped[bytes] = mapped_column(LargeBinary)
+    sign_count: Mapped[int] = mapped_column(BigInteger, default=0)
+    backup_eligible: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[float] = mapped_column(Float)
+    approved_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trusted_until: Mapped[float] = mapped_column(Float, default=0)
+    revoked_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confirmation_code: Mapped[str] = mapped_column(String(6))
+    last_used_at: Mapped[float] = mapped_column(Float, default=0)
+    last_ip: Mapped[str] = mapped_column(String(45), default="")
+
+
+class InboxDeviceInvite(Base):
+    __tablename__ = "inbox_device_invites"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    manual_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    created_at: Mapped[float] = mapped_column(Float)
+    expires_at: Mapped[float] = mapped_column(Float)
+    consumed_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    revoked_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class InboxAuthChallenge(Base):
+    __tablename__ = "inbox_auth_challenges"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    challenge: Mapped[bytes] = mapped_column(LargeBinary)
+    device_id: Mapped[str] = mapped_column(String(32), index=True)
+    binding_hash: Mapped[str] = mapped_column(String(64))
+    invitation_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    user_handle: Mapped[bytes] = mapped_column(LargeBinary)
+    label: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[float] = mapped_column(Float)
+    expires_at: Mapped[float] = mapped_column(Float)
+    used_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class InboxDeviceSession(Base):
+    __tablename__ = "inbox_device_sessions"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    device_id: Mapped[str] = mapped_column(String(32), index=True)
+    csrf: Mapped[str] = mapped_column(String(43))
+    created_at: Mapped[float] = mapped_column(Float)
+    expires_at: Mapped[float] = mapped_column(Float)
+    last_used_at: Mapped[float] = mapped_column(Float)
+
+
+class InboxAuthAudit(Base):
+    __tablename__ = "inbox_auth_audit"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event: Mapped[str] = mapped_column(String(40))
+    device_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    label: Mapped[str] = mapped_column(String(64), default="")
+    ip: Mapped[str] = mapped_column(String(45), default="")
+    created_at: Mapped[float] = mapped_column(Float, index=True)

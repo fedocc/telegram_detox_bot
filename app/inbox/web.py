@@ -22,26 +22,35 @@ HOST = "127.0.0.1"
 PORT = 8787
 STATIC = Path(__file__).parent / "static"
 logger = logging.getLogger(__name__)
+DEVICE_SESSION_KEY = web.RequestKey("device_session", dict)
+AUTH_PATHS = frozenset({"/auth/status", "/auth/register/options", "/auth/register/finish",
+                        "/auth/login/options", "/auth/login/finish", "/auth/logout"})
 
 
-def create_app(service, *, port=PORT, allowed_origins=None, library_management_enabled=False):
+def create_app(service, *, port=PORT, allowed_origins=None, library_management_enabled=False,
+               device_auth=None, public_auth=False):
     csrf = secrets.token_urlsafe(32)
     local_origin = f"http://127.0.0.1:{port}"
-    allowed_origins = frozenset(allowed_origins or (local_origin,)) | {local_origin}
+    if public_auth and device_auth is None:
+        raise ValueError("Public listener requires authentication")
+    allowed_origins = (frozenset((device_auth.origin,)) if public_auth else
+                       frozenset(allowed_origins or (local_origin,)) | {local_origin})
     allowed_hosts = frozenset(urlsplit(origin).netloc for origin in allowed_origins)
 
     def security_headers(request):
         return {
-            "Cache-Control": ("no-store" if request.path.startswith("/api/")
+            "Cache-Control": ("no-store" if request.path.startswith(("/api/", "/auth/"))
+                              or request.path in {"/login", "/devices"}
                               else "no-cache" if request.path in {"/", "/sw.js"}
                               else "public, max-age=3600"),
             "X-Content-Type-Options": "nosniff",
             "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
             "Cross-Origin-Resource-Policy": "same-origin",
-            "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; "
+            "Content-Security-Policy": ("default-src 'none'; script-src 'self'; style-src 'self'; "
                 "img-src 'self' blob:; media-src 'self' blob:; manifest-src 'self'; "
-                "connect-src 'self' http://127.0.0.1:8788; worker-src 'self'; "
-                "base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+                + ("connect-src 'self'; " if public_auth else
+                   "connect-src 'self' http://127.0.0.1:8788; ") + "worker-src 'self'; "
+                "base-uri 'none'; frame-ancestors 'none'; form-action 'none'"),
         }
 
     @web.middleware
@@ -54,15 +63,53 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
                 raise InboxError("Недопустимый Origin.", 403)
             if request.headers.get("Sec-Fetch-Site") not in {None, "same-origin", "none"}:
                 raise InboxError("Межсайтовый запрос запрещён.", 403)
+            device_session = None
+            if public_auth:
+                from app.inbox.device_auth import DEVICE_COOKIE, SESSION_COOKIE
+                if request.path == "/devices" or request.path.startswith("/api/devices"):
+                    raise InboxError("Раздел недоступен.", 403)
+                device_session = device_auth.authenticate(request.cookies.get(DEVICE_COOKIE),
+                    request.cookies.get(SESSION_COOKIE), ip=device_auth.ip(request))
+                if device_session is not None:
+                    request[DEVICE_SESSION_KEY] = device_session
+                public_path = (request.path in {"/", "/login", "/manifest.webmanifest", "/sw.js"}
+                               or request.path in AUTH_PATHS
+                               or (request.path.startswith("/static/")
+                                   and request.match_info.get("name") in {
+                                       "app.js", "style.css", "playback.mjs", "notifications.mjs",
+                                       "push.mjs", "ui.mjs", "actions.mjs", "avatars.mjs",
+                                       "device-login.mjs", "device-management.mjs", "auth.css",
+                                       "app-icon.svg", "app-icon-180.png", "app-icon-512.png"}))
+                if not public_path and device_session is None:
+                    raise InboxError("Войдите с ключом доступа.", 401)
             if request.method not in {"GET", "HEAD"}:
-                if (origin not in allowed_origins or not secrets.compare_digest(
-                        request.headers.get("X-Inbox-CSRF", ""), csrf)):
+                auth_ceremony = public_auth and request.path in AUTH_PATHS
+                expected_csrf = device_session["csrf"] if device_session else csrf
+                valid_csrf = auth_ceremony or secrets.compare_digest(
+                    request.headers.get("X-Inbox-CSRF", ""), expected_csrf)
+                if origin not in allowed_origins or not valid_csrf:
                     raise InboxError("Перезагрузите страницу перед отправкой.", 403)
                 if request.content_type not in {"application/json", "multipart/form-data"}:
                     raise InboxError("Неподдерживаемый формат запроса.", 415)
-            response = await handler(request)
+            task = (asyncio.current_task() if device_session
+                    and not request.path.startswith("/auth/") else None)
+            if task is not None:
+                device_auth.active.setdefault(device_session["device_id"], set()).add(task)
+            try:
+                response = await handler(request)
+            finally:
+                if task is not None:
+                    tasks = device_auth.active.get(device_session["device_id"], set())
+                    tasks.discard(task)
+                    if not tasks:
+                        device_auth.active.pop(device_session["device_id"], None)
         except InboxError as exc:
-            response = web.json_response({"error": str(exc)}, status=exc.status)
+            if public_auth and request.path.startswith("/auth/"):
+                device_auth.record_rejection(device_auth.ip(request))
+            error_body = {"error": str(exc)}
+            if public_auth and exc.status == 401:
+                error_body["auth_required"] = True
+            response = web.json_response(error_body, status=exc.status)
             if exc.retry_after is not None:
                 response.headers["Retry-After"] = str(exc.retry_after)
         except web.HTTPException as exc:
@@ -75,15 +122,20 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
             response = web.json_response({"error": "Не удалось загрузить данные Telegram. "
                 "Попробуйте ещё раз; черновик сохранён."}, status=503)
         response.headers.update(security_headers(request))
+        if public_auth:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000"
         return response
 
     async def index(request):
+        if public_auth and request.get(DEVICE_SESSION_KEY) is None:
+            return web.FileResponse(STATIC / "login.html")
         return web.FileResponse(STATIC / "index.html")
 
     async def asset(request):
         name = request.match_info["name"]
         if name not in {"app.js", "style.css", "playback.mjs", "notifications.mjs",
                         "push.mjs", "ui.mjs", "actions.mjs", "avatars.mjs",
+                        "device-login.mjs", "device-management.mjs", "auth.css",
                         "app-icon.svg", "app-icon-180.png", "app-icon-512.png"}:
             raise web.HTTPNotFound()
         return web.FileResponse(STATIC / name)
@@ -95,7 +147,11 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         return web.FileResponse(STATIC / "sw.js")
 
     async def session(request):
-        return web.json_response({"csrf": csrf, "active_minutes": ACTIVE_MINUTES,
+        device_session = request.get(DEVICE_SESSION_KEY)
+        return web.json_response({"csrf": device_session["csrf"] if device_session else csrf,
+                                  "public_auth": public_auth,
+                                  "device_management": device_auth is not None and not public_auth,
+                                  "active_minutes": ACTIVE_MINUTES,
                                   "upload_max_mb": service.upload_max // (1024 * 1024),
                                   "library_management_enabled": library_management_enabled})
 
@@ -125,7 +181,8 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
             raise InboxError("Некорректная push-подписка.")
         try:
             return web.json_response(service.push.subscribe(
-                body.get("subscription"), body.get("device_label", "")
+                body.get("subscription"), body.get("device_label", ""),
+                trusted_device_id=(request.get(DEVICE_SESSION_KEY) or {}).get("device_id"),
             ))
         except ValueError:
             raise InboxError("Некорректная push-подписка.") from None
@@ -137,7 +194,8 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         if not isinstance(body, dict) or set(body) != {"subscription"}:
             raise InboxError("Некорректная push-подписка.")
         try:
-            return web.json_response(service.push.unsubscribe(body["subscription"]))
+            return web.json_response(service.push.unsubscribe(body["subscription"],
+                trusted_device_id=(request.get(DEVICE_SESSION_KEY) or {}).get("device_id")))
         except ValueError:
             raise InboxError("Некорректная push-подписка.") from None
 
@@ -646,15 +704,20 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         web.post(r"/api/conversations/{key:[a-f0-9]{32}}/upload", upload),
         web.get(r"/api/conversations/{key:[a-f0-9]{32}}/media/{message_id:[1-9][0-9]*}", media),
     ])
+    if device_auth is not None:
+        from app.inbox.device_web import add_device_routes
+        add_device_routes(app, device_auth, public=public_auth, static=STATIC,
+                          session_key=DEVICE_SESSION_KEY)
     return app
 
 
 @contextlib.asynccontextmanager
 async def serve_inbox(service, *, port=PORT, allowed_origins=None,
-                      library_management_enabled=False):
+                      library_management_enabled=False, device_auth=None,
+                      public_host="127.0.0.1", public_port=8789):
     runner = web.AppRunner(create_app(
         service, port=port, allowed_origins=allowed_origins,
-        library_management_enabled=library_management_enabled,
+        library_management_enabled=library_management_enabled, device_auth=device_auth,
     ),
                            access_log=None, shutdown_timeout=100)
     await runner.setup()
@@ -662,6 +725,7 @@ async def serve_inbox(service, *, port=PORT, allowed_origins=None,
     cleanup_task = None
     push_task = None
     preview_task = None
+    public_runner = None
 
     async def maintenance():
         while True:
@@ -691,6 +755,14 @@ async def serve_inbox(service, *, port=PORT, allowed_origins=None,
     try:
         await service.cleanup()
         await site.start()
+        if device_auth is not None:
+            public_runner = web.AppRunner(create_app(service, port=public_port,
+                library_management_enabled=False, device_auth=device_auth, public_auth=True),
+                access_log=None, shutdown_timeout=30)
+            await public_runner.setup()
+            site = web.TCPSite(public_runner, public_host, public_port)
+            await site.start()
+            logger.info("Authenticated public listener ready")
         logger.info("Mention inbox listening on http://127.0.0.1:%s", port)
         cleanup_task = asyncio.create_task(maintenance())
         push_task = asyncio.create_task(push_maintenance())
@@ -702,4 +774,6 @@ async def serve_inbox(service, *, port=PORT, allowed_origins=None,
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+        if public_runner is not None:
+            await public_runner.cleanup()
         await runner.cleanup()

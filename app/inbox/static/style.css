@@ -840,3 +840,8 @@ button.sender { padding:0; display:block; text-align:left; border-radius:3px }
 /* Photos replace initials without changing chat or profile layout. */
 .avatar { position:relative; overflow:hidden }
 .avatar img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; border-radius:inherit }
+
+.settings-link { display:block; width:100%; padding:10px 12px; text-align:left; font-size:12px; color:var(--muted); border-top:1px solid var(--border); text-decoration:none }
+.settings-link:hover { color:var(--primary); background:var(--panel) }
+
+@media (max-width:768px) { #auth-logout { position:absolute; top:env(safe-area-inset-top); right:max(12px,env(safe-area-inset-right)); width:auto; min-height:50px; padding:0 8px; border:0; z-index:1 } }

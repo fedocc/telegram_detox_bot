@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.db.tables import (
     InboxNotification,
+    InboxTrustedDevice,
     LibrarySource,
     WebPushDelivery,
     WebPushSubscription,
@@ -84,7 +85,7 @@ class WebPushService:
     def configured(self):
         return bool(self.private_key and self.public_key)
 
-    def subscribe(self, raw, device_label=""):
+    def subscribe(self, raw, device_label="", *, trusted_device_id=None):
         if not self.configured:
             raise RuntimeError("web push is not configured")
         value = validate_subscription(raw)
@@ -102,10 +103,16 @@ class WebPushService:
                             id=uuid4().hex, endpoint=value["endpoint"],
                             p256dh=value["p256dh"], auth=value["auth"],
                             device_label=device_label.strip(), created_at=now,
+                            trusted_device_id=trusted_device_id,
                             last_success_at=None, disabled_at=None,
                         )
                         session.add(row)
                     else:
+                        if (trusted_device_id
+                                and row.trusted_device_id not in {None, trusted_device_id}):
+                            raise ValueError("subscription belongs to another device")
+                        if trusted_device_id:
+                            row.trusted_device_id = trusted_device_id
                         row.p256dh = value["p256dh"]
                         row.auth = value["auth"]
                         row.device_label = device_label.strip()
@@ -116,13 +123,15 @@ class WebPushService:
                 continue
         raise RuntimeError("subscription conflict")
 
-    def unsubscribe(self, raw):
+    def unsubscribe(self, raw, *, trusted_device_id=None):
         value = validate_subscription(raw)
         with self.factory() as session:
             row = session.scalar(select(WebPushSubscription).where(
                 WebPushSubscription.endpoint == value["endpoint"]
             ))
             if row is not None and row.disabled_at is None:
+                if trusted_device_id and row.trusted_device_id != trusted_device_id:
+                    raise ValueError("subscription belongs to another device")
                 row.disabled_at = self.clock()
                 session.commit()
         return {"enabled": False}
@@ -191,6 +200,11 @@ class WebPushService:
             subscription = session.get(WebPushSubscription, subscription_id)
             if subscription is None or subscription.disabled_at is not None:
                 return
+            if subscription.trusted_device_id:
+                device = session.get(InboxTrustedDevice, subscription.trusted_device_id)
+                if (device is None or device.approved_at is None or device.revoked_at is not None
+                        or device.trusted_until <= now):
+                    return
             if delivery is None:
                 delivery = WebPushDelivery(
                     subscription_id=subscription_id, notification_id=event.id,
