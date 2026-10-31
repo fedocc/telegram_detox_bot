@@ -1,8 +1,8 @@
 'use strict';
 
-import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=25';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=25';
-import {createPushController} from './push.mjs?v=25';
+import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=26';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=26';
+import {createPushController} from './push.mjs?v=26';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
@@ -14,11 +14,11 @@ import {
   manualOpenButtonVisible,
   localImageClipboardUri, maintainMessageViewport, reactionEmojiPresentation,
   createMessageViewport, bindReplyNavigation, reconcileKeyedRows, bindMobileViewport,
-} from './ui.mjs?v=25';
+} from './ui.mjs?v=26';
 
-import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=25';
+import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=26';
 
-import {createAvatars} from './avatars.mjs?v=25';
+import {createAvatars} from './avatars.mjs?v=26';
 
 const playback = createPlaybackController(document);
 const avatars = createAvatars(document);
@@ -246,8 +246,7 @@ function renderLibrary() {
 }
 
 function renderManualOpenButton() {
-  const desktop = matchMedia('(min-width: 769px)').matches;
-  const available = manualOpenButtonVisible(manualQuota, desktop);
+  const available = manualOpenButtonVisible(manualQuota);
   $('manual-open-button').hidden = !available;
   if (!available) closeManualPicker();
 }
@@ -379,6 +378,7 @@ function deselect({message = '', removeCurrent = false, replaceUrl = true} = {})
   }
   selected = null; selectedMode = null;
   appView = 'home'; digestHistoryGeneration += 1;
+  closeManualPicker(); auxiliaryPanel = 'none'; pauseMenuOpen = false; syncAuxiliaryPanels();
   resetConversationSurface();
   renderList(); renderLibrary(); renderHeader();
   showError('open-error', message); showError('load-error', '');
@@ -1124,7 +1124,8 @@ function renderManualPicker() {
 
 async function toggleManualPicker() {
   if (manualPickerOpen) { closeManualPicker(); return; }
-  if (!matchMedia('(min-width: 769px)').matches || manualQuota.remaining <= 0) return;
+  if (!manualOpenButtonVisible(manualQuota)) return;
+  auxiliaryPanel = 'none'; pauseMenuOpen = false; syncAuxiliaryPanels();
   manualPickerOpen = true; manualPickerLoading = true; manualPickerError = ''; manualDialogs = [];
   $('manual-picker').hidden = false;
   $('manual-open-button').setAttribute('aria-expanded', 'true');
@@ -1166,9 +1167,8 @@ async function selectManualDialog(row) {
 }
 
 async function showDigestHistory({updateHistory = true} = {}) {
-  if (!matchMedia('(min-width: 769px)').matches) {
-    deselect({replaceUrl: true}); return;
-  }
+  if (selectedMode === 'inbox') releaseForegroundLease(selected);
+  closeManualPicker(); auxiliaryPanel = 'none'; pauseMenuOpen = false; syncAuxiliaryPanels();
   choosing += 1; pinsGeneration += 1;
   selected = null; selectedMode = null; appView = 'digests';
   const generation = ++digestHistoryGeneration;
@@ -1466,7 +1466,9 @@ $('auth-logout').onclick = async () => {
 
 $('close').onclick = () => closeConversation(selected);
 $('home').onclick = () => deselect();
+$('digest-home').onclick = () => deselect();
 $('manual-open-button').onclick = toggleManualPicker;
+$('manual-picker-close').onclick = closeManualPicker;
 $('digest-history-button').onclick = () => showDigestHistory();
 $('manual-picker-search').oninput = renderManualPicker;
 document.addEventListener('click', event => {

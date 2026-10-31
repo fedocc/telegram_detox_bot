@@ -257,9 +257,9 @@ export function isWritable(mode, source) {
   return mode === 'inbox' || (mode === 'library' && source?.writable === true);
 }
 
-export function manualOpenButtonVisible(quota, desktop = true) {
+export function manualOpenButtonVisible(quota) {
   const remaining = Number(quota?.remaining);
-  return Boolean(desktop && Number.isInteger(remaining) && remaining > 0);
+  return Boolean(Number.isInteger(remaining) && remaining > 0);
 }
 
 export function uploadWithinLimit(file, maxBytes) {

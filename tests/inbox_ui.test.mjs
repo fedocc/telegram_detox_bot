@@ -313,7 +313,9 @@ test('manual open action remains visible until both global daily uses are consum
   assert.equal(manualOpenButtonVisible({used:0, remaining:2, limit:2}), true);
   assert.equal(manualOpenButtonVisible({used:1, remaining:1, limit:2}), true);
   assert.equal(manualOpenButtonVisible({used:2, remaining:0, limit:2}), false);
-  assert.equal(manualOpenButtonVisible({used:0, remaining:2, limit:2}, false), false);
+  for (const remaining of [-1, 1.5, NaN, Infinity, undefined]) {
+    assert.equal(manualOpenButtonVisible({remaining}), false);
+  }
 });
 
 test('upload limit rejects empty and oversized files', () => {

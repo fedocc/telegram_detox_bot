@@ -1,4 +1,4 @@
-import {reconcileKeyedRows} from './ui.mjs?v=25';
+import {reconcileKeyedRows} from './ui.mjs?v=26';
 const $ = id => document.getElementById(id), views = new Map(), auditViews = new Map();
 let csrf = '', invitation = null, imageURL = null, loading = false;
 const node = (tag, text = '') => { const e = document.createElement(tag); e.textContent = text; return e; };
