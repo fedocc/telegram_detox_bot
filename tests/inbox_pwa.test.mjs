@@ -58,9 +58,9 @@ test('native Mac notifier bundle derives its identity icon from the canonical De
 
 test('service worker explicitly bypasses every API request', async () => {
   const worker = await readFile(new URL('sw.js', root), 'utf8');
-  assert.match(worker, /telegram-detox-shell-v16/);
+  assert.match(worker, /telegram-detox-shell-v26/);
   for (const asset of ['style.css', 'app.js', 'ui.mjs', 'notifications.mjs']) {
-    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=16`));
+    assert.match(worker, new RegExp(`/static/${asset.replace('.', '\\.')}\\?v=26`));
   }
   assert.match(worker, /url\.pathname\.startsWith\('\/api\/'\)/);
   assert.doesNotMatch(worker, /SHELL[^;]*\/api\//s);
@@ -77,8 +77,8 @@ test('mobile shell declares safe-area and removes the legacy minimum width', asy
   ]);
   assert.match(page, /viewport-fit=cover/);
   assert.match(page, /manifest\.webmanifest/);
-  assert.match(page, /style\.css\?v=16/);
-  assert.match(page, /app\.js\?v=16/);
+  assert.match(page, /style\.css\?v=26/);
+  assert.match(page, /app\.js\?v=26/);
   assert.match(page, /rel="apple-touch-icon" sizes="180x180" href="\/static\/app-icon-180\.png"/);
   assert.match(style, /@media \(max-width:768px\)/);
   assert.match(style, /safe-area-inset-bottom/);
@@ -124,8 +124,8 @@ test('history polling fast paths and pagination preserve existing message nodes'
 
 test('ordinary opens settle at bottom while explicit message navigation keeps exact focus', async () => {
   const app = await readFile(new URL('app.js', root), 'utf8');
-  assert.match(app, /await Promise\.all\(\[loadMessages\(key\), loadPins\('inbox', key\)\]\)[\s\S]*?if \(messageId\) await focusMessage\(messageId,[\s\S]*?else settleScrollBottom/);
-  assert.match(app, /await Promise\.all\(\[loadLibrary\(key, null, !changed\), loadPins\('library', key\)\]\)[\s\S]*?if \(messageId\) await focusMessage\(messageId,[\s\S]*?else settleScrollBottom/);
+  assert.match(app, /await Promise\.all\(\[loadMessages\(key\), loadPins\('inbox', key\)\]\)[\s\S]*?if \(messageId\) await focusMessage\(messageId,[\s\S]*?else messageViewport\.follow/);
+  assert.match(app, /await Promise\.all\(\[loadLibrary\(key, null, !changed\), loadPins\('library', key\)\]\)[\s\S]*?if \(messageId\) await focusMessage\(messageId,[\s\S]*?else messageViewport\.follow/);
   assert.match(app, /item\.node\.scrollIntoView\(\{block: 'center'\}\)/);
   assert.doesNotMatch(app, /trigger\.node\.scrollIntoView/);
   assert.match(app, /maintainMessageViewport\(list, messageNodes, \{atBottom, anchor, oldHeight\}\)/);
@@ -143,7 +143,7 @@ test('pins begin collapsed and data refresh preserves an explicit expansion', as
   assert.match(app, /\$\('pinned-list'\)\.hidden = !expanded/);
 });
 
-test('desktop Home is navigation only and mobile back keeps its existing action', async () => {
+test('Home is navigation only and mobile back keeps its existing action', async () => {
   const [page, app, style] = await Promise.all([
     readFile(new URL('index.html', root), 'utf8'),
     readFile(new URL('app.js', root), 'utf8'),
@@ -156,10 +156,10 @@ test('desktop Home is navigation only and mobile back keeps its existing action'
   assert.match(app, /const url = selected \? deepLinkFor[\s\S]*?: '\/'/);
   assert.match(app, /if \(removeCurrent && previousMode === 'inbox'\)/);
   assert.doesNotMatch(app, /\$\('home'\)\.onclick\s*=\s*\(\)\s*=>\s*closeConversation/);
-  assert.match(style, /@media \(max-width:768px\)[\s\S]*?\.list-actions \{ display:none \}/);
+  assert.match(style, /@media \(max-width:768px\)[\s\S]*?\.list-actions \{ display:flex;/);
 });
 
-test('digest history uses the restored desktop newspaper action and no Library row', async () => {
+test('digest history uses the newspaper action on both layouts and no Library row', async () => {
   const [page, app, style] = await Promise.all([
     readFile(new URL('index.html', root), 'utf8'),
     readFile(new URL('app.js', root), 'utf8'),
@@ -176,10 +176,10 @@ test('digest history uses the restored desktop newspaper action and no Library r
   assert.match(app, /if \(isDigestHistoryRoute\(location\.search\)\)/);
   assert.match(app, /prepareSelection[\s\S]*?appView = 'home'/);
   assert.match(app, /renderDigestHistory/);
-  assert.match(style, /@media \(max-width:768px\)[\s\S]*?\.list-actions \{ display:none \}/);
+  assert.match(style, /@media \(max-width:768px\)[\s\S]*?\.list-actions \{ display:flex;/);
 });
 
-test('foreground lease stays safe and manual picker is desktop-only without persistent rows', async () => {
+test('foreground lease stays safe and manual picker is available on both layouts without persistent rows', async () => {
   const [page, app, style] = await Promise.all([
     readFile(new URL('index.html', root), 'utf8'),
     readFile(new URL('app.js', root), 'utf8'),
@@ -203,8 +203,8 @@ test('foreground lease stays safe and manual picker is desktop-only without pers
     app.indexOf('function renderManualPicker'));
   assert.doesNotMatch(closePicker, /api\(|fetch\(/);
   assert.doesNotMatch(page, /id="quick-write"|id="quick-write-list"|>Написать</);
-  assert.match(style, /@media \(max-width:768px\)[\s\S]*?\.list-actions \{ display:none \}/);
-  assert.match(style, /@media \(max-width:768px\)[\s\S]*?\.manual-picker \{ display:none!important \}/);
+  assert.match(style, /@media \(max-width:768px\)[\s\S]*?\.list-actions \{ display:flex;/);
+  assert.match(style, /@media \(max-width:768px\)[\s\S]*?\.manual-picker \{ display:flex; flex-direction:column;/);
 });
 
 test('desktop and mobile chat back share navigation-only deselection', async () => {
@@ -326,9 +326,9 @@ test('all frontend shell references use the same cache version', async () => {
     readFile(new URL('sw.js', root), 'utf8'),
   ]);
   for (const source of [page, app, worker]) assert.doesNotMatch(source, /\?v=(?:[1-9])(?:\D|$)|shell-v[1-9](?:\D|$)/);
-  assert.match(worker, /telegram-detox-shell-v16/);
-  assert.match(page, /app\.js\?v=16/);
-  assert.match(app, /ui\.mjs\?v=16/);
+  assert.match(worker, /telegram-detox-shell-v26/);
+  assert.match(page, /app\.js\?v=26/);
+  assert.match(app, /ui\.mjs\?v=26/);
 });
 
 test('aggregate reactions render compactly and message reconciliation replaces only changed nodes', async () => {
@@ -340,8 +340,8 @@ test('aggregate reactions render compactly and message reconciliation replaces o
   assert.match(app, /'reaction-emoji', reactionEmojiPresentation\(fallback\)/);
   assert.match(app, /'reaction-count', String\(Number\(reaction\.count\)\)/);
   assert.match(app, /const meta = node\('div', 'message-meta'\)/);
-  assert.match(app, /meta\.append\(reactions, timestamp\)/);
-  assert.match(app, /else bubble\.append\(timestamp\)/);
+  assert.match(app, /meta\.append\(reactions, details\)/);
+  assert.match(app, /else bubble\.append\(details\)/);
   assert.match(app, /for \(const reaction of reactions \|\| \[\]\)/);
   assert.match(app, /custom\?\.available && custom\.format === 'static'/);
   assert.match(app, /custom\?\.available && custom\.format === 'video'/);

@@ -22,13 +22,36 @@ HOST = "127.0.0.1"
 PORT = 8787
 STATIC = Path(__file__).parent / "static"
 logger = logging.getLogger(__name__)
+DEVICE_SESSION_KEY = web.RequestKey("device_session", dict)
+AUTH_PATHS = frozenset({"/auth/status", "/auth/register/options", "/auth/register/finish",
+                        "/auth/login/options", "/auth/login/finish", "/auth/logout"})
 
 
-def create_app(service, *, port=PORT, allowed_origins=None, library_management_enabled=False):
+def create_app(service, *, port=PORT, allowed_origins=None, library_management_enabled=False,
+               device_auth=None, public_auth=False):
     csrf = secrets.token_urlsafe(32)
     local_origin = f"http://127.0.0.1:{port}"
-    allowed_origins = frozenset(allowed_origins or (local_origin,)) | {local_origin}
+    if public_auth and device_auth is None:
+        raise ValueError("Public listener requires authentication")
+    allowed_origins = (frozenset((device_auth.origin,)) if public_auth else
+                       frozenset(allowed_origins or (local_origin,)) | {local_origin})
     allowed_hosts = frozenset(urlsplit(origin).netloc for origin in allowed_origins)
+
+    def security_headers(request):
+        return {
+            "Cache-Control": ("no-store" if request.path.startswith(("/api/", "/auth/"))
+                              or request.path in {"/login", "/devices"}
+                              else "no-cache" if request.path in {"/", "/sw.js"}
+                              else "public, max-age=3600"),
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
+            "Cross-Origin-Resource-Policy": "same-origin",
+            "Content-Security-Policy": ("default-src 'none'; script-src 'self'; style-src 'self'; "
+                "img-src 'self' blob:; media-src 'self' blob:; manifest-src 'self'; "
+                + ("connect-src 'self'; " if public_auth else
+                   "connect-src 'self' http://127.0.0.1:8788; ") + "worker-src 'self'; "
+                "base-uri 'none'; frame-ancestors 'none'; form-action 'none'"),
+        }
 
     @web.middleware
     async def security(request, handler):
@@ -40,15 +63,53 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
                 raise InboxError("Недопустимый Origin.", 403)
             if request.headers.get("Sec-Fetch-Site") not in {None, "same-origin", "none"}:
                 raise InboxError("Межсайтовый запрос запрещён.", 403)
+            device_session = None
+            if public_auth:
+                from app.inbox.device_auth import DEVICE_COOKIE, SESSION_COOKIE
+                if request.path == "/devices" or request.path.startswith("/api/devices"):
+                    raise InboxError("Раздел недоступен.", 403)
+                device_session = device_auth.authenticate(request.cookies.get(DEVICE_COOKIE),
+                    request.cookies.get(SESSION_COOKIE), ip=device_auth.ip(request))
+                if device_session is not None:
+                    request[DEVICE_SESSION_KEY] = device_session
+                public_path = (request.path in {"/", "/login", "/manifest.webmanifest", "/sw.js"}
+                               or request.path in AUTH_PATHS
+                               or (request.path.startswith("/static/")
+                                   and request.match_info.get("name") in {
+                                       "app.js", "style.css", "playback.mjs", "notifications.mjs",
+                                       "push.mjs", "ui.mjs", "actions.mjs", "avatars.mjs",
+                                       "device-login.mjs", "device-management.mjs", "auth.css",
+                                       "app-icon.svg", "app-icon-180.png", "app-icon-512.png"}))
+                if not public_path and device_session is None:
+                    raise InboxError("Войдите с ключом доступа.", 401)
             if request.method not in {"GET", "HEAD"}:
-                if (origin not in allowed_origins or not secrets.compare_digest(
-                        request.headers.get("X-Inbox-CSRF", ""), csrf)):
+                auth_ceremony = public_auth and request.path in AUTH_PATHS
+                expected_csrf = device_session["csrf"] if device_session else csrf
+                valid_csrf = auth_ceremony or secrets.compare_digest(
+                    request.headers.get("X-Inbox-CSRF", ""), expected_csrf)
+                if origin not in allowed_origins or not valid_csrf:
                     raise InboxError("Перезагрузите страницу перед отправкой.", 403)
                 if request.content_type not in {"application/json", "multipart/form-data"}:
                     raise InboxError("Неподдерживаемый формат запроса.", 415)
-            response = await handler(request)
+            task = (asyncio.current_task() if device_session
+                    and not request.path.startswith("/auth/") else None)
+            if task is not None:
+                device_auth.active.setdefault(device_session["device_id"], set()).add(task)
+            try:
+                response = await handler(request)
+            finally:
+                if task is not None:
+                    tasks = device_auth.active.get(device_session["device_id"], set())
+                    tasks.discard(task)
+                    if not tasks:
+                        device_auth.active.pop(device_session["device_id"], None)
         except InboxError as exc:
-            response = web.json_response({"error": str(exc)}, status=exc.status)
+            if public_auth and request.path.startswith("/auth/"):
+                device_auth.record_rejection(device_auth.ip(request))
+            error_body = {"error": str(exc)}
+            if public_auth and exc.status == 401:
+                error_body["auth_required"] = True
+            response = web.json_response(error_body, status=exc.status)
             if exc.retry_after is not None:
                 response.headers["Retry-After"] = str(exc.retry_after)
         except web.HTTPException as exc:
@@ -60,27 +121,21 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
             logger.warning("Inbox request failed (%s)", type(exc).__name__)
             response = web.json_response({"error": "Не удалось загрузить данные Telegram. "
                 "Попробуйте ещё раз; черновик сохранён."}, status=503)
-        response.headers.update({
-            "Cache-Control": ("no-store" if request.path.startswith("/api/")
-                              else "no-cache" if request.path in {"/", "/sw.js"}
-                              else "public, max-age=3600"),
-            "X-Content-Type-Options": "nosniff",
-            "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
-            "Cross-Origin-Resource-Policy": "same-origin",
-            "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; "
-                "img-src 'self' blob:; media-src 'self' blob:; manifest-src 'self'; "
-                "connect-src 'self' http://127.0.0.1:8788; worker-src 'self'; "
-                "base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
-        })
+        response.headers.update(security_headers(request))
+        if public_auth:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000"
         return response
 
     async def index(request):
+        if public_auth and request.get(DEVICE_SESSION_KEY) is None:
+            return web.FileResponse(STATIC / "login.html")
         return web.FileResponse(STATIC / "index.html")
 
     async def asset(request):
         name = request.match_info["name"]
         if name not in {"app.js", "style.css", "playback.mjs", "notifications.mjs",
-                        "push.mjs", "ui.mjs",
+                        "push.mjs", "ui.mjs", "actions.mjs", "avatars.mjs",
+                        "device-login.mjs", "device-management.mjs", "auth.css",
                         "app-icon.svg", "app-icon-180.png", "app-icon-512.png"}:
             raise web.HTTPNotFound()
         return web.FileResponse(STATIC / name)
@@ -92,7 +147,11 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         return web.FileResponse(STATIC / "sw.js")
 
     async def session(request):
-        return web.json_response({"csrf": csrf, "active_minutes": ACTIVE_MINUTES,
+        device_session = request.get(DEVICE_SESSION_KEY)
+        return web.json_response({"csrf": device_session["csrf"] if device_session else csrf,
+                                  "public_auth": public_auth,
+                                  "device_management": device_auth is not None and not public_auth,
+                                  "active_minutes": ACTIVE_MINUTES,
                                   "upload_max_mb": service.upload_max // (1024 * 1024),
                                   "library_management_enabled": library_management_enabled})
 
@@ -122,7 +181,8 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
             raise InboxError("Некорректная push-подписка.")
         try:
             return web.json_response(service.push.subscribe(
-                body.get("subscription"), body.get("device_label", "")
+                body.get("subscription"), body.get("device_label", ""),
+                trusted_device_id=(request.get(DEVICE_SESSION_KEY) or {}).get("device_id"),
             ))
         except ValueError:
             raise InboxError("Некорректная push-подписка.") from None
@@ -134,7 +194,8 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         if not isinstance(body, dict) or set(body) != {"subscription"}:
             raise InboxError("Некорректная push-подписка.")
         try:
-            return web.json_response(service.push.unsubscribe(body["subscription"]))
+            return web.json_response(service.push.unsubscribe(body["subscription"],
+                trusted_device_id=(request.get(DEVICE_SESSION_KEY) or {}).get("device_id")))
         except ValueError:
             raise InboxError("Некорректная push-подписка.") from None
 
@@ -322,7 +383,8 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
 
     async def send(request):
         body = await request.json()
-        if not isinstance(body, dict) or set(body) - {"request_id", "text", "image", "reply_to"}:
+        if not isinstance(body, dict) or set(body) - {
+                "request_id", "text", "image", "reply_to", "quote_text", "quote_offset"}:
             raise InboxError("Допустимы только текст и изображение.")
         request_id = str(UUID(body.get("request_id", "")))
         raw = body.get("image")
@@ -332,8 +394,14 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
             raw = base64.b64decode(raw, validate=True)
         return web.json_response(await service.send(
             request.match_info["key"], request_id, body.get("text", ""), raw,
-            reply_to=body.get("reply_to"),
+            reply_to=body.get("reply_to"), quote_text=body.get("quote_text"),
+            quote_offset=body.get("quote_offset"),
         ))
+
+    def quote_fields(values):
+        offset = values.get("quote_offset")
+        return {"quote_text": values.get("quote_text"),
+                "quote_offset": int(offset) if offset is not None else None}
 
     async def read_upload(request):
         if request.content_type != "multipart/form-data":
@@ -349,11 +417,12 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
 
         try:
             async for part in reader:
-                if part.name in {"request_id", "text", "reply_to"} and part.filename is None:
+                if (part.name in {"request_id", "text", "reply_to", "quote_text", "quote_offset"}
+                        and part.filename is None):
                     if part.name in values:
                         raise InboxError("Поле отправлено дважды.")
                     values[part.name] = await small_text(
-                        part, 9000 if part.name == "text" else 100,
+                        part, 9000 if part.name in {"text", "quote_text"} else 100,
                     )
                 elif part.name == "file" and part.filename and upload is None:
                     path = service.upload_dir / f"{secrets.token_hex(16)}.upload"
@@ -396,7 +465,7 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
                     request.match_info["key"], request_id, values.get("text", ""),
                     file_path=item[0] if item else None,
                     filename=item[1] if item else None,
-                    mime_type=item[2] if item else None, reply_to=reply,
+                    mime_type=item[2] if item else None, reply_to=reply, **quote_fields(values),
                 ))
             finally:
                 if item:
@@ -410,6 +479,8 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
                 return web.json_response(await service.send_saved(
                     request_id, values.get("text", ""), file_path=item[0] if item else None,
                     filename=item[1] if item else None, mime_type=item[2] if item else None,
+                    reply_to=int(values["reply_to"]) if values.get("reply_to") else None,
+                    **quote_fields(values),
                 ))
             finally:
                 if item:
@@ -430,7 +501,7 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
                     file_path=item[0] if item else None,
                     filename=item[1] if item else None,
                     mime_type=item[2] if item else None,
-                    reply_to=reply,
+                    reply_to=reply, **quote_fields(values),
                 ))
             finally:
                 if item:
@@ -449,13 +520,18 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
                     file_path=item[0] if item else None,
                     filename=item[1] if item else None,
                     mime_type=item[2] if item else None,
-                    reply_to=reply,
+                    reply_to=reply, **quote_fields(values),
                 ))
             finally:
                 if item:
                     item[0].unlink(missing_ok=True)
 
     async def media(request):
+        if request.query.get("stream") == "1":
+            from app.inbox.streaming import stream_media
+
+            return await stream_media(request, service, "conversations",
+                request.match_info["key"], int(request.match_info["message_id"]))
         path, mime, name, inline = await service.media(
             request.match_info["key"], int(request.match_info["message_id"]),
         )
@@ -467,6 +543,11 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         return response
 
     async def library_media(request):
+        if request.query.get("stream") == "1":
+            from app.inbox.streaming import stream_media
+
+            return await stream_media(request, service, "library",
+                request.match_info["source"], int(request.match_info["message_id"]))
         path, mime, name, inline = await service.library_media(
             request.match_info["source"], int(request.match_info["message_id"]),
         )
@@ -479,6 +560,11 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         return response
 
     async def manual_write_media(request):
+        if request.query.get("stream") == "1":
+            from app.inbox.streaming import stream_media
+
+            return await stream_media(request, service, "quick-write",
+                request.match_info["source"], int(request.match_info["message_id"]))
         path, mime, name, inline = await service.manual_write_media(
             request.match_info["source"], int(request.match_info["message_id"]),
         )
@@ -502,7 +588,70 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         response.headers["Cache-Control"] = "private, max-age=31536000, immutable"
         return response
 
+    async def available_reactions(request):
+        return web.json_response(await service.available_reactions())
+
+    async def contacts(request):
+        return web.json_response(await service.contacts())
+
+    async def contact_profile(request):
+        return web.json_response(await service.contact_profile(request.match_info["token"]))
+
+    async def profile(request):
+        return web.json_response(await service.profile(
+            request.match_info["scope"], request.match_info["key"],
+            positive_query(request, "message")))
+
+    async def profile_photo(request):
+        content = await service.profile_photo(
+            request.match_info["scope"], request.match_info["key"],
+            positive_query(request, "message"))
+        return web.Response(body=content, content_type="image/jpeg", status=200 if content else 204)
+
+    async def contact_photo(request):
+        content = await service.contact_photo(request.match_info["token"])
+        return web.Response(body=content, content_type="image/jpeg", status=200 if content else 204)
+
+    async def message_reaction(request):
+        body = await request.json()
+        if not isinstance(body, dict) or set(body) != {"emoji"}:
+            raise InboxError("Выберите реакцию.")
+        return web.json_response(await service.set_reaction(
+            request.match_info["scope"], request.match_info["key"],
+            int(request.match_info["message_id"]), body["emoji"]))
+
+    async def digest_preview(request):
+        return web.json_response(await service.digest_preview(
+            request.match_info["source"], int(request.match_info["message_id"])))
+
+    async def digest_media(request):
+        from app.inbox.streaming import stream_media
+
+        return await stream_media(request, service, "digest",
+            request.match_info["source"], int(request.match_info["message_id"]))
+
+    async def prepare_headers(request, response):
+        response.headers.update(security_headers(request))
+
     app = web.Application(middlewares=[security], client_max_size=service.upload_max + 1024 * 1024)
+    app.on_response_prepare.append(prepare_headers)
+    app.add_routes([
+        web.get("/api/reactions", available_reactions),
+        web.get("/api/contacts", contacts),
+        web.get(r"/api/contacts/{token:[A-Za-z0-9_-]{1,64}}", contact_profile),
+        web.get(r"/api/contacts/{token:[A-Za-z0-9_-]{1,64}}/photo", contact_photo),
+        web.get(r"/api/{scope:conversations|library|quick-write}/"
+                r"{key:[A-Za-z0-9_-]{1,64}}/photo", profile_photo),
+        web.get(r"/api/{scope:conversations|library|quick-write}/"
+                r"{key:[A-Za-z0-9_-]{1,64}}/profile", profile),
+        web.post(r"/api/{scope:conversations|library|quick-write}/"
+                 r"{key:[A-Za-z0-9_-]{1,64}}/messages/"
+                 r"{message_id:[1-9][0-9]*}/reaction", message_reaction),
+        web.get(r"/api/digest/{source:[A-Za-z0-9_-]{1,64}}/messages/"
+                r"{message_id:[1-9][0-9]*}", digest_preview),
+        web.get(r"/api/digest/{source:[A-Za-z0-9_-]{1,64}}/media/"
+                r"{message_id:[1-9][0-9]*}", digest_media),
+    ])
     app.add_routes([
         web.get("/", index), web.get("/static/{name}", asset),
         web.get("/manifest.webmanifest", manifest), web.get("/sw.js", service_worker),
@@ -555,21 +704,28 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         web.post(r"/api/conversations/{key:[a-f0-9]{32}}/upload", upload),
         web.get(r"/api/conversations/{key:[a-f0-9]{32}}/media/{message_id:[1-9][0-9]*}", media),
     ])
+    if device_auth is not None:
+        from app.inbox.device_web import add_device_routes
+        add_device_routes(app, device_auth, public=public_auth, static=STATIC,
+                          session_key=DEVICE_SESSION_KEY)
     return app
 
 
 @contextlib.asynccontextmanager
 async def serve_inbox(service, *, port=PORT, allowed_origins=None,
-                      library_management_enabled=False):
+                      library_management_enabled=False, device_auth=None,
+                      public_host="127.0.0.1", public_port=8789):
     runner = web.AppRunner(create_app(
         service, port=port, allowed_origins=allowed_origins,
-        library_management_enabled=library_management_enabled,
+        library_management_enabled=library_management_enabled, device_auth=device_auth,
     ),
                            access_log=None, shutdown_timeout=100)
     await runner.setup()
     site = web.TCPSite(runner, HOST, port)
     cleanup_task = None
     push_task = None
+    preview_task = None
+    public_runner = None
 
     async def maintenance():
         while True:
@@ -579,6 +735,13 @@ async def serve_inbox(service, *, port=PORT, allowed_origins=None,
                     await service.cleanup()
             except Exception as exc:
                 logger.warning("Inbox cleanup failed (%s)", type(exc).__name__)
+
+    async def refresh_previews():
+        try:
+            async with asyncio.timeout(300):
+                await service.refresh_previews()
+        except Exception as exc:
+            logger.warning("Inbox preview refresh failed (%s)", type(exc).__name__)
 
     async def push_maintenance():
         while True:
@@ -592,14 +755,25 @@ async def serve_inbox(service, *, port=PORT, allowed_origins=None,
     try:
         await service.cleanup()
         await site.start()
+        if device_auth is not None:
+            public_runner = web.AppRunner(create_app(service, port=public_port,
+                library_management_enabled=False, device_auth=device_auth, public_auth=True),
+                access_log=None, shutdown_timeout=30)
+            await public_runner.setup()
+            site = web.TCPSite(public_runner, public_host, public_port)
+            await site.start()
+            logger.info("Authenticated public listener ready")
         logger.info("Mention inbox listening on http://127.0.0.1:%s", port)
         cleanup_task = asyncio.create_task(maintenance())
         push_task = asyncio.create_task(push_maintenance())
+        preview_task = asyncio.create_task(refresh_previews())
         yield
     finally:
-        for task in (cleanup_task, push_task):
+        for task in (cleanup_task, push_task, preview_task):
             if task:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+        if public_runner is not None:
+            await public_runner.cleanup()
         await runner.cleanup()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -56,6 +57,10 @@ class Settings(BaseSettings):
     inbox_upload_stale_hours: int = Field(default=24, ge=1, le=168)
     inbox_allowed_origins: str = "http://127.0.0.1:8787"
     inbox_cloudflare_origin: str = ""
+    inbox_public_origin: str = ""
+    inbox_public_bind_host: str = "127.0.0.1"
+    inbox_public_port: int = Field(default=8789, ge=1024, le=65535)
+    inbox_public_proxy_ip: str = ""
     inbox_library_management_enabled: bool = False
     web_push_vapid_private_key: str = ""
     web_push_vapid_subject: str = "mailto:fnikonov999@gmail.com"
@@ -128,6 +133,37 @@ class Settings(BaseSettings):
         if not origins or len(origins) != len(set(origins)):
             raise ValueError("INBOX_ALLOWED_ORIGINS must contain unique exact origins")
         return ",".join(origins)
+
+    @field_validator("inbox_public_origin")
+    @classmethod
+    def validate_public_origin(cls, value):
+        if not value:
+            return value
+        parsed = urlsplit(value)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+                or parsed.path or parsed.query or parsed.fragment or parsed.port not in {None, 443}
+                or "*" in value):
+            raise ValueError("INBOX_PUBLIC_ORIGIN must be an exact HTTPS origin")
+        try:
+            ipaddress.ip_address(parsed.hostname)
+        except ValueError:
+            return value
+        raise ValueError("Passkeys require a hostname")
+
+    @field_validator("inbox_public_bind_host")
+    @classmethod
+    def validate_public_bind(cls, value):
+        address = ipaddress.ip_address(value)
+        private = [ipaddress.ip_network(net) for net in
+                   ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
+        if address.is_loopback or any(address in network for network in private):
+            return value
+        raise ValueError("Public auth gateway must bind to loopback or an internal network")
+
+    @field_validator("inbox_public_proxy_ip")
+    @classmethod
+    def validate_public_proxy(cls, value):
+        return str(ipaddress.ip_address(value)) if value else ""
 
     @field_validator("gmail_sender_name")
     @classmethod

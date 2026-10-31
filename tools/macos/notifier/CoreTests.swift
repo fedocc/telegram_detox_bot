@@ -32,15 +32,25 @@ import Foundation
             event(3, preview: "latest", unread: 2),
             event(4, conversation: conversationB, preview: "other", unread: 1),
         ], cursor: 4), now: 1000)
-        check(grouped.count == 2, "one event per conversation")
-        check(grouped[0].event_id == 3 && grouped[0].preview == "latest"
-              && grouped[0].unread_count == 2, "latest preview and count win")
-        check(grouped[1].conversation_id == conversationB, "different conversations stay separate")
+        check(grouped.count == 3, "keep each event so the system can stack them")
+        check(grouped[0].event_id == 2 && grouped[0].preview == "first", "duplicate event is dropped")
+        check(grouped[1].event_id == 3 && grouped[1].preview == "latest"
+              && grouped[1].unread_count == 2, "next message remains a separate notification")
+        check(grouped[2].conversation_id == conversationB, "different conversations stay separate")
         check(state.consume(Feed(events: [event(4, conversation: conversationB)], cursor: 4),
                             now: 1000).isEmpty, "repeated poll")
         state = try JSONDecoder().decode(NotifierState.self, from: JSONEncoder().encode(state))
         check(state.consume(Feed(events: [event(4)], cursor: 4), now: 1000).isEmpty,
               "restart dedup")
+
+        check(notificationRequestIdentifier(event(2)) != notificationRequestIdentifier(event(3)),
+              "messages in one conversation have distinct request ids")
+        check(notificationRequestIdentifier(event(2)) == notificationRequestIdentifier(event(2)),
+              "a replay has the same request id")
+        check(notificationRequestIdentifier(event(-1)) == nil, "invalid event id")
+        check(notificationBody(event(3, preview: "Голосовое сообщение", unread: 3))
+              == "Голосовое сообщение", "ordinary body without Last prefix")
+        check(notificationBody(event(4, preview: "  ")) == "Новое сообщение", "legacy empty body")
 
         let legacyEvent = Data("""
             {"event_id":9,"conversation_id":"\(conversationA)","title":"T","topic_title":"",

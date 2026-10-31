@@ -17,6 +17,9 @@ BANNED_WRITES = {
     "send_read_acknowledge",
     "ReadHistoryRequest",
     "send_reaction",
+    "SendReactionRequest",
+    "SendMessageRequest",
+    "SendMediaRequest",
     "react",
     "join_channel",
     "leave_channel",
@@ -46,6 +49,21 @@ def scan_telegram_safety_source(source: str, path: str = "snippet.py") -> list[t
                             and n.value.attr == "client"
                             and isinstance(n.value.value, ast.Name)
                             and n.value.value.id == "self")
+    # User-triggered actions live in this exact allowlisted boundary.
+    if Path(path).as_posix().endswith("/app/inbox/interactions.py"):
+        for cls in tree.body:
+            if isinstance(cls, ast.ClassDef) and cls.name == "InteractionMixin":
+                for method in cls.body:
+                    if not isinstance(method, ast.AsyncFunctionDef):
+                        continue
+                    permitted = ({"SendReactionRequest"} if method.name == "set_reaction" else
+                                 {"SendMessageRequest", "SendMediaRequest"}
+                                 if method.name == "send_quote" else set())
+                    allowed.update(id(n) for n in ast.walk(method)
+                        if isinstance(n, ast.Attribute) and n.attr in permitted
+                        and isinstance(n.value, ast.Attribute) and n.value.attr == "messages"
+                        and isinstance(n.value.value, ast.Name)
+                        and n.value.value.id == "functions")
     for node in ast.walk(tree):
         if id(node) in allowed:
             continue

@@ -64,3 +64,36 @@ test('dispose pauses playback and removes the global listener', () => {
   const f = fixture(), a = f.media('audio'); a.play(); f.controller.dispose();
   assert.ok(a.paused); assert.equal(f.listeners.size, 0);
 });
+
+const {playbackFailureMessage} = await import('../app/inbox/static/playback.mjs');
+
+test('an expired chat is reported as expired access rather than an unsupported codec', async () => {
+  const result = await playbackFailureMessage({src:'/media', isConnected:true},
+    {name:'NotSupportedError'}, async () => ({ok:false,status:404,
+      json:async () => ({error:'Разговор закрыт или время активности истекло.'})}));
+  assert.equal(result,'Разговор закрыт или время активности истекло.');
+});
+
+test('an upstream failure is reported as a server failure', async () => {
+  const result = await playbackFailureMessage({src:'/media', isConnected:true},
+    {name:'NotSupportedError'}, async () => ({ok:false,status:503,json:async () => ({})}));
+  assert.match(result,/с сервера/);
+  assert.doesNotMatch(result,/браузере/);
+});
+
+test('a pause or removed player does not become a false media error or make a request', async () => {
+  const noRequest = async () => { throw new Error('unexpected request'); };
+  assert.equal(await playbackFailureMessage({isConnected:true},{name:'AbortError'},noRequest),null);
+  assert.equal(await playbackFailureMessage({isConnected:false},{name:'NotSupportedError'},noRequest),null);
+});
+
+test('media error probe stays bounded and releases its response', async () => {
+  let cancelled = false;
+  const result = await playbackFailureMessage({src:'/media', isConnected:true},
+    {name:'NotSupportedError'}, async (url, options) => {
+      assert.equal(url,'/media'); assert.equal(options.headers.Range,'bytes=0-0');
+      assert.equal(options.cache,'no-store');
+      return {ok:true,body:{cancel:async () => {cancelled=true;}}};
+    });
+  assert.ok(cancelled); assert.match(result,/Попробуйте ещё раз/);
+});

@@ -185,7 +185,7 @@ def test_digest_history_returns_one_success_per_local_day_for_last_week(settings
     assert [item["period_end"] for item in history] == sorted(
         [item["period_end"] for item in history], reverse=True,
     )
-    assert history[1]["items"][0]["links"] == ["/?library=course&message=2"]
+    assert history[1]["items"][0]["links"] == ["/?digest_source=course&message=2"]
     assert all(item.get("title") != "failed" for item in history)
 
 
@@ -208,7 +208,7 @@ async def test_window_idempotency_failed_cutoff_and_deep_link(settings):
     assert first.id == again.id and len(provider.calls) == 1
     assert service.windows[0] == (cutoff - timedelta(hours=24), cutoff)
     result = latest_digest(factory)
-    assert result["items"][0]["links"] == ["/?library=course&message=1"]
+    assert result["items"][0]["links"] == ["/?digest_source=course&message=1"]
 
     later = cutoff + timedelta(days=1)
     failing = Provider(fail=True)

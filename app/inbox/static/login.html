@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#1c1b1b">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Вход — Telegram Detox</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/static/app-icon-180.png">
+  <link rel="stylesheet" href="/static/style.css?v=26">
+  <link rel="stylesheet" href="/static/auth.css?v=26">
+  <script type="module" src="/static/device-login.mjs?v=26"></script>
+</head>
+<body class="auth-page">
+  <main class="auth-card">
+    <img class="auth-icon" src="/static/app-icon-180.png" alt="" width="56" height="56">
+    <p class="auth-eyebrow">Telegram Detox</p>
+    <h1 id="heading">Только ваши устройства</h1>
+    <p id="description">Этот браузер нужно подтвердить на Mac. Одна ссылка не открывает переписку.</p>
+    <section id="enrollment" hidden>
+      <label>Название устройства<input id="device-label" value="Мой iPhone" maxlength="64" autocomplete="off"></label>
+      <label id="invitation-field">Код приглашения с Mac<input id="invitation" inputmode="numeric" autocomplete="off" placeholder="12 цифр" maxlength="20"></label>
+      <p class="auth-note">Для значка на главном экране сначала выберите в Safari «Поделиться → На экран Домой». Откройте значок и введите здесь код с Mac.</p>
+      <button class="auth-primary" id="register" type="button">Подключить этот iPhone</button>
+    </section>
+    <section id="pending" hidden>
+      <p>Сверьте этот код с запросом на Mac и подтвердите устройство:</p>
+      <output id="confirmation-code" class="pair-code"></output>
+      <p class="auth-note">Ожидаю подтверждения. Переписка пока закрыта.</p>
+    </section>
+    <button class="auth-primary" id="login" type="button" hidden>Войти с ключом доступа</button>
+    <button class="auth-secondary" id="retry" type="button" hidden>Повторить проверку</button>
+    <p id="auth-status" role="status" aria-live="polite"></p>
+    <p class="auth-note">Ключ подтверждается через Face ID или код разблокировки телефона.</p>
+  </main>
+</body>
+</html>

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#1c1b1b">
+  <title>Доверенные устройства — Telegram Detox</title>
+  <link rel="stylesheet" href="/static/style.css?v=26">
+  <link rel="stylesheet" href="/static/auth.css?v=26">
+  <script type="module" src="/static/device-management.mjs?v=26"></script>
+</head>
+<body class="auth-page device-page">
+  <main class="device-panel">
+    <header class="device-heading"><a href="/">← К чатам</a><h1>Доверенные устройства</h1></header>
+    <p>Новый браузер получает доступ после сверки кода и вашего подтверждения здесь.</p>
+    <button id="create-invite" class="auth-primary" type="button">Добавить телефон</button>
+    <section id="invite" class="invite-box" hidden>
+      <h2>Откройте сайт на iPhone</h2>
+      <img id="invite-qr" alt="QR-код приглашения" width="220" height="220">
+      <p><a id="public-link" target="_blank" rel="noopener noreferrer"></a></p>
+      <p>Для значка: Safari → Поделиться → На экран Домой. Откройте значок и введите код приглашения:</p>
+      <output id="invite-code" class="pair-code"></output>
+      <p id="invite-expiry" class="auth-note"></p>
+      <button id="cancel-invite" class="auth-secondary" type="button">Отменить приглашение</button>
+    </section>
+    <p id="device-status" role="status" aria-live="polite"></p>
+    <h2>Устройства</h2>
+    <p id="no-devices" class="auth-note">Телефоны ещё не подключены.</p>
+    <div id="devices"></div>
+    <h2>Последние события</h2>
+    <div id="audit"></div>
+    <p class="auth-note">Mac с локальным подключением остаётся способом управления и восстановления доступа. С телефона этот раздел закрыт.</p>
+  </main>
+</body>
+</html>

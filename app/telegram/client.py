@@ -192,10 +192,16 @@ async def run_listener(
 
     @client.on(events.NewMessage(incoming=None, outgoing=None))
     async def handler(event) -> None:
-        if settings.mention_only_mode and (
-            event.out or event.sender_id == me.id or event.date < started_at
-        ):
-            return
+        if settings.mention_only_mode:
+            if event.date < started_at:
+                return
+            if event.out or event.sender_id == me.id:
+                if inbox is not None:
+                    try:
+                        await inbox.observe(event)
+                    except Exception as exc:
+                        logger.warning("Inbox preview update failed (%s)", type(exc).__name__)
+                return
         await ingest_event(
             event, settings=settings, session_factory=session_factory, llm=llm, email=email,
             ignored_chat_ids=(load_ignored_chats_from_settings(settings).chat_ids
@@ -217,11 +223,18 @@ async def run_listener(
     else:
         from app.inbox.web import serve_inbox
 
+        device_auth = None
+        if settings.inbox_public_origin:
+            from app.inbox.device_auth import DeviceAuth
+            device_auth = DeviceAuth(session_factory, settings.inbox_public_origin,
+                                     proxy_ip=settings.inbox_public_proxy_ip)
         try:
             async with serve_inbox(
                 inbox,
                 allowed_origins=settings.allowed_inbox_origins,
                 library_management_enabled=settings.inbox_library_management_enabled,
+                device_auth=device_auth, public_host=settings.inbox_public_bind_host,
+                public_port=settings.inbox_public_port,
             ):
                 await client.run_until_disconnected()
         finally:

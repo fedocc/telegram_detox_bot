@@ -1233,6 +1233,7 @@ async def test_pending_survives_listing_history_cleanup_and_new_trigger(service)
     assert service.store.get(row.id).opened_at is None
     event.id = 101
     event.raw_text = 'new @fedocc'
+    event.message = Message(101, event.raw_text)
     await service.observe(event)
     latest = service.store.get(row.id)
     assert latest.opened_at is None and latest.expires_at == 0
@@ -1670,10 +1671,17 @@ async def test_telegram_code_is_inbox_only_and_notification_is_redacted(
         stored_notification = session.scalar(select(InboxNotification))
         assert code_text not in stored_notification.preview
 
+    from unittest.mock import Mock
+    updates = Mock(wraps=service.store.update_preview)
+    monkeypatch.setattr(service.store, "update_preview", updates)
+    await service.observe(event, trigger="telegram_code", sender_is_bot=True)
     service.client.messages = [Message(77, code_text)]
     row = service.store.open(service.store.active()[0].id)
     history = await service.history(row.id)
     assert history["messages"][-1]["text"] == code_text
+    assert service.store.get_any(row.id).preview == "Новый код Telegram"
+    assert updates.call_count >= 2
+    assert all(call.args[2] == "Новый код Telegram" for call in updates.call_args_list)
 
 
 def test_concurrent_activation_keeps_one_canonical_row_and_all_events(service):
@@ -2491,7 +2499,7 @@ async def test_digest_source_scope_filters_before_fetch_and_ignores_library_memb
     await run_digest(service, service.store.factory, settings, now, provider)
     assert "PRIVATE HUMAN MARKER" not in str(provider.calls)
     link = latest_digest(service.store.factory)["items"][0]["links"][0]
-    assert link.startswith("/?library=") and "-100" not in link
+    assert link.startswith("/?digest_source=") and "-100" not in link
 
 
 async def test_digest_permanent_source_failure_isolated_and_library_soft_disabled(
@@ -2600,3 +2608,83 @@ async def test_digest_503_does_not_disable_library_source(settings, tmp_path):
         await service.digest_rows(now - timedelta(days=1), now)
     assert failure.value.status == 503
     assert service.store.library_source(source.id, enabled_only=False).library_enabled is True
+
+
+async def test_reply_uses_selected_quote_and_its_own_entities(service):
+    row = activate(service)
+    parent = Message(7, "Полный текст с другой ссылкой", entities=[
+        MessageEntityTextUrl(0, 6, "https://example.org/wrong")])
+    message = Message(100, "ответ", reply_to_msg_id=7, reply_to=SimpleNamespace(
+        quote_text="фрагмент", quote_entities=[
+            MessageEntityTextUrl(0, 8, "https://example.org/quote")]))
+    result = await service.serialize(message, row, {7: parent})
+    assert result["reply"]["text"] == "фрагмент"
+    assert result["reply"]["segments"] == [
+        {"text": "фрагмент", "url": "https://example.org/quote"}]
+    assert result["reply"]["id"] == 7
+
+
+@pytest.mark.parametrize("parent", [None, MessageEmpty(id=7, peer_id=PeerChannel(123))])
+async def test_selected_quote_survives_unavailable_original(service, parent):
+    row = activate(service)
+    message = Message(100, "ответ", reply_to_msg_id=7, parent=parent,
+                      reply_to=SimpleNamespace(quote_text="выделенный фрагмент"))
+    result = await service.serialize(message, row, {})
+    assert result["reply"] == {
+        "id": None, "sender": "", "text": "выделенный фрагмент",
+        "segments": [],
+    }
+
+
+async def test_own_message_updates_preview_without_attention(service):
+    row = activate(service)
+    before = service.store.get(row.id)
+    message = Message(200, "Мой последний ответ", out=True)
+    event = SimpleNamespace(chat_id=-100123, id=200, message=message,
+                            out=True, sender_id=1)
+    await service.observe(event)
+    after = service.store.get(row.id)
+    assert after.preview == "Вы: Мой последний ответ"
+    assert (after.trigger_id, after.unread_count, after.expires_at, after.activated_at) == (
+        before.trigger_id, before.unread_count, before.expires_at, before.activated_at)
+    service.store.update_preview(row.id, 150, "старый ответ")
+    assert service.store.get(row.id).preview == "Вы: Мой последний ответ"
+    service.store.activate(peer_id=row.peer_id, title=row.title, thread_id=0,
+                           is_forum=False, trigger_id=160, preview="запоздалое входящее")
+    assert service.store.get(row.id).preview == "Вы: Мой последний ответ"
+
+
+async def test_own_message_does_not_activate_closed_conversation(service):
+    row = activate(service)
+    service.store.close(row.id)
+    message = Message(200, "ответ в Telegram", out=True)
+    await service.observe(SimpleNamespace(chat_id=-100123, id=200, message=message,
+                                         out=True, sender_id=1))
+    assert service.store.active() == []
+
+
+async def test_preview_does_not_cross_forum_topics(service):
+    row = activate(service, thread=50, forum=True)
+    message = Message(200, "другая тема", thread=60, out=True)
+    await service.observe(SimpleNamespace(chat_id=-100123, id=200, message=message,
+                                         out=True, sender_id=1))
+    assert service.store.get(row.id).preview == row.preview
+
+
+async def test_history_refreshes_preview_from_latest_own_message(service):
+    row = activate(service)
+    service.client.messages = [Message(100, "входящее"), Message(200, "мой ответ", out=True)]
+    await service.history(row.id)
+    assert service.store.get(row.id).preview == "Вы: мой ответ"
+
+
+def test_latest_preview_survives_database_reinitialization(settings):
+    store = InboxStore(init_db(settings), lambda: set())
+    row = store.activate(peer_id="42", title="Чат", thread_id=0, is_forum=False,
+                         trigger_id=100, preview="входящее")
+    store.update_preview(row.id, 200, "мой ответ")
+    reloaded = InboxStore(init_db(settings), lambda: set())
+    assert reloaded.get(row.id).preview == "мой ответ"
+    assert reloaded.get(row.id).preview_message_id == 200
+    reloaded.update_preview(row.id, 150, "старое сообщение")
+    assert reloaded.get(row.id).preview == "мой ответ"

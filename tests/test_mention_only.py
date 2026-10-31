@@ -409,7 +409,7 @@ def test_mention_retry_does_not_touch_legacy_claims(session, now):
 
 
 @pytest.mark.asyncio
-async def test_listener_filters_self_and_pre_start_messages(
+async def test_listener_routes_own_messages_only_to_preview_and_filters_pre_start(
     mention_settings, session_factory, monkeypatch,
 ):
     from datetime import UTC, datetime, timedelta
@@ -446,8 +446,21 @@ async def test_listener_filters_self_and_pre_start_messages(
 
     monkeypatch.setattr(telegram_client, "make_client", lambda settings: FakeClient())
     monkeypatch.setattr(telegram_client, "ingest_event", ingest)
-    await telegram_client.run_listener(mention_settings, session_factory, ignored_chat_ids=set())
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock
+
+    @asynccontextmanager
+    async def serve(*args, **kwargs):
+        yield
+
+    inbox = SimpleNamespace(observe=AsyncMock())
+    monkeypatch.setattr("app.inbox.service.InboxService", lambda *args, **kwargs: inbox)
+    monkeypatch.setattr("app.inbox.web.serve_inbox", serve)
+    monkeypatch.setattr(FakeClient, "disconnect", AsyncMock(), raising=False)
+    await telegram_client.run_listener(mention_settings, session_factory,
+                                       ignored_chat_ids=set(), enable_inbox=True)
     assert [event.sender_id for event in seen] == [456, 777000]
+    assert [call.args[0].sender_id for call in inbox.observe.await_args_list] == [123, 456]
 
 
 @pytest.mark.parametrize("mine,reply_id,outgoing,ignored", [

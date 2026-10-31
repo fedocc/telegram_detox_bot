@@ -44,6 +44,9 @@ from telethon.tl.types import (
 )
 
 from app.db.tables import InboxSend
+from app.inbox.avatars import AvatarCache
+from app.inbox.errors import InboxError
+from app.inbox.interactions import InteractionMixin
 from app.inbox.library import SAVED_MESSAGES, LibraryChat, peer_type_for_marked_id
 from app.inbox.push import WebPushService
 from app.inbox.store import InboxStore
@@ -77,13 +80,6 @@ DIGEST_DIALOG_CONCURRENCY = 4
 DIGEST_PAGE_SIZE = 100
 
 
-class InboxError(Exception):
-    def __init__(self, message, status=400, *, retry_after=None):
-        super().__init__(message)
-        self.status = status
-        self.retry_after = retry_after
-
-
 class PeerRefreshUnavailable(Exception):
     """A transient Telegram failure, distinct from a completed no-match scan."""
 
@@ -103,6 +99,26 @@ def reply_preview_text(message) -> str:
             return label
     file = getattr(message, "file", None)
     return (getattr(file, "name", None) or "[Вложение]")[:500]
+
+
+def message_preview_text(message, *, own=False) -> str:
+    text = " ".join((getattr(message, "raw_text", None) or "").split())
+    label = next((label for kind, label in (
+        ("voice", "Голосовое сообщение"), ("video_note", "Кружок"),
+        ("sticker", "Стикер"), ("gif", "GIF"), ("photo", "Фото"),
+        ("audio", "Аудиофайл"), ("video", "Видео"), ("poll", "Опрос"),
+        ("contact", "Контакт"), ("venue", "Место"), ("geo", "Геопозиция"),
+    ) if getattr(message, kind, None)), None)
+    file = getattr(message, "file", None)
+    if label is None and file is not None:
+        name = getattr(file, "name", None)
+        label = f"Файл: {name}" if name else "Файл"
+    if label:
+        preview = f"{label}: {text}" if text else label
+    else:
+        preview = text or service_message_text(message) or (
+            "Вложение" if getattr(message, "media", None) else "Сообщение")
+    return (("Вы: " if own else "") + preview)[:500]
 
 
 def _service_person(entity) -> str:
@@ -317,7 +333,7 @@ def safe_link_segments(text, entities):
     return rich_text_segments(text, entities)
 
 
-class InboxService:
+class InboxService(InteractionMixin):
     def __init__(self, client, factory, ignored, cache_dir, self_id, clock=time.time,
                  library=None, upload_max_mb=100, upload_concurrency=2,
                  upload_stale_hours=24, web_push_private_key="", web_push_subject="",
@@ -330,10 +346,12 @@ class InboxService:
         self.timezone = timezone
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.avatars = AvatarCache(client, self.cache_dir.parent / "avatar_cache", clock)
         self.snapshots = OrderedDict()
         self.history_lock = asyncio.Lock()
         self.action_lock = asyncio.Lock()
         self.media_lock = asyncio.Lock()
+        self.stream_slots = asyncio.Semaphore(2)
         self.library = tuple(library or (SAVED_MESSAGES,))
         self.library_by_id = {row.id: row for row in self.library}
         self.store.seed_library(self.library)
@@ -390,9 +408,47 @@ class InboxService:
                 input_peer = None
         return self._input_identity(input_peer, event.chat_id, chat)
 
+    async def refresh_previews(self):
+        # Recover only the latest preview of accessible chats after a server restart.
+        # This does not open a conversation, acknowledge messages or create attention.
+        for index, row in enumerate(self.store.active()):
+            if index:
+                await asyncio.sleep(3)
+            row = self.store.get(row.id)
+            if row is None:
+                continue
+            if str(row.peer_id) == "777000":
+                self.store.update_preview(row.id, row.trigger_id, "Новый код Telegram")
+                continue
+            try:
+                self._check_telegram_cooldown()
+                async with asyncio.timeout(8):
+                    messages = await self._peer_call(row, lambda peer, thread=row.thread_id:
+                        self.client.get_messages(peer, limit=1, reply_to=thread or None))
+                latest = max((m for m in messages if m), key=lambda m: m.id, default=None)
+                current = self.store.get(row.id)
+                if latest and current and await self.belongs(latest, current):
+                    self.store.update_preview(row.id, latest.id, message_preview_text(
+                        latest, own=bool(getattr(latest, "out", False))))
+            except FloodWaitError as exc:
+                self._flood_wait_error(exc)
+                return
+            except InboxError as exc:
+                if exc.status == 429:
+                    return
+            except (RPCError, ValueError, OSError, TimeoutError):
+                continue
+
     async def observe(self, event, *, trigger=None, sender_is_bot=False):
-        if (str(event.chat_id) in self.store.ignored() or event.out
-                or event.sender_id == self.self_id):
+        if str(event.chat_id) in self.store.ignored():
+            return
+        for row in self.store.active():
+            if str(row.peer_id) == str(event.chat_id) and await self.belongs(event.message, row):
+                preview = ("Новый код Telegram" if str(event.chat_id) == "777000" else
+                           message_preview_text(event.message,
+                               own=event.out or event.sender_id == self.self_id))
+                self.store.update_preview(row.id, event.id, preview)
+        if event.out or event.sender_id == self.self_id:
             return
         source = self.store.library_source_for_peer(event.chat_id)
         # Bots remain excluded from ordinary Inbox/email, but an explicitly
@@ -431,7 +487,7 @@ class InboxService:
             title=title,
             trigger_id=event.id,
             preview=("Новый код Telegram" if trigger == "telegram_code"
-                     else event.raw_text or ""),
+                     else message_preview_text(event.message)),
             reason=reason,
             library_source_id=source.id if source else None,
             notifications_muted=bool(source and source.notifications_muted),
@@ -760,6 +816,8 @@ class InboxService:
                 output.append({"type": "paid", "emoji": "⭐", "count": count})
             else:
                 output.append({"type": "unknown", "emoji": "◉", "count": count})
+            if getattr(result, "chosen_order", None) is not None:
+                output[-1]["chosen"] = True
         return output
 
     async def library_history(self, source_id, before=None):
@@ -948,6 +1006,9 @@ class InboxService:
                         )
                         rows.append({
                             "source_id": source.id,
+                            "source_peer": {"peer_type": source.peer_type,
+                                "peer_id": source.peer_id, "access_hash": source.access_hash,
+                                "display_title": source.display_title},
                             "source_title": source.display_title,
                             "message_id": int(message.id),
                             "timestamp": date.isoformat(),
@@ -1504,21 +1565,28 @@ class InboxService:
         }
         reply_id = getattr(message, "reply_to_msg_id", None)
         if reply_id:
+            header = getattr(message, "reply_to", None)
+            quote = getattr(header, "quote_text", None)
+            quote_entities = getattr(header, "quote_entities", None)
             parent = by_id.get(reply_id)
             if parent is None:
                 parent = await message.get_reply_message()
             if parent is None or isinstance(parent, tl_types.MessageEmpty):
                 result["reply"] = {"id": None, "sender": "",
-                                   "text": "Сообщение недоступно", "segments": []}
+                                   "text": quote or "Сообщение недоступно",
+                                   "segments": safe_link_segments(quote, quote_entities)
+                                   if quote else []}
             elif await self.belongs(parent, row):
-                reply_text = reply_preview_text(parent)
+                reply_text = quote if quote else reply_preview_text(parent)
+                reply_entities = quote_entities if quote else (
+                    getattr(parent, "entities", None)
+                    if getattr(parent, "raw_text", None) else None)
                 parent_sender = getattr(parent, "sender", None)
                 result["reply"] = {"id": parent.id,
                                    "sender": display_name(parent_sender) if parent_sender else "",
                                    "text": reply_text,
                                    "segments": safe_link_segments(
-                                       reply_text, getattr(parent, "entities", None)
-                                       if getattr(parent, "raw_text", None) else None)}
+                                       reply_text, reply_entities)}
         if file:
             kind = "file"
             sticker_format = None
@@ -1616,6 +1684,12 @@ class InboxService:
         cursor = max([m.id for m in fetched if m] + [snapshot.get("cursor", 0)
                      if snapshot else row.trigger_id])
         by_id = dict(sorted(by_id.items())[-500:])
+        if by_id:
+            latest = by_id[max(by_id)]
+            preview = ("Новый код Telegram" if str(row.peer_id) == "777000" else
+                       message_preview_text(latest, own=bool(getattr(latest, "out", False))))
+            self.store.update_preview(key, latest.id, preview)
+            row = self.require(key)
         payload = {"conversation": conversation_json(row), "messages": (
             await self.serialize_many(by_id.values(), row, by_id)
         )}
@@ -1669,7 +1743,8 @@ class InboxService:
             session.commit()
 
     async def send(self, key, request_id, text, image=None, *, file_path=None,
-                   filename=None, mime_type=None, reply_to=None):
+                   filename=None, mime_type=None, reply_to=None,
+                   quote_text=None, quote_offset=None):
         async with self.action_lock:
             previous = await self._claim_send(request_id, key, insert=False)
             if previous:
@@ -1703,9 +1778,15 @@ class InboxService:
             await self._claim_send(request_id, key)
 
             async def send_to_conversation(peer):
-                target_reply = await self.validate_reply(peer, reply_to, row)
+                target_reply = await self.quoted_reply(
+                    peer, reply_to, quote_text, quote_offset, row)
                 default_reply = row.thread_id or None
                 async with asyncio.timeout(180):
+                    if isinstance(target_reply, tl_types.InputReplyToMessage):
+                        return await self.send_quote(peer, text, target_reply,
+                            attachment=photo or attachment,
+                            photo=photo is not None or not force_document,
+                            mime_type=mime_type, filename=filename)
                     if photo is None and file_path is None:
                         return await self.client.send_message(
                             peer, text, reply_to=target_reply or default_reply,
@@ -1751,6 +1832,11 @@ class InboxService:
                 raise InboxError("Связь прервалась. Статус отправки неизвестен; "
                                  "проверьте сообщения. Черновик сохранён.", 409) from None
             self._finish_send(request_id, sent)
+            self.store.update_preview(key, sent.id, message_preview_text(SimpleNamespace(
+                raw_text=text,
+                photo=photo is not None or (file_path is not None and not force_document),
+                file=SimpleNamespace(name=filename) if file_path is not None else None,
+            ), own=True))
             if manual_source is not None:
                 self.store.extend_manual_write(manual_source.id)
             else:
@@ -1777,7 +1863,7 @@ class InboxService:
         return await asyncio.to_thread(normalize_image, raw), False
 
     async def send_saved(self, request_id, text, *, file_path=None, filename=None,
-                         mime_type=None):
+                         mime_type=None, reply_to=None, quote_text=None, quote_offset=None):
         scope = "library:saved"
         async with self.action_lock:
             previous = await self._claim_send(request_id, scope, insert=False)
@@ -1799,16 +1885,22 @@ class InboxService:
             )))
             schedule = timedelta(seconds=delay)
             attachment, force_document = await self._attachment(file_path, mime_type)
+            target_reply = await self.quoted_reply("me", reply_to, quote_text, quote_offset)
             await self._claim_send(request_id, scope)
             try:
                 async with asyncio.timeout(180):
-                    if file_path is None:
+                    if isinstance(target_reply, tl_types.InputReplyToMessage):
+                        sent = await self.send_quote("me", text, target_reply,
+                            attachment=attachment, photo=not force_document,
+                            mime_type=mime_type, filename=filename, schedule=schedule)
+                    elif file_path is None:
                         sent = await self.client.send_message(
                             "me", text, parse_mode=None, link_preview=False, schedule=schedule,
+                            reply_to=target_reply,
                         )
                     else:
                         sent = await self.client.send_file(
-                            "me", attachment, caption=text, parse_mode=None,
+                            "me", attachment, caption=text, parse_mode=None, reply_to=target_reply,
                             force_document=force_document, mime_type=mime_type,
                             attributes=(self._file_attributes(filename)
                                         if force_document else None),
@@ -1837,13 +1929,15 @@ class InboxService:
     async def send_library(
         self, source_id, request_id, text, image=None, *, file_path=None,
         filename=None, mime_type=None, reply_to=None, manual=False,
+        quote_text=None, quote_offset=None,
     ):
         if source_id == SAVED_MESSAGES.id:
             if image is not None:
                 raise InboxError("Для Избранного используйте загрузку файла.")
             return await self.send_saved(
                 request_id, text, file_path=file_path, filename=filename,
-                mime_type=mime_type,
+                mime_type=mime_type, reply_to=reply_to,
+                quote_text=quote_text, quote_offset=quote_offset,
             )
         async with self.action_lock:
             # Reload after acquiring the shared permission/send boundary. A
@@ -1872,8 +1966,13 @@ class InboxService:
             await self._claim_send(request_id, scope)
 
             async def send_to_bot(peer):
-                target_reply = await self.validate_reply(peer, reply_to)
+                target_reply = await self.quoted_reply(peer, reply_to, quote_text, quote_offset)
                 async with asyncio.timeout(180):
+                    if isinstance(target_reply, tl_types.InputReplyToMessage):
+                        return await self.send_quote(peer, text, target_reply,
+                            attachment=photo or attachment,
+                            photo=photo is not None or not force_document,
+                            mime_type=mime_type, filename=filename)
                     if photo is None and file_path is None:
                         return await self.client.send_message(
                             peer, text, reply_to=target_reply, parse_mode=None,

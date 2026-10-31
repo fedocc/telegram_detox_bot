@@ -90,16 +90,16 @@ struct NotifierState: Codable {
         defer { bootstrap = false }
         guard effectiveEnabled(now: now), !bootstrap, let previous, feed.cursor >= previous else { return [] }
         var seen = Set<Int64>()
-        var latestByConversation = [String: AttentionEvent]()
+        var accepted = [AttentionEvent]()
         for event in feed.events.sorted(by: { $0.event_id < $1.event_id }) {
             guard event.event_id > previous, event.event_id <= feed.cursor,
                   seen.insert(event.event_id).inserted,
                   notificationIdentifier(event.conversation_id) != nil,
                   event.created_at >= now - 900, event.created_at <= now + 60,
                   mute_until.map({ event.created_at > $0 }) != false else { continue }
-            latestByConversation[event.conversation_id] = event
+            accepted.append(event)
         }
-        return latestByConversation.values.sorted { $0.event_id < $1.event_id }
+        return accepted
     }
 }
 func validConversationID(_ conversation: String) -> Bool {
@@ -107,6 +107,14 @@ func validConversationID(_ conversation: String) -> Bool {
 }
 func notificationIdentifier(_ conversation: String) -> String? {
     validConversationID(conversation) ? "conversation:\(conversation)" : nil
+}
+func notificationRequestIdentifier(_ event: AttentionEvent) -> String? {
+    guard event.event_id > 0, let group = notificationIdentifier(event.conversation_id) else { return nil }
+    return "\(group):event:\(event.event_id)"
+}
+func notificationBody(_ event: AttentionEvent) -> String {
+    let preview = plain(event.preview, limit: 240)
+    return preview.isEmpty ? "Новое сообщение" : preview
 }
 func inboxURL(_ conversation: String) -> URL {
     URL(string: inboxOrigin + "/" + (validConversationID(conversation)
