@@ -1,8 +1,8 @@
 'use strict';
 
-import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=24';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=24';
-import {createPushController} from './push.mjs?v=24';
+import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=25';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=25';
+import {createPushController} from './push.mjs?v=25';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
@@ -13,12 +13,12 @@ import {
   hasFileTransfer, isDigestHistoryRoute,
   manualOpenButtonVisible,
   localImageClipboardUri, maintainMessageViewport, reactionEmojiPresentation,
-  createMessageViewport, bindReplyNavigation, reconcileKeyedRows,
-} from './ui.mjs?v=24';
+  createMessageViewport, bindReplyNavigation, reconcileKeyedRows, bindMobileViewport,
+} from './ui.mjs?v=25';
 
-import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=24';
+import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=25';
 
-import {createAvatars} from './avatars.mjs?v=24';
+import {createAvatars} from './avatars.mjs?v=25';
 
 const playback = createPlaybackController(document);
 const avatars = createAvatars(document);
@@ -29,6 +29,7 @@ const avatar = (title, url, className = 'avatar', eager = false) => {
   return element;
 };
 const $ = id => document.getElementById(id);
+bindMobileViewport(window, document.documentElement);
 const messageViewport = createMessageViewport($('messages'));
 const node = (tag, className, text) => {
   const element = document.createElement(tag);
@@ -1078,7 +1079,7 @@ async function executeSearch({append = false} = {}) {
 function toggleSearch(open = $('search-panel').hidden) {
   $('search-panel').hidden = !open;
   $('search-toggle').setAttribute('aria-expanded', String(open));
-  if (open) $('search-input').focus();
+  if (open) $('search-input').focus({preventScroll: true});
   else { searchGeneration += 1; clearTimeout(searchTimer); }
 }
 
@@ -1128,7 +1129,7 @@ async function toggleManualPicker() {
   $('manual-picker').hidden = false;
   $('manual-open-button').setAttribute('aria-expanded', 'true');
   $('manual-picker-search').value = '';
-  renderManualPicker(); $('manual-picker-search').focus();
+  renderManualPicker(); $('manual-picker-search').focus({preventScroll: true});
   try {
     const result = await api('/api/manual-open/dialogs');
     manualQuota = result.quota || manualQuota;
@@ -1474,7 +1475,7 @@ document.addEventListener('click', event => {
 });
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape' && manualPickerOpen) {
-    closeManualPicker(); $('manual-open-button').focus();
+    closeManualPicker(); $('manual-open-button').focus({preventScroll: true});
   }
 });
 $('mobile-back').onclick = () => deselect();
@@ -1673,7 +1674,7 @@ let actionOrigin = null, reactionCatalog = null, reactionCatalogAt = 0, actionGe
 function hideMessageActions(restoreFocus = false) {
   actionGeneration++;
   $('message-actions').hidden = true;
-  if (restoreFocus) actionOrigin?.focus();
+  if (restoreFocus) actionOrigin?.focus({preventScroll: true});
   actionOrigin = null;
 }
 function showMessageActions(event, message, bubble) {
@@ -1745,7 +1746,7 @@ function showMessageActions(event, message, bubble) {
       value.reply = {id: message.id,
         text: fragment?.quote_text || (message.text || message.media?.name || 'Вложение').slice(0, 120),
         ...(fragment || {})};
-      value.requestId = null; renderComposer(); $('text').focus();
+      value.requestId = null; renderComposer(); $('text').focus({preventScroll: true});
     };
     addAction('Ответить', () => reply(null));
     addAction(quote ? 'Цитировать выделенное' : 'Для цитаты выделите текст', () => reply(quote), !quote);
@@ -1757,7 +1758,7 @@ function showMessageActions(event, message, bubble) {
   menu.style.left = `${Math.max(8, Math.min(x, innerWidth - menu.offsetWidth - 8))}px`;
   menu.style.top = `${Math.max(8, Math.min(y, innerHeight - menu.offsetHeight - 8))}px`;
   actionOrigin = event.currentTarget || bubble;
-  menu.querySelector('button')?.focus();
+  menu.querySelector('button')?.focus({preventScroll: true});
 }
 document.addEventListener('pointerdown', event => {
   if (!$('message-actions').contains(event.target)) hideMessageActions();
@@ -1770,7 +1771,7 @@ document.addEventListener('keydown', event => {
     const buttons = [...menu.querySelectorAll('button:not(:disabled)')];
     const direction = event.key === 'ArrowLeft' || event.key === 'ArrowUp' || event.shiftKey ? -1 : 1;
     const index = buttons.indexOf(document.activeElement);
-    buttons[(index + direction + buttons.length) % buttons.length]?.focus();
+    buttons[(index + direction + buttons.length) % buttons.length]?.focus({preventScroll: true});
     event.preventDefault();
   }
 });

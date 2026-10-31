@@ -379,3 +379,46 @@ export function reconcileKeyedRows(container, rows, views, create, update) {
     update(view, row);
   });
 }
+
+// The keyboard changes the visible viewport on iOS without resizing 100dvh.
+// Keep the app in that rectangle; only #messages should scroll inside a chat.
+export function bindMobileViewport(win, root) {
+  const mobile = win.matchMedia('(max-width: 768px)');
+  const viewport = win.visualViewport;
+  let frame = null;
+  const values = new Map();
+  const write = (name, value) => {
+    if (values.get(name) === value) return;
+    values.set(name, value);
+    if (value === null) root.style.removeProperty(name);
+    else root.style.setProperty(name, value);
+  };
+  const update = () => {
+    if (!mobile.matches) {
+      write('--app-viewport-height', null);
+      write('--app-viewport-top', null);
+      return;
+    }
+    // Preserve browser zoom: zooming must not shrink and reflow the app.
+    if (viewport && Math.abs(viewport.scale - 1) > 0.01) return;
+    const height = viewport?.height ?? win.innerHeight;
+    if (!Number.isFinite(height) || height <= 0) return;
+    const top = Math.max(0, viewport?.offsetTop || 0);
+    write('--app-viewport-height', `${height}px`);
+    write('--app-viewport-top', `${top}px`);
+  };
+  const schedule = () => {
+    if (frame !== null) return;
+    frame = win.requestAnimationFrame(() => { frame = null; update(); });
+  };
+  const events = [[win, 'resize'], [win, 'pageshow'], [mobile, 'change']];
+  if (viewport) events.push([viewport, 'resize'], [viewport, 'scroll']);
+  for (const [target, name] of events) target.addEventListener(name, schedule);
+  update();
+  return () => {
+    for (const [target, name] of events) target.removeEventListener(name, schedule);
+    if (frame !== null) win.cancelAnimationFrame(frame);
+    write('--app-viewport-height', null);
+    write('--app-viewport-top', null);
+  };
+}

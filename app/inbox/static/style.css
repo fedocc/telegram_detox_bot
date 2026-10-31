@@ -15,6 +15,7 @@
 
 * {
   box-sizing:border-box}
+.inbox-root,.inbox-root body { height:100%; overflow:hidden; overscroll-behavior:none }
 body {
   margin:0;
   color:var(--text);
@@ -702,8 +703,9 @@ dialog img {
 .dialog-order button { width:30px; height:30px; border:1px solid var(--border); border-radius:5px }
 
 @media (max-width:768px) {
+  .inbox-root body { position:fixed; inset:0; height:100% }
   body { width:100%; min-width:0; overflow:hidden }
-  .shell { display:block }
+  .shell { display:block; position:absolute; top:var(--app-viewport-top,0px); height:var(--app-viewport-height,100dvh) }
   aside { width:100%; height:100%; border-right:0; padding-top:var(--app-top-inset) }
   main { display:none; width:100%; height:100% }
   body.conversation-open aside { display:none }
@@ -722,7 +724,7 @@ dialog img {
   .notifications-control { display:none!important }
   body.notifier-client.notifications-open .notifications-control { position:fixed; z-index:10; display:block!important; right:max(14px,env(safe-area-inset-right)); bottom:calc(72px + env(safe-area-inset-bottom)); width:min(290px,calc(100vw - 28px)); margin:0; padding:11px; border:1px solid #ffffff20; border-radius:15px; background:#20252bf5; box-shadow:0 18px 50px #000a }
   body.notifier-client.notifications-open #notifications-menu { position:static; margin-top:7px }
-  .sidebar-tools { position:fixed; z-index:9; display:flex; align-items:center; justify-content:center; gap:10px; left:0; right:0; bottom:0; overflow:visible; padding:10px max(14px,env(safe-area-inset-right)) max(10px,env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left)); pointer-events:none }
+  .sidebar-tools { position:absolute; z-index:9; display:flex; align-items:center; justify-content:center; gap:10px; left:0; right:0; bottom:0; overflow:visible; padding:10px max(14px,env(safe-area-inset-right)) max(10px,env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left)); pointer-events:none }
   #mobile-dock { display:contents }
   #mobile-dock>button,.sidebar-tools>#auth-logout { pointer-events:auto; min-height:48px; border:1px solid #ffffff20; background:#252a30f2; box-shadow:inset 0 1px #ffffff12,0 9px 30px #0007; color:var(--text) }
   #mobile-library { min-width:154px; padding:0 21px; border-radius:24px; font-weight:600 }
@@ -738,7 +740,7 @@ dialog img {
   #push-panel strong { display:block; font-size:15px }
   #push-panel p { margin:5px 0 13px; color:var(--muted); font-size:12px }
   #push-panel button { width:100%; min-height:42px; margin-top:6px; border:1px solid #ffffff1c; border-radius:12px; background:#ffffff09 }
-  .chat-header { min-height:52px; height:auto; padding-top:var(--app-top-inset); padding-left:max(6px,env(safe-area-inset-left)); padding-right:max(8px,env(safe-area-inset-right)) }
+  .chat-header { min-height:calc(52px + var(--app-top-inset)); height:auto; padding-top:var(--app-top-inset); padding-left:max(6px,env(safe-area-inset-left)); padding-right:max(8px,env(safe-area-inset-right)) }
   .chat-back { width:40px; height:44px; font-size:30px!important; color:var(--primary) }
   .chat-header .avatar { display:none }
   .chat-header h1 { flex:1 }
