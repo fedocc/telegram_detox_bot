@@ -64,6 +64,7 @@ INLINE_MEDIA_TYPES = frozenset({
 LIBRARY_PAGE_SIZE = 50
 SEARCH_PAGE_SIZE = 30
 PIN_CACHE_SECONDS = 60
+LIBRARY_WRITE_CACHE_SECONDS = 60
 MEDIA_ALLOW_SECONDS = 120
 PEER_RETRY_SECONDS = 60
 PEER_ERRORS = (
@@ -356,6 +357,7 @@ class InboxService(InteractionMixin):
         self.library_by_id = {row.id: row for row in self.library}
         self.store.seed_library(self.library)
         self.library_snapshots = OrderedDict()
+        self.library_write_permissions = OrderedDict()
         self.pin_snapshots = OrderedDict()
         self.media_allowances = OrderedDict()
         self.dialog_tokens = OrderedDict()
@@ -493,13 +495,12 @@ class InboxService(InteractionMixin):
             notifications_muted=bool(source and source.notifications_muted),
         )
 
-    @staticmethod
-    def _source_json(source):
+    def _source_json(self, source):
         if isinstance(source, LibraryChat):
             return {
                 "id": source.id,
                 "title": source.title,
-                "writable": source.writable,
+                "writable": self._source_writable(source),
                 "notifications_muted": False,
                 "allow_bot_write": False,
                 "digest_excluded": False,
@@ -509,7 +510,7 @@ class InboxService(InteractionMixin):
         return {
             "id": source.id,
             "title": source.display_title,
-            "writable": bool(source.is_bot and source.allow_bot_write),
+            "writable": self._source_writable(source),
             "notifications_muted": bool(source.notifications_muted),
             "allow_bot_write": bool(source.allow_bot_write),
             "digest_excluded": bool(source.digest_excluded),
@@ -578,10 +579,111 @@ class InboxService(InteractionMixin):
         return source.title if isinstance(source, LibraryChat) else source.display_title
 
     @staticmethod
-    def _source_writable(source):
-        if isinstance(source, LibraryChat):
-            return source.writable
-        return bool(source.is_bot and source.allow_bot_write)
+    def _source_peer_type(source):
+        return getattr(source, "peer_type", None) or peer_type_for_marked_id(source.peer_id)
+
+    def _library_write_enabled(self, source):
+        if source.id == SAVED_MESSAGES.id:
+            return True
+        if not getattr(source, "library_enabled", True):
+            return False
+        if str(source.peer_id) in {str(self.self_id), "777000"}:
+            return False
+        return not getattr(source, "is_bot", False) or bool(source.allow_bot_write)
+
+    def _source_writable(self, source):
+        if source.id == SAVED_MESSAGES.id:
+            return True
+        if not self._library_write_enabled(source):
+            return False
+        cached = self.library_write_permissions.get(source.id)
+        if cached and self.clock() - cached[0] < LIBRARY_WRITE_CACHE_SECONDS:
+            return cached[1]
+        # Users and basic groups are known locally. A marked channel ID can
+        # represent either a broadcast channel or a supergroup: resolve it first.
+        return self._source_peer_type(source) in {"user", "chat"}
+
+    @staticmethod
+    def _library_entity_writable(entity, peer_type, permissions=None):
+        if entity is None or any(getattr(entity, flag, False) for flag in (
+            "deactivated", "deleted", "left", "is_self",
+        )):
+            return False
+        if peer_type == "channel" and (
+            getattr(entity, "broadcast", False)
+            or not (getattr(entity, "megagroup", False) or getattr(entity, "gigagroup", False))
+        ):
+            return False
+        if peer_type == "user":
+            return True
+        if peer_type not in {"chat", "channel"} or getattr(permissions, "has_left", False):
+            return False
+        participant = getattr(permissions, "participant", None)
+        for rights in (getattr(entity, "banned_rights", None),
+                       getattr(participant, "banned_rights", None)):
+            if any(getattr(rights, flag, False) for flag in (
+                "view_messages", "send_messages", "send_plain",
+            )):
+                return False
+        admin = bool(getattr(entity, "creator", False)
+                     or getattr(entity, "admin_rights", None)
+                     or getattr(permissions, "is_admin", False))
+        if admin:
+            return True
+        if getattr(entity, "gigagroup", False):
+            return False
+        defaults = getattr(entity, "default_banned_rights", None)
+        return not any(getattr(defaults, flag, False) for flag in (
+            "view_messages", "send_messages", "send_plain",
+        ))
+
+    async def _refresh_library_write(self, source, *, force=False, strict=False):
+        if source.id == SAVED_MESSAGES.id:
+            return True
+        if not self._library_write_enabled(source):
+            return False
+        cached = self.library_write_permissions.get(source.id)
+        if not force and cached and self.clock() - cached[0] < LIBRARY_WRITE_CACHE_SECONDS:
+            return cached[1]
+        peer_type = self._source_peer_type(source)
+        getter = getattr(self.client, "get_entity", None)
+        try:
+            if getter is None:
+                # Compatibility for local fixtures and lightweight clients.
+                writable = peer_type in {"user", "chat"}
+            else:
+                entity = await self._peer_call(source, getter)
+                permissions = None
+                group = peer_type == "chat" or (peer_type == "channel" and (
+                    getattr(entity, "megagroup", False) or getattr(entity, "gigagroup", False)
+                ))
+                get_permissions = getattr(self.client, "get_permissions", None)
+                if group and get_permissions is not None:
+                    permissions = await self._peer_call(
+                        source, lambda peer: get_permissions(peer, "me")
+                    )
+                writable = self._library_entity_writable(entity, peer_type, permissions)
+                if getattr(entity, "bot", False) and not getattr(source, "allow_bot_write", False):
+                    writable = False
+        except InboxError:
+            if strict:
+                raise
+            return False
+        except (RPCError, ValueError, OSError, TimeoutError):
+            if strict:
+                raise InboxError(
+                    "Не удалось проверить права отправки. Черновик сохранён.", 503
+                ) from None
+            return False
+        self.library_write_permissions[source.id] = (self.clock(), writable)
+        self.library_write_permissions.move_to_end(source.id)
+        while len(self.library_write_permissions) > 256:
+            self.library_write_permissions.popitem(last=False)
+        return writable
+
+    async def _require_library_write(self, source):
+        if not await self._refresh_library_write(source, force=True, strict=True):
+            raise InboxError("Этот чат доступен только для чтения.", 403)
 
     def _flood_wait_error(self, exc=None):
         if exc is not None:
@@ -838,6 +940,7 @@ class InboxService(InteractionMixin):
         fetched = fetched[:LIBRARY_PAGE_SIZE]
         fetched.sort(key=lambda message: message.id)
         by_id = {message.id: message for message in fetched}
+        await self._refresh_library_write(source)
         payload = {
             "source": self._source_json(source),
             "messages": await self.serialize_many(
@@ -1252,6 +1355,7 @@ class InboxService(InteractionMixin):
                 raise InboxError("Писать можно только Telegram-боту.", 422)
             source = self.store.update_library_source(source.id, **changes)
         self.library_snapshots.clear()
+        self.library_write_permissions.pop(source.id, None)
         return self._source_json(source)
 
     async def open_manual_write(self, token):
@@ -1750,6 +1854,8 @@ class InboxService(InteractionMixin):
             if previous:
                 return previous
             row = self.require(key)
+            if not self.client.is_connected():
+                raise InboxError("Telegram не подключён. Черновик сохранён.", 503)
             source = self.store.library_source_for_peer(row.peer_id, enabled_only=False)
             manual_source = source if (
                 source is not None
@@ -1760,11 +1866,9 @@ class InboxService(InteractionMixin):
                 row.library_source_id
                 or (source is not None and source.library_enabled)
             ) and manual_source is None:
-                raise InboxError(
-                    "Отправляйте сообщения выбранному источнику через Библиотеку.", 403
-                )
-            if not self.client.is_connected():
-                raise InboxError("Telegram не подключён. Черновик сохранён.", 503)
+                if source is None:
+                    source = self.library_source(row.library_source_id)
+                await self._require_library_write(source)
             self._check_telegram_cooldown()
             if not isinstance(text, str) or len(text.encode("utf-16-le")) // 2 > (
                 1024 if image is not None or file_path is not None else 4096
@@ -1948,13 +2052,10 @@ class InboxService(InteractionMixin):
             previous = await self._claim_send(request_id, scope, insert=False)
             if previous:
                 return previous
-            if not manual and (not source.library_enabled or not source.allow_bot_write):
-                raise InboxError("Отправка этому источнику не разрешена.", 403)
-            if not manual and not await self._verify_source_bot(source):
-                self.store.update_library_source(source.id, allow_bot_write=False)
-                raise InboxError("Источник больше не является Telegram-ботом.", 403)
             if not self.client.is_connected():
                 raise InboxError("Telegram не подключён. Черновик сохранён.", 503)
+            if not manual:
+                await self._require_library_write(source)
             if not isinstance(text, str) or len(text.encode("utf-16-le")) // 2 > (
                 1024 if image is not None or file_path is not None else 4096
             ):
@@ -1965,7 +2066,7 @@ class InboxService(InteractionMixin):
             attachment, force_document = await self._attachment(file_path, mime_type)
             await self._claim_send(request_id, scope)
 
-            async def send_to_bot(peer):
+            async def send_to_source(peer):
                 target_reply = await self.quoted_reply(peer, reply_to, quote_text, quote_offset)
                 async with asyncio.timeout(180):
                     if isinstance(target_reply, tl_types.InputReplyToMessage):
@@ -1988,7 +2089,7 @@ class InboxService(InteractionMixin):
                     )
 
             try:
-                sent = await self._peer_call(source, send_to_bot)
+                sent = await self._peer_call(source, send_to_source)
             except InboxError:
                 with self.store.factory() as session:
                     session.execute(delete(InboxSend).where(
@@ -2003,11 +2104,11 @@ class InboxService(InteractionMixin):
                     ))
                     session.commit()
                 raise InboxError(
-                    "Telegram отклонил отправку боту. Черновик сохранён.", 422
+                    "Telegram отклонил отправку в этот чат. Черновик сохранён.", 422
                 ) from None
             except (OSError, TimeoutError):
                 raise InboxError(
-                    "Статус отправки неизвестен; проверьте чат бота.", 409
+                    "Статус отправки неизвестен; проверьте сообщения в чате.", 409
                 ) from None
             self._finish_send(request_id, sent)
             if manual:

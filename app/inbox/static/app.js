@@ -1,8 +1,8 @@
 'use strict';
 
-import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=26';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=26';
-import {createPushController} from './push.mjs?v=26';
+import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=27';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=27';
+import {createPushController} from './push.mjs?v=27';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
@@ -14,11 +14,11 @@ import {
   manualOpenButtonVisible,
   localImageClipboardUri, maintainMessageViewport, reactionEmojiPresentation,
   createMessageViewport, bindReplyNavigation, reconcileKeyedRows, bindMobileViewport,
-} from './ui.mjs?v=26';
+} from './ui.mjs?v=27';
 
-import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=26';
+import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=27';
 
-import {createAvatars} from './avatars.mjs?v=26';
+import {createAvatars} from './avatars.mjs?v=27';
 
 const playback = createPlaybackController(document);
 const avatars = createAvatars(document);
@@ -952,6 +952,12 @@ async function loadSource(key, before = null, refresh = false) {
     const suffix = before ? `?before=${encodeURIComponent(before)}` : '';
     const result = await api(`/api/library/${encodeURIComponent(key)}/messages${suffix}`);
     if (selected !== key || selectedMode !== 'library') return;
+    const source = library.find(row => row.id === key);
+    if (source && result.source) {
+      const wasWritable = source.writable;
+      Object.assign(source, result.source);
+      if (wasWritable !== source.writable) renderComposer();
+    }
     if (before || !refresh || !olderCursorInitialized) {
       nextBefore = advanceOlderCursor(before, result.next_before);
       olderCursorInitialized = true;
