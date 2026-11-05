@@ -110,7 +110,7 @@ final class Notifier: NSObject, NSApplicationDelegate, UNUserNotificationCenterD
     }
     func notify(_ event: AttentionEvent) {
         guard let identifier = notificationRequestIdentifier(event),
-              let group = notificationIdentifier(event.conversation_id) else { return }
+              let group = notificationGroup(event) else { return }
         let content = UNMutableNotificationContent()
         let title = plain(event.title, limit: 100)
         content.title = title.isEmpty ? "Telegram" : title

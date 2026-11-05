@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 
 from app.config import Settings
 from app.db.session import init_db
-from app.db.tables import MorningDigest
+from app.db.tables import InboxNotification, MorningDigest
 from app.inbox.digest import (
     DigestItem,
     DigestPayload,
@@ -206,6 +206,12 @@ async def test_window_idempotency_failed_cutoff_and_deep_link(settings):
     first = await run_digest(service, factory, settings, cutoff, provider)
     again = await run_digest(service, factory, settings, cutoff, provider)
     assert first.id == again.id and len(provider.calls) == 1
+    with factory() as session:
+        events = list(session.scalars(select(InboxNotification)))
+        assert len(events) == 1
+        assert events[0].trigger_reason == "digest_ready"
+        assert events[0].preview == "1 пункт. Нажмите, чтобы открыть."
+        assert "Сдать работу" not in events[0].preview
     assert service.windows[0] == (cutoff - timedelta(hours=24), cutoff)
     result = latest_digest(factory)
     assert result["items"][0]["links"] == ["/?digest_source=course&message=1"]
@@ -216,9 +222,13 @@ async def test_window_idempotency_failed_cutoff_and_deep_link(settings):
         await run_digest(service, factory, settings, later, failing)
     except RuntimeError:
         pass
+    with factory() as session:
+        assert session.scalar(select(func.count(InboxNotification.id))) == 1
     provider2 = Provider()
     await run_digest(service, factory, settings, later, provider2)
     assert service.windows[-1][0] == cutoff
+    with factory() as session:
+        assert session.scalar(select(func.count(InboxNotification.id))) == 2
 
 
 async def test_reconciliation_retries_transient_failure_at_same_canonical_cutoff(settings):

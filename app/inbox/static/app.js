@@ -1,8 +1,8 @@
 'use strict';
 
-import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=27';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=27';
-import {createPushController} from './push.mjs?v=27';
+import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=28';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=28';
+import {createPushController} from './push.mjs?v=28';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
@@ -14,11 +14,11 @@ import {
   manualOpenButtonVisible,
   localImageClipboardUri, maintainMessageViewport, reactionEmojiPresentation,
   createMessageViewport, bindReplyNavigation, reconcileKeyedRows, bindMobileViewport,
-} from './ui.mjs?v=27';
+} from './ui.mjs?v=28';
 
-import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=27';
+import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=28';
 
-import {createAvatars} from './avatars.mjs?v=27';
+import {createAvatars} from './avatars.mjs?v=28';
 
 const playback = createPlaybackController(document);
 const avatars = createAvatars(document);

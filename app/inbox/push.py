@@ -22,6 +22,7 @@ from app.db.tables import (
     WebPushDelivery,
     WebPushSubscription,
 )
+from app.inbox.digest_notifications import DIGEST_READY, DIGEST_URL, is_digest_notification
 
 KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 MAX_ATTEMPTS = 3
@@ -116,6 +117,8 @@ class WebPushService:
                         row.p256dh = value["p256dh"]
                         row.auth = value["auth"]
                         row.device_label = device_label.strip()
+                        if row.disabled_at is not None:
+                            row.created_at = now
                         row.disabled_at = None
                     session.commit()
                     return {"enabled": True}
@@ -137,6 +140,11 @@ class WebPushService:
         return {"enabled": False}
 
     def _payload(self, event, badge):
+        if is_digest_notification(event):
+            return json.dumps({
+                "kind": "digest", "title": event.title, "body": event.preview,
+                "tag": "telegram-detox:digest", "url": DIGEST_URL, "badge": badge,
+            }, ensure_ascii=False)
         count = max(1, int(event.unread_count or 1))
         reason = {
             "direct_reply": "Ответ на ваше сообщение",
@@ -173,14 +181,26 @@ class WebPushService:
             latest_by_conversation = {}
             for event in reversed(recent):
                 latest_by_conversation[event.conversation_id] = event
+            latest_digest = session.scalar(select(InboxNotification).where(
+                InboxNotification.trigger_reason == DIGEST_READY,
+                InboxNotification.created_at >= now - 86400,
+                InboxNotification.suppressed.is_(False),
+            ).order_by(InboxNotification.id.desc()).limit(1))
+            if latest_digest is not None and is_digest_notification(latest_digest):
+                latest_by_conversation[latest_digest.conversation_id] = latest_digest
             events = list(latest_by_conversation.values())
             muted_ids = set(session.scalars(select(LibrarySource.id).where(
                 LibrarySource.notifications_muted.is_(True)
             )))
         for subscription in subscriptions:
             for event in events:
+                if event.created_at < subscription.created_at:
+                    continue
+                if is_digest_notification(event):
+                    await self._deliver(subscription.id, event, self._payload(event, badge), now)
+                    continue
                 conversation = active.get(event.conversation_id)
-                if (event.created_at < subscription.created_at or conversation is None
+                if (conversation is None
                         or event.peer_id in self.store.ignored()
                         or event.trigger_id <= conversation.last_seen_message_id
                         or conversation.library_source_id in muted_ids):

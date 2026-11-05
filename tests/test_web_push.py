@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,7 @@ from sqlalchemy import func, select
 
 from app.db.session import init_db
 from app.db.tables import WebPushDelivery, WebPushSubscription
+from app.inbox.digest_notifications import digest_notification
 from app.inbox.push import WebPushService, validate_subscription
 from app.inbox.service import InboxService
 from app.inbox.store import InboxStore
@@ -70,6 +72,72 @@ def test_public_vapid_config_and_subscription_is_idempotent(push_fixture):
 def test_unsubscribe_is_idempotent(push_fixture):
     push_fixture.push.subscribe(subscription())
     assert push_fixture.push.unsubscribe(subscription()) == {"enabled": False}
+
+
+def queue_digest(fixture, *, count=3, digest_id=1):
+    record = SimpleNamespace(id=digest_id,
+        payload_json=json.dumps({"items": [{"summary": "Full private digest text"}] * count}),
+        generated_at=datetime.fromtimestamp(fixture.clock[0], UTC).replace(tzinfo=None))
+    with fixture.factory() as session:
+        session.add(digest_notification(record))
+        session.commit()
+
+
+async def test_digest_uses_normal_feed_and_one_short_push_without_chat_access(push_fixture):
+    f = push_fixture
+    f.push.subscribe(subscription())
+    f.clock[0] += 1
+    queue_digest(f)
+    feed = f.store.notifications(after=0)
+    assert len(feed["events"]) == 1
+    assert feed["events"][0]["trigger_reason"] == "digest_ready"
+    assert not f.store.active() and f.store.unread_total() == 0
+    await f.push.deliver_pending()
+    await f.push.deliver_pending()
+    assert len(f.sent) == 1
+    payload = json.loads(f.sent[0]["data"])
+    assert payload["kind"] == "digest" and payload["url"] == "/?view=digests"
+    assert payload["tag"] == "telegram-detox:digest" and payload["badge"] == 0
+    assert payload["body"] == "3 пункта. Нажмите, чтобы открыть."
+    assert "Full private" not in f.sent[0]["data"]
+
+
+async def test_enabling_push_does_not_replay_digest_from_while_disabled(push_fixture):
+    f = push_fixture
+    f.push.subscribe(subscription())
+    f.push.unsubscribe(subscription())
+    f.clock[0] += 1
+    queue_digest(f)
+    await f.push.deliver_pending()
+    assert not f.sent
+    f.clock[0] += 1
+    f.push.subscribe(subscription())
+    await f.push.deliver_pending()
+    assert not f.sent
+    f.clock[0] += 1
+    queue_digest(f, digest_id=2)
+    await f.push.deliver_pending()
+    assert len(f.sent) == 1
+
+
+def test_empty_digest_is_compact_and_old_digest_does_not_reappear_in_feed(push_fixture):
+    f = push_fixture
+    queue_digest(f, count=0)
+    event = f.store.notifications(after=0)["events"][0]
+    assert event["preview"].startswith("За день ничего важного.")
+    f.clock[0] += 86401
+    assert f.store.notifications(after=0)["events"] == []
+    assert f.store.notifications(after=0)["cursor"] > 0
+
+
+def test_digest_notification_survives_database_reopen_without_creating_a_chat(
+    push_fixture, settings,
+):
+    queue_digest(push_fixture)
+    restarted = InboxStore(init_db(settings), lambda: set(), clock=lambda: push_fixture.clock[0])
+    events = restarted.notifications(after=0)["events"]
+    assert len(events) == 1 and events[0]["conversation_id"] == "digest"
+    assert not restarted.active() and restarted.unread_total() == 0
     assert push_fixture.push.unsubscribe(subscription()) == {"enabled": False}
 
 

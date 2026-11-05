@@ -119,6 +119,27 @@ import Foundation
               "click route")
         check(inboxURL("https://evil.test").absoluteString == "http://127.0.0.1:8787/",
               "invalid route fallback")
+        let digest = AttentionEvent(event_id: 21, conversation_id: "digest",
+            title: "Сводка готова", topic_title: "", preview: "3 пункта. Нажмите, чтобы открыть.",
+            trigger_reason: "digest_ready", created_at: 1000)
+        var digestState = NotifierState(enabled: true, cursor: 20, bootstrap: false)
+        check(digestState.consume(Feed(events: [digest], cursor: 21), now: 1000).count == 1,
+              "ON accepts a new digest")
+        check(digestState.consume(Feed(events: [digest], cursor: 21), now: 1000).isEmpty,
+              "digest does not repeat on polling")
+        check(notificationGroup(digest) == "telegram-detox:digest", "digest grouping")
+        check(notificationRequestIdentifier(digest) == "telegram-detox:digest:event:21",
+              "stable digest request identifier")
+        check(inboxURL("digest").absoluteString == inboxOrigin + "/?view=digests",
+              "digest opens full summary")
+        check(notificationGroup(event(21, conversation: "digest")) == nil,
+              "invalid conversation cannot impersonate a digest")
+        digestState = NotifierState(enabled: false, cursor: 20, bootstrap: false)
+        check(digestState.consume(Feed(events: [digest], cursor: 21), now: 1000).isEmpty,
+              "OFF suppresses digest")
+        digestState = NotifierState(enabled: true, cursor: 20, bootstrap: false, mute_until: 1600)
+        check(digestState.consume(Feed(events: [digest], cursor: 21), now: 1000).isEmpty,
+              "PAUSE suppresses digest")
         check(plain(" hi\n\tthere ", limit: 8) == "hi there", "plain preview")
 
         let base = ["host": "127.0.0.1:8788", "origin": "http://127.0.0.1:8787"]

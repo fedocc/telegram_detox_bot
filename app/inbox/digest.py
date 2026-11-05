@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from app.db.tables import MorningDigest
+from app.inbox.digest_notifications import digest_notification
 
 logger = logging.getLogger(__name__)
 PROMPT_VERSION = "morning-v1"
@@ -432,6 +433,8 @@ async def run_digest(
             model=settings.digest_model, prompt_version=PROMPT_VERSION,
             payload_json=json.dumps(stored, ensure_ascii=False), status="success")
         session.add(record)
+        session.flush()
+        session.add(digest_notification(record))
         session.commit()
         session.refresh(record)
         return record
