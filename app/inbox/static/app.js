@@ -1,8 +1,8 @@
 'use strict';
 
-import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=28';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=28';
-import {createPushController} from './push.mjs?v=28';
+import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=29';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=29';
+import {createPushController} from './push.mjs?v=29';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
@@ -14,11 +14,12 @@ import {
   manualOpenButtonVisible,
   localImageClipboardUri, maintainMessageViewport, reactionEmojiPresentation,
   createMessageViewport, bindReplyNavigation, reconcileKeyedRows, bindMobileViewport,
-} from './ui.mjs?v=28';
+} from './ui.mjs?v=29';
 
-import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=28';
+import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=29';
 
-import {createAvatars} from './avatars.mjs?v=28';
+import {createAvatars} from './avatars.mjs?v=29';
+import {messageSummary, renderContent} from './content.mjs?v=29';
 
 const playback = createPlaybackController(document);
 const avatars = createAvatars(document);
@@ -740,6 +741,7 @@ function messageNode(message) {
     quote.append(node('strong', '', message.reply.sender), text); bubble.append(quote);
   }
   if (message.media) bubble.append(attachment(message.media));
+  if (message.content) bubble.append(renderContent(message.content));
   if (message.text) {
     const paragraph = node('p', 'message-text');
     appendSegments(paragraph, message.segments, message.text, message.mention); bubble.append(paragraph);
@@ -995,7 +997,7 @@ function renderPins(pins) {
   $('pinned-count').textContent = pins.length > 1 ? `· ${pins.length}` : '';
   $('pinned-list').replaceChildren(...pins.map(pin => {
     const item = node('article', 'pin-item'), preview = node('div', 'pin-preview');
-    appendSegments(preview, pin.segments, pin.system || pin.text || pin.media?.name || 'Сообщение');
+    appendSegments(preview, pin.segments, messageSummary(pin));
     const open = node('button', '', 'Открыть');
     open.type = 'button'; open.onclick = () => focusMessage(pin.id);
     item.append(preview, open); return item;
@@ -1044,7 +1046,7 @@ function renderSearchResults() {
       node('span', '', message.sender || ''));
     const text = node('div', 'search-result-text');
     appendSegments(text, message.segments,
-      message.system || message.text || message.media?.name || 'Вложение');
+      messageSummary(message));
     content.append(meta, text);
     const open = node('button', '', 'Открыть');
     open.type = 'button'; open.onclick = () => focusMessage(message.id);
@@ -1752,7 +1754,7 @@ function showMessageActions(event, message, bubble) {
       if (selected !== key || selectedMode !== mode) return;
       const value = draft();
       value.reply = {id: message.id,
-        text: fragment?.quote_text || (message.text || message.media?.name || 'Вложение').slice(0, 120),
+        text: fragment?.quote_text || messageSummary(message).slice(0, 120),
         ...(fragment || {})};
       value.requestId = null; renderComposer(); $('text').focus({preventScroll: true});
     };
@@ -1874,6 +1876,7 @@ async function openDigestMessage(source, messageId, updateHistory = true) {
     $('digest-message-title').textContent = result.title || 'Сообщение из сводки';
     card.append(node('strong', 'sender', message.sender));
     if (message.media) card.append(attachment(message.media));
+    if (message.content) card.append(renderContent(message.content));
     const text = node('p', 'message-text');
     appendSegments(text, message.segments, message.text); card.append(text);
     card.append(node('time', 'timestamp', new Date(message.timestamp).toLocaleString('ru-RU')));

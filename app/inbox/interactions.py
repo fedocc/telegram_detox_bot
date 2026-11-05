@@ -260,6 +260,7 @@ class InteractionMixin:
         return source, message
 
     async def digest_preview(self, source_id, message_id):
+        from app.inbox.content import message_content
         from app.inbox.service import MAX_MEDIA, rich_text_segments
 
         source, message = await self.digest_message(source_id, message_id)
@@ -280,6 +281,7 @@ class InteractionMixin:
             "sender": display_name(message.sender) if message.sender else "",
             "timestamp": message.date.isoformat(), "own": bool(message.out),
             "mention": False, "reply": None, "media": media,
+            "content": message_content(message),
         }}
 
     async def quoted_reply(self, peer, reply_to, quote_text=None, quote_offset=None, row=None):

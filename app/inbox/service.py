@@ -45,6 +45,7 @@ from telethon.tl.types import (
 
 from app.db.tables import InboxSend
 from app.inbox.avatars import AvatarCache
+from app.inbox.content import content_preview, message_content
 from app.inbox.errors import InboxError
 from app.inbox.interactions import InteractionMixin
 from app.inbox.library import SAVED_MESSAGES, LibraryChat, peer_type_for_marked_id
@@ -92,6 +93,9 @@ def reply_preview_text(message) -> str:
     system = service_message_text(message)
     if system:
         return system[:500]
+    content = message_content(message)
+    if content:
+        return content_preview(content)[:500]
     for kind, label in (
         ("sticker", "Стикер"), ("photo", "Фото"), ("voice", "Голосовое"),
         ("audio", "Аудиофайл"), ("video_note", "Видеосообщение"), ("video", "Видео"),
@@ -1654,7 +1658,8 @@ class InboxService(InteractionMixin):
                 "reply": None, "media": None, "system": system,
             }
         file = getattr(message, "file", None)
-        if not raw_text and not file:
+        content = message_content(message)
+        if not raw_text and not file and not content:
             return None
         result = {
             "id": message.id, "text": raw_text, "own": bool(message.out),
@@ -1667,6 +1672,8 @@ class InboxService(InteractionMixin):
             "reply": None, "media": None, "system": None,
             "reactions": self._reaction_payloads(message),
         }
+        if content:
+            result["content"] = content
         reply_id = getattr(message, "reply_to_msg_id", None)
         if reply_id:
             header = getattr(message, "reply_to", None)

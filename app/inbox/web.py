@@ -78,6 +78,7 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
                                    and request.match_info.get("name") in {
                                        "app.js", "style.css", "playback.mjs", "notifications.mjs",
                                        "push.mjs", "ui.mjs", "actions.mjs", "avatars.mjs",
+                                       "content.mjs",
                                        "device-login.mjs", "device-management.mjs", "auth.css",
                                        "app-icon.svg", "app-icon-180.png", "app-icon-512.png"}))
                 if not public_path and device_session is None:
@@ -135,6 +136,7 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         name = request.match_info["name"]
         if name not in {"app.js", "style.css", "playback.mjs", "notifications.mjs",
                         "push.mjs", "ui.mjs", "actions.mjs", "avatars.mjs",
+                        "content.mjs",
                         "device-login.mjs", "device-management.mjs", "auth.css",
                         "app-icon.svg", "app-icon-180.png", "app-icon-512.png"}:
             raise web.HTTPNotFound()

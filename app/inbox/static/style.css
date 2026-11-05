@@ -348,6 +348,23 @@ main {
   font-size:13px;
   line-height:18px;
   overflow-wrap:anywhere}
+.message-content { width:310px; max-width:100%; min-width:0; margin:3px 0 4px; overflow-wrap:anywhere }
+.content-title { font-size:13px; font-weight:600; white-space:pre-wrap }
+.content-note { color:var(--muted); font-size:11px; line-height:16px }
+.content-text,.poll-solution { white-space:pre-wrap; margin:4px 0 0; line-height:18px }
+.content-link { display:inline-block; margin-top:5px; padding:3px 0; font-size:12px }
+.poll-options { list-style:none; margin:7px 0 6px; padding:0 }
+.poll-option { padding:7px 0; border-top:1px solid #ffffff10 }
+.poll-option-heading { display:flex; align-items:baseline; gap:12px }
+.poll-option-text { flex:1; min-width:0; white-space:pre-wrap }
+.poll-percent { flex:none; color:var(--primary); font-size:12px; font-variant-numeric:tabular-nums }
+.poll-chosen .poll-option-text { color:var(--primary); font-weight:600 }
+.poll-rail { height:3px; background:#ffffff0b; margin-top:5px; border-radius:3px; overflow:hidden }
+.poll-bar { display:block; height:100%; background:var(--primary); opacity:.65 }
+.poll-chosen .poll-bar { opacity:1 }
+.poll-solution { border-top:1px solid #ffffff18; padding-top:6px; font-size:12px }
+.content-webpage { border-left:2px solid var(--primary); padding-left:8px }
+.content-unsupported .content-title { color:var(--primary) }
 .message-focus { animation:message-focus 1.8s ease-out }
 @keyframes message-focus { from { box-shadow:0 0 0 2px #dbc2a9; background:#4a402c } to { box-shadow:none } }
 .mention mark {

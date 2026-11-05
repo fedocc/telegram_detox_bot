@@ -7,7 +7,7 @@ export function renderableMessages(messages) {
   return (Array.isArray(messages) ? messages : []).filter(message => message
     && (typeof message.system === 'string' && message.system.trim()
       || typeof message.text === 'string' && message.text.length
-      || message.media));
+      || message.media || message.content));
 }
 
 export function newPageMessages(existingIds, messages) {
