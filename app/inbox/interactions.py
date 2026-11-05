@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import secrets
 from collections import OrderedDict
+from copy import copy
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -13,11 +15,50 @@ from telethon import functions, types, utils
 from telethon.errors import FloodWaitError, RPCError
 
 from app.db.tables import MorningDigest
+from app.inbox.content import poll_content, poll_option_id
 from app.inbox.errors import InboxError
 from app.telegram.mapper import display_name
 
 
 class InteractionMixin:
+    async def complete_poll(self, target, message, *, fresh=False):
+        media = getattr(message, "media", None)
+        if not isinstance(media, types.MessageMediaPoll) or not media.results.min:
+            return
+        poll_id = str(media.poll.id)
+        cached = self.full_poll_results.get(poll_id)
+        if cached and cached[0] > self.clock() and not fresh:
+            message.media = copy(media)
+            message.media.results = cached[2]
+            return
+        kwargs = {"msg_id": message.id}
+        # poll_hash was added in newer Telegram layers. Zero requests a full reply.
+        if "poll_hash" in inspect.signature(functions.messages.GetPollResultsRequest).parameters:
+            kwargs["poll_hash"] = 0
+        try:
+            response = await self._peer_call(target, lambda peer: self.client(
+                functions.messages.GetPollResultsRequest(peer=peer, **kwargs)))
+        except InboxError:
+            if fresh:
+                raise
+            return
+        except (RPCError, OSError, TimeoutError):
+            if fresh:
+                raise InboxError("Не удалось обновить опрос. Повторите позже.", 503) from None
+            return  # Keep the question and options visible during transient failures.
+        updates = getattr(response, "updates", None) or [getattr(response, "update", None)]
+        update = next((item for item in updates if isinstance(item, types.UpdateMessagePoll)
+                       and str(item.poll_id) == poll_id), None)
+        if update is not None and not update.results.min:
+            message.media = copy(media)
+            message.media.poll = update.poll or media.poll
+            message.media.results = update.results
+            self.full_poll_results[poll_id] = (self.clock() + 15,
+                                               message.media.poll, message.media.results)
+            self.full_poll_results.move_to_end(poll_id)
+            while len(self.full_poll_results) > 200:
+                self.full_poll_results.popitem(last=False)
+
     def interaction_target(self, scope, key):
         if scope == "conversations":
             return self.require(key)
@@ -90,6 +131,106 @@ class InteractionMixin:
             self.snapshots.pop(key, None)
             self.library_snapshots.clear()
             return {"ok": True}
+
+    async def vote_poll(self, scope, key, message_id, poll_id, options):
+        if (not isinstance(poll_id, str) or not 1 <= len(poll_id) <= 24
+                or not isinstance(options, list) or len(options) > 100
+                or any(not isinstance(item, str) or len(item) > 256 for item in options)
+                or len(set(options)) != len(options)):
+            raise InboxError("Выберите варианты опроса.")
+        async with self.action_lock:
+            self._check_telegram_cooldown()
+            self.interaction_target(scope, key)
+            if not self.client.is_connected():
+                raise InboxError("Нет соединения с Telegram. Повторите позже.", 503)
+            target, message = await self.interaction_message(scope, key, message_id)
+            media = getattr(message, "media", None)
+            if not isinstance(media, types.MessageMediaPoll) or str(media.poll.id) != poll_id:
+                raise InboxError("Опрос изменился. Обновите сообщение.", 409)
+            await self.complete_poll(target, message, fresh=True)
+            media = message.media
+            content = poll_content(media)
+            if content["closed"]:
+                raise InboxError("Опрос уже завершён.", 422)
+            answers = {poll_option_id(answer.option): answer.option
+                       for answer in media.poll.answers}
+            if any(item not in answers for item in options):
+                raise InboxError("Такого варианта в опросе нет.", 422)
+            if not content["multiple"] and len(options) > 1:
+                raise InboxError("В этом опросе можно выбрать только один вариант.", 422)
+            current = {item["id"] for item in content["options"] if item["chosen"]}
+            if current == set(options):
+                return {"ok": True, "content": content}
+            if current and not content["can_revote"]:
+                raise InboxError("В этом опросе нельзя изменить или отменить ответ.", 422)
+            selected = [answers[item] for item in options]
+
+            async def send(peer):
+                # Peer resolution can await the network; recheck access immediately before sending.
+                self.interaction_target(scope, key)
+                return await self.client(functions.messages.SendVoteRequest(
+                    peer=peer, msg_id=message_id, options=selected,
+                ))
+
+            try:
+                response = await self._peer_call(target, send)
+            except RPCError as exc:
+                messages = {
+                    "MESSAGE_POLL_CLOSED": "Опрос уже завершён.",
+                    "REVOTE_NOT_ALLOWED": "В этом опросе нельзя изменить или отменить ответ.",
+                    "POLL_MEMBER_RESTRICTED": "В этом опросе могут голосовать только подписчики.",
+                    "POLL_COUNTRY_RESTRICTED": "Telegram ограничил голосование в этом опросе.",
+                    "OPTION_INVALID": "Варианты опроса изменились. Обновите сообщение.",
+                }
+                raise InboxError(messages.get(exc.message,
+                    "Telegram не разрешил голосование. Обновите опрос и повторите."), 422) from None
+
+            # SendVote returns the authoritative result update. Some updates are `min`
+            # and omit our chosen flags; the accepted request supplies those flags.
+            updates = getattr(response, "updates", None) or [getattr(response, "update", None)]
+            update = next((item for item in updates if isinstance(item, types.UpdateMessagePoll)
+                           and str(item.poll_id) == poll_id), None)
+            updated = copy(media)
+            if update is not None and update.poll is not None:
+                updated.poll = update.poll
+            updated.results = copy(update.results) if update is not None else types.PollResults()
+            counts = {item.option: item for item in (updated.results.results or ())}
+            updated.results.results = []
+            for answer in updated.poll.answers:
+                count = copy(counts[answer.option]) if answer.option in counts else \
+                    types.PollAnswerVoters(answer.option)
+                count.chosen = answer.option in selected
+                updated.results.results.append(count)
+            # Invalidate every cached view of this poll, including an Inbox projection
+            # when the vote was sent from Library. This changes no access state.
+            self.invalidate_poll(poll_id, media=updated)
+            self.interaction_target(scope, key)
+            return {"ok": True, "content": poll_content(updated)}
+
+    def invalidate_poll(self, poll_id, *, media=None, update=None):
+        poll_id = str(poll_id)
+        self.full_poll_results.pop(poll_id, None)
+        for cache in (self.snapshots, self.library_snapshots):
+            for key, snapshot in list(cache.items()):
+                matching = [item for item in snapshot["messages"].values()
+                            if isinstance(getattr(item, "media", None), types.MessageMediaPoll)
+                            and str(item.media.poll.id) == poll_id]
+                if not matching:
+                    continue
+                if media is None and update is None:
+                    cache.pop(key, None)
+                    continue
+                for item in matching:
+                    item.media = copy(media or item.media)
+                    if update is not None:
+                        item.media.poll = update.poll or item.media.poll
+                        item.media.results = update.results
+                # Keep already loaded history and pagination; only rebuild its payload.
+                snapshot["fetched"] = 0
+        for key, snapshot in list(self.pin_snapshots.items()):
+            if any((item.get("content") or {}).get("id") == poll_id
+                   for item in snapshot["payload"].get("pins", ())):
+                self.pin_snapshots.pop(key, None)
 
     @staticmethod
     def contact_card(user):
@@ -264,6 +405,7 @@ class InteractionMixin:
         from app.inbox.service import MAX_MEDIA, rich_text_segments
 
         source, message = await self.digest_message(source_id, message_id)
+        await self.complete_poll(source, message)
         text = getattr(message, "raw_text", "") or ""
         file = getattr(message, "file", None)
         mime = getattr(file, "mime_type", "") or ""

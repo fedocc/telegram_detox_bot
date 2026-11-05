@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, types
 from telethon.errors import SessionPasswordNeededError
 
 from app.config import Settings
@@ -189,6 +189,11 @@ async def run_listener(
             on_inbox_ready(inbox)
 
     ingestion_lock = asyncio.Lock()
+
+    @client.on(events.Raw(types=types.UpdateMessagePoll))
+    async def poll_update(update) -> None:
+        if inbox is not None:
+            inbox.invalidate_poll(update.poll_id, update=update)
 
     @client.on(events.NewMessage(incoming=None, outgoing=None))
     async def handler(event) -> None:

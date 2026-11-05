@@ -1,18 +1,18 @@
 'use strict';
 
-const CACHE = 'telegram-detox-shell-v29';
+const CACHE = 'telegram-detox-shell-v30';
 const SHELL = new Set([
   '/',
   '/manifest.webmanifest',
-  '/static/style.css?v=29',
-  '/static/app.js?v=29',
-  '/static/ui.mjs?v=29',
-  '/static/actions.mjs?v=29',
-  '/static/avatars.mjs?v=29',
-  '/static/content.mjs?v=29',
-  '/static/playback.mjs?v=29',
-  '/static/notifications.mjs?v=29',
-  '/static/push.mjs?v=29',
+  '/static/style.css?v=30',
+  '/static/app.js?v=30',
+  '/static/ui.mjs?v=30',
+  '/static/actions.mjs?v=30',
+  '/static/avatars.mjs?v=30',
+  '/static/content.mjs?v=30',
+  '/static/playback.mjs?v=30',
+  '/static/notifications.mjs?v=30',
+  '/static/push.mjs?v=30',
   '/static/app-icon-180.png',
   '/static/app-icon-512.png',
 ]);

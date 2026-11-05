@@ -17,7 +17,7 @@ def poll_message(mid=100, *, rich=True, **flags):
     def text(value):
         return types.TextWithEntities(value, []) if rich else value
 
-    poll = SimpleNamespace(question=text("Когда встречаемся?"), answers=[
+    poll = SimpleNamespace(id=9223372036854775800, question=text("Когда встречаемся?"), answers=[
         SimpleNamespace(text=text("Во вторник"), option=b"a"),
         SimpleNamespace(text=text("В среду"), option=b"b"),
     ], **flags)
@@ -162,7 +162,7 @@ async def test_truly_empty_or_deleted_messages_still_do_not_make_blank_bubbles(s
 async def test_content_module_is_served_for_browser_and_offline_shell(service):
     async with TestClient(TestServer(create_app(service)),
                           headers={"Host": "127.0.0.1:8787"}) as client:
-        response = await client.get("/static/content.mjs?v=29")
+        response = await client.get("/static/content.mjs?v=30")
         assert response.status == 200
         assert "javascript" in response.content_type
         assert "export function renderContent" in await response.text()

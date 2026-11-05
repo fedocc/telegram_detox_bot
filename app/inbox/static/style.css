@@ -357,6 +357,17 @@ main {
 .poll-option { padding:7px 0; border-top:1px solid #ffffff10 }
 .poll-option-heading { display:flex; align-items:baseline; gap:12px }
 .poll-option-text { flex:1; min-width:0; white-space:pre-wrap }
+.poll-option-copy { flex:1; min-width:0 }
+.poll-option:has(.poll-choice) { padding:0 }
+.poll-choice { display:flex; align-items:center; gap:9px; width:100%; min-height:44px; padding:8px 3px; text-align:left; border-radius:5px }
+.poll-choice-mark { width:16px; height:16px; flex:none; border:1px solid var(--muted); border-radius:50%; color:var(--primary); font-size:12px; line-height:14px; text-align:center }
+.poll-choice-mark.multiple { border-radius:3px }
+.poll-choice[aria-pressed="true"] .poll-choice-mark { border-color:var(--primary); background:#bcc8d622 }
+.poll-actions { display:flex; flex-wrap:wrap; gap:5px; margin-top:5px }
+.poll-actions button { min-height:36px; padding:5px 9px; border-radius:6px; color:var(--primary); font-size:12px }
+.poll-submit { background:#bcc8d618 }
+.poll-status:not(:empty) { padding:5px 0 2px }
+@media (pointer:coarse) { .poll-actions button { min-height:44px } }
 .poll-percent { flex:none; color:var(--primary); font-size:12px; font-variant-numeric:tabular-nums }
 .poll-chosen .poll-option-text { color:var(--primary); font-weight:600 }
 .poll-rail { height:3px; background:#ffffff0b; margin-top:5px; border-radius:3px; overflow:hidden }

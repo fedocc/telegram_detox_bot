@@ -1,8 +1,8 @@
 'use strict';
 
-import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=29';
-import {createNotificationToggle, notificationMode} from './notifications.mjs?v=29';
-import {createPushController} from './push.mjs?v=29';
+import {createPlaybackController, playbackFailureMessage} from './playback.mjs?v=30';
+import {createNotificationToggle, notificationMode} from './notifications.mjs?v=30';
+import {createPushController} from './push.mjs?v=30';
 import {
   advanceOlderCursor, appendOnlyMessages, deepLinkFor, incrementalGrouping, isMacNotifierClient,
   isTerminalConversationStatus, insertNewNodesInOrder, isWritable, mergeMessagePages,
@@ -14,12 +14,12 @@ import {
   manualOpenButtonVisible,
   localImageClipboardUri, maintainMessageViewport, reactionEmojiPresentation,
   createMessageViewport, bindReplyNavigation, reconcileKeyedRows, bindMobileViewport,
-} from './ui.mjs?v=29';
+} from './ui.mjs?v=30';
 
-import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=29';
+import {BASIC_REACTIONS, selectedQuote, birthdayLabel} from './actions.mjs?v=30';
 
-import {createAvatars} from './avatars.mjs?v=29';
-import {messageSummary, renderContent} from './content.mjs?v=29';
+import {createAvatars} from './avatars.mjs?v=30';
+import {messageSummary, renderContent} from './content.mjs?v=30';
 
 const playback = createPlaybackController(document);
 const avatars = createAvatars(document);
@@ -59,6 +59,7 @@ let auxiliaryPanel = 'none';
 let fileDrag = null;
 let appView = 'home', digestHistoryGeneration = 0;
 const drafts = new Map();
+const pollDrafts = new Map();
 const conversationRows = new Map();
 const setText = (element, value) => {
   const text = String(value ?? '');
@@ -704,6 +705,30 @@ function attachment(media) {
   return wrap;
 }
 
+function pollVoting(message) {
+  const mode = selectedMode, key = selected, selection = choosing;
+  const scope = scopePath(mode, key);
+  const draftKey = `${scope}/${message.id}/${message.content.id}`;
+  if (!pollDrafts.has(draftKey)) pollDrafts.set(draftKey, {});
+  while (pollDrafts.size > 100) pollDrafts.delete(pollDrafts.keys().next().value);
+  const current = () => selected === key && selectedMode === mode && choosing === selection;
+  return {
+    draft: pollDrafts.get(draftKey),
+    onVote: async options => {
+      if (!scope || !current()) throw new Error('Откройте этот чат заново.');
+      const result = await api(`${scope}/messages/${message.id}/vote`, {
+        poll_id: message.content.id, options,
+      });
+      pollDrafts.delete(draftKey);
+      if (!current()) return;
+      const latest = messageNodes.get(String(message.id))?.message;
+      if (!latest || latest.content?.id !== message.content.id) return;
+      renderMessages([{...latest, content: result.content}],
+        mode === 'library' ? `library:${key}` : key, {merge: true});
+    },
+  };
+}
+
 function messageNode(message) {
   if (message.system) {
     const system = node('div', 'system-message', message.system);
@@ -741,7 +766,8 @@ function messageNode(message) {
     quote.append(node('strong', '', message.reply.sender), text); bubble.append(quote);
   }
   if (message.media) bubble.append(attachment(message.media));
-  if (message.content) bubble.append(renderContent(message.content));
+  if (message.content) bubble.append(renderContent(message.content, document,
+    message.content.kind === 'poll' ? pollVoting(message) : {}));
   if (message.text) {
     const paragraph = node('p', 'message-text');
     appendSegments(paragraph, message.segments, message.text, message.mention); bubble.append(paragraph);

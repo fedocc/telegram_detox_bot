@@ -363,6 +363,7 @@ class InboxService(InteractionMixin):
         self.library_snapshots = OrderedDict()
         self.library_write_permissions = OrderedDict()
         self.pin_snapshots = OrderedDict()
+        self.full_poll_results = OrderedDict()
         self.media_allowances = OrderedDict()
         self.dialog_tokens = OrderedDict()
         self.peer_failures = {}
@@ -815,6 +816,8 @@ class InboxService(InteractionMixin):
                 raise gone() from None
 
     async def serialize_library(self, message, source_id, by_id, *, scope="library"):
+        if isinstance(getattr(message, "media", None), tl_types.MessageMediaPoll):
+            await self.complete_poll(self.interaction_target(scope, source_id), message)
         row = type("LibraryRow", (), {"id": source_id, "is_forum": False,
                                       "thread_id": 0})()
         result = await self.serialize(message, row, by_id)
@@ -1648,6 +1651,8 @@ class InboxService(InteractionMixin):
         return thread == row.thread_id
 
     async def serialize(self, message, row, by_id):
+        if getattr(row, "peer_id", None):
+            await self.complete_poll(row, message)
         sender = getattr(message, "sender", None)
         raw_text = getattr(message, "raw_text", None) or ""
         system = service_message_text(message)

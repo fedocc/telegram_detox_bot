@@ -622,6 +622,14 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
             request.match_info["scope"], request.match_info["key"],
             int(request.match_info["message_id"]), body["emoji"]))
 
+    async def poll_vote(request):
+        body = await request.json()
+        if not isinstance(body, dict) or set(body) != {"poll_id", "options"}:
+            raise InboxError("Выберите варианты опроса.")
+        return web.json_response(await service.vote_poll(
+            request.match_info["scope"], request.match_info["key"],
+            int(request.match_info["message_id"]), body["poll_id"], body["options"]))
+
     async def digest_preview(request):
         return web.json_response(await service.digest_preview(
             request.match_info["source"], int(request.match_info["message_id"])))
@@ -649,6 +657,9 @@ def create_app(service, *, port=PORT, allowed_origins=None, library_management_e
         web.post(r"/api/{scope:conversations|library|quick-write}/"
                  r"{key:[A-Za-z0-9_-]{1,64}}/messages/"
                  r"{message_id:[1-9][0-9]*}/reaction", message_reaction),
+        web.post(r"/api/{scope:conversations|library|quick-write}/"
+                 r"{key:[A-Za-z0-9_-]{1,64}}/messages/"
+                 r"{message_id:[1-9][0-9]*}/vote", poll_vote),
         web.get(r"/api/digest/{source:[A-Za-z0-9_-]{1,64}}/messages/"
                 r"{message_id:[1-9][0-9]*}", digest_preview),
         web.get(r"/api/digest/{source:[A-Za-z0-9_-]{1,64}}/media/"

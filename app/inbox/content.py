@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from base64 import urlsafe_b64encode
 
 from telethon.tl import types
 
@@ -10,6 +11,10 @@ from telethon.tl import types
 def plain_text(value) -> str:
     # Telegram's newer layers use TextWithEntities; older polls used strings.
     return value if isinstance(value, str) else getattr(value, "text", "") or ""
+
+
+def poll_option_id(value: bytes) -> str:
+    return urlsafe_b64encode(value).decode("ascii").rstrip("=")
 
 
 def poll_content(media) -> dict:
@@ -26,6 +31,7 @@ def poll_content(media) -> dict:
         count = counts.get(answer.option)
         voters = getattr(count, "voters", None) if visible else None
         options.append({
+            "id": poll_option_id(answer.option),
             "text": plain_text(answer.text) or "Вариант с вложением",
             "voters": voters,
             "percent": round(100 * voters / total) if voters is not None and total else None,
@@ -33,11 +39,14 @@ def poll_content(media) -> dict:
             "correct": bool(visible and getattr(count, "correct", False)),
         })
     return {
-        "kind": "poll", "title": plain_text(poll.question) or "Опрос",
+        "kind": "poll", "id": str(poll.id),
+        "title": plain_text(poll.question) or "Опрос",
         "quiz": bool(getattr(poll, "quiz", False)),
         "anonymous": not bool(getattr(poll, "public_voters", False)),
         "multiple": bool(getattr(poll, "multiple_choice", False)),
-        "closed": closed, "total_voters": total, "options": options,
+        "closed": closed, "total_voters": total, "options": options, "voted": voted,
+        "can_revote": not bool(getattr(poll, "quiz", False)
+                               or getattr(poll, "revoting_disabled", False)),
         "solution": (getattr(results, "solution", None) or "") if visible else "",
     }
 
