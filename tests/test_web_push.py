@@ -98,7 +98,7 @@ async def test_digest_uses_normal_feed_and_one_short_push_without_chat_access(pu
     payload = json.loads(f.sent[0]["data"])
     assert payload["kind"] == "digest" and payload["url"] == "/?view=digests"
     assert payload["tag"] == "telegram-detox:digest" and payload["badge"] == 0
-    assert payload["body"] == "3 пункта. Нажмите, чтобы открыть."
+    assert payload["body"] == "3 пункта"
     assert "Full private" not in f.sent[0]["data"]
 
 

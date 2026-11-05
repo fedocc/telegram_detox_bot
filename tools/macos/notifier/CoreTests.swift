@@ -120,7 +120,7 @@ import Foundation
         check(inboxURL("https://evil.test").absoluteString == "http://127.0.0.1:8787/",
               "invalid route fallback")
         let digest = AttentionEvent(event_id: 21, conversation_id: "digest",
-            title: "Сводка готова", topic_title: "", preview: "3 пункта. Нажмите, чтобы открыть.",
+            title: "Сводка готова", topic_title: "", preview: "3 пункта",
             trigger_reason: "digest_ready", created_at: 1000)
         var digestState = NotifierState(enabled: true, cursor: 20, bootstrap: false)
         check(digestState.consume(Feed(events: [digest], cursor: 21), now: 1000).count == 1,

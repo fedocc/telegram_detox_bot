@@ -210,7 +210,7 @@ async def test_window_idempotency_failed_cutoff_and_deep_link(settings):
         events = list(session.scalars(select(InboxNotification)))
         assert len(events) == 1
         assert events[0].trigger_reason == "digest_ready"
-        assert events[0].preview == "1 пункт. Нажмите, чтобы открыть."
+        assert events[0].preview == "1 пункт"
         assert "Сдать работу" not in events[0].preview
     assert service.windows[0] == (cutoff - timedelta(hours=24), cutoff)
     result = latest_digest(factory)

@@ -22,9 +22,9 @@ def digest_notification(record):
         noun = ("пункт" if count % 10 == 1 and count % 100 != 11 else
                 "пункта" if count % 10 in {2, 3, 4} and count % 100 not in {12, 13, 14}
                 else "пунктов")
-        preview = f"{count} {noun}. Нажмите, чтобы открыть."
+        preview = f"{count} {noun}"
     else:
-        preview = "За день ничего важного. Нажмите, чтобы открыть."
+        preview = "За день ничего важного."
     return InboxNotification(
         peer_id=DIGEST_TARGET, trigger_id=record.id, conversation_id=DIGEST_TARGET,
         title="Сводка готова", topic_title="", preview=preview,
