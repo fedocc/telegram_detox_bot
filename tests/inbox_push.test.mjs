@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {readFile} from 'node:fs/promises';
+import {runInNewContext} from 'node:vm';
 import {createPushController} from '../app/inbox/static/push.mjs';
 
 function fixture({permission='default'}={}) {
@@ -32,4 +34,27 @@ test('denied permission is reported without subscription retries',async()=>{
 test('badge updates and clears without affecting push state',async()=>{
   const f=fixture();await f.controller.setBadge(7);assert.equal(f.badge(),7);
   await f.controller.setBadge(0);assert.equal(f.badge(),0);
+});
+
+test('push displays plain message text or a nonempty media fallback', async () => {
+  const source = await readFile(new URL('../app/inbox/static/sw.js', import.meta.url), 'utf8');
+  for (const [body, subtitle, expected] of [
+    ['Голосовое сообщение', '3 новых сообщений', 'Голосовое сообщение'],
+    ['Кружок', 'Личное сообщение', 'Кружок'],
+    ['', '', 'Новое сообщение'],
+  ]) {
+    const handlers = new Map(), shown = [];
+    runInNewContext(source, {self: {
+      addEventListener: (name, callback) => handlers.set(name, callback),
+      navigator: {}, registration: {showNotification: async (title, options) => shown.push(options)},
+    }});
+    let pending;
+    handlers.get('push')({
+      data: {json: () => ({title: 'Чат', body, subtitle, conversation_id: 'a'.repeat(32)})},
+      waitUntil: promise => { pending = promise; },
+    });
+    await pending;
+    assert.equal(shown[0].body, expected);
+    assert.equal(shown[0].tag, `conversation:${'a'.repeat(32)}`);
+  }
 });

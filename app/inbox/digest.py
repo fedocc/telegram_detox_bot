@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from app.db.tables import MorningDigest
+from app.inbox.digest_notifications import digest_notification
 
 logger = logging.getLogger(__name__)
 PROMPT_VERSION = "morning-v1"
@@ -187,6 +188,8 @@ def preprocess(
         forwarded = row.get("forward_identity")
         ref = stable_ref(row["source_id"], int(row["message_id"]))
         refs[ref] = {"source_id": row["source_id"], "message_id": int(row["message_id"])}
+        if row.get("source_peer"):
+            refs[ref]["_peer"] = row["source_peer"]
         duplicate_at = seen_text.get(normalized)
         if duplicate_at is None and forwarded:
             duplicate_at = seen_forward.get(forwarded)
@@ -430,6 +433,8 @@ async def run_digest(
             model=settings.digest_model, prompt_version=PROMPT_VERSION,
             payload_json=json.dumps(stored, ensure_ascii=False), status="success")
         session.add(record)
+        session.flush()
+        session.add(digest_notification(record))
         session.commit()
         session.refresh(record)
         return record
@@ -557,7 +562,7 @@ def _digest_json(row):
     payload = json.loads(row.payload_json)
     for item in payload.get("items", []):
         sources = item.pop("sources", [])
-        item["links"] = [f"/?library={source['source_id']}&message={source['message_id']}"
+        item["links"] = [f"/?digest_source={source['source_id']}&message={source['message_id']}"
                          for source in sources]
     return {"period_end": row.period_end.isoformat(), **payload}
 

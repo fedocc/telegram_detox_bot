@@ -1233,6 +1233,7 @@ async def test_pending_survives_listing_history_cleanup_and_new_trigger(service)
     assert service.store.get(row.id).opened_at is None
     event.id = 101
     event.raw_text = 'new @fedocc'
+    event.message = Message(101, event.raw_text)
     await service.observe(event)
     latest = service.store.get(row.id)
     assert latest.opened_at is None and latest.expires_at == 0
@@ -1670,10 +1671,17 @@ async def test_telegram_code_is_inbox_only_and_notification_is_redacted(
         stored_notification = session.scalar(select(InboxNotification))
         assert code_text not in stored_notification.preview
 
+    from unittest.mock import Mock
+    updates = Mock(wraps=service.store.update_preview)
+    monkeypatch.setattr(service.store, "update_preview", updates)
+    await service.observe(event, trigger="telegram_code", sender_is_bot=True)
     service.client.messages = [Message(77, code_text)]
     row = service.store.open(service.store.active()[0].id)
     history = await service.history(row.id)
     assert history["messages"][-1]["text"] == code_text
+    assert service.store.get_any(row.id).preview == "Новый код Telegram"
+    assert updates.call_count >= 2
+    assert all(call.args[2] == "Новый код Telegram" for call in updates.call_args_list)
 
 
 def test_concurrent_activation_keeps_one_canonical_row_and_all_events(service):
@@ -1942,7 +1950,7 @@ async def test_transient_rpc_during_peer_refresh_does_not_quarantine(service):
     assert service.store.get_any(row.id).quarantined_at is None
 
 
-async def test_library_projection_cannot_send_through_inbox_routes(service, tmp_path):
+async def test_library_group_projection_can_send_through_inbox_routes(service, tmp_path):
     source = service.store.upsert_library_source(
         source_id="course", peer_type="chat", peer_id="-22", access_hash=None,
         display_title="Course", is_bot=False,
@@ -1954,22 +1962,17 @@ async def test_library_projection_cannot_send_through_inbox_routes(service, tmp_
     )
     upload = tmp_path / "notes.txt"
     upload.write_text("notes", encoding="utf-8")
-    attempts = (
-        service.send(row.id, str(uuid4()), "reply"),
-        service.send(
-            row.id, str(uuid4()), "upload", file_path=upload,
-            filename="notes.txt", mime_type="text/plain",
-        ),
+    await service.send(row.id, str(uuid4()), "reply")
+    await service.send(
+        row.id, str(uuid4()), "upload", file_path=upload,
+        filename="notes.txt", mime_type="text/plain",
     )
-    for attempt in attempts:
-        with pytest.raises(InboxError) as denied:
-            await attempt
-        assert denied.value.status == 403
-    assert service.client.send_message.await_count == 0
-    assert service.client.send_file.await_count == 0
+    assert service.client.send_message.await_count == 1
+    assert service.client.send_file.await_count == 1
+    assert service.manual_open_status()["used"] == 0
 
 
-async def test_selecting_existing_inbox_peer_immediately_disables_generic_send(service):
+async def test_selecting_existing_inbox_peer_keeps_generic_group_send_working(service):
     row = service.store.activate(
         peer_id="-22", peer_type="chat", thread_id=0, is_forum=False,
         title="Course", trigger_id=10, preview="@fedocc question",
@@ -1980,10 +1983,153 @@ async def test_selecting_existing_inbox_peer_immediately_disables_generic_send(s
         display_title="Course", is_bot=False,
     )
     assert service.store.get(row.id).library_source_id == source.id
+    assert await service.send(row.id, str(uuid4()), "reply") == {"message_id": 901}
+    assert service.client.send_message.await_count == 1
+
+
+@pytest.mark.parametrize(("peer_type", "peer_id", "entity", "permissions", "writable"), [
+    ("user", "42", SimpleNamespace(id=42, bot=False), None, True),
+    ("chat", "-42", SimpleNamespace(id=42), None, True),
+    ("channel", "-1000000000042", SimpleNamespace(id=42, megagroup=True), None, True),
+    ("channel", "-1000000000042", SimpleNamespace(
+        id=42, broadcast=True, creator=True,
+        admin_rights=SimpleNamespace(post_messages=True)), None, False),
+    ("channel", "-1000000000042", SimpleNamespace(
+        id=42, megagroup=True, default_banned_rights=SimpleNamespace(send_plain=True)),
+        None, False),
+    ("channel", "-1000000000042", SimpleNamespace(
+        id=42, megagroup=True, default_banned_rights=SimpleNamespace(send_messages=True)),
+        SimpleNamespace(is_admin=True), True),
+    ("channel", "-1000000000042", SimpleNamespace(id=42, megagroup=True),
+        SimpleNamespace(participant=SimpleNamespace(
+            banned_rights=SimpleNamespace(send_messages=True))), False),
+    ("channel", "-1000000000042", SimpleNamespace(id=42, megagroup=True),
+        SimpleNamespace(participant=SimpleNamespace(
+            banned_rights=SimpleNamespace(send_media=True))), True),
+    ("chat", "-42", SimpleNamespace(id=42, left=True), None, False),
+    ("channel", "-1000000000042", SimpleNamespace(id=42, gigagroup=True), None, False),
+])
+async def test_library_write_follows_chat_kind_and_telegram_rights(
+    service, peer_type, peer_id, entity, permissions, writable,
+):
+    source = service.store.upsert_library_source(
+        source_id="course", peer_type=peer_type, peer_id=peer_id, access_hash=4200,
+        display_title="Course", is_bot=False,
+    )
+    service.client.get_entity = AsyncMock(return_value=entity)
+    service.client.get_permissions = AsyncMock(return_value=permissions)
+    before = service.manual_open_status()
+    payload = await service.library_history(source.id)
+    assert payload["source"]["writable"] is writable
+    assert service.library_json()[-1]["writable"] is writable
+    assert service.manual_open_status() == before
+    assert service.store.active() == []
+    if writable:
+        assert await service.send_library(source.id, str(uuid4()), "reply") == {"message_id": 901}
+        assert service.client.send_message.await_count == 1
+    else:
+        with pytest.raises(InboxError) as denied:
+            await service.send_library(source.id, str(uuid4()), "reply")
+        assert denied.value.status == 403
+        assert service.client.send_message.await_count == 0
+    assert service.manual_open_status() == before
+
+
+async def test_library_group_send_rechecks_rights_after_cached_history(service):
+    source = service.store.upsert_library_source(
+        source_id="course", peer_type="channel", peer_id="-1000000000042",
+        access_hash=4200, display_title="Course", is_bot=False,
+    )
+    service.client.get_entity = AsyncMock(return_value=SimpleNamespace(id=42, megagroup=True))
+    assert (await service.library_history(source.id))["source"]["writable"]
+    service.client.get_entity.return_value = SimpleNamespace(
+        id=42, megagroup=True, banned_rights=SimpleNamespace(send_plain=True),
+    )
     with pytest.raises(InboxError) as denied:
-        await service.send(row.id, str(uuid4()), "reply")
+        await service.send_library(source.id, str(uuid4()), "must not send")
     assert denied.value.status == 403
-    assert service.client.send_message.await_count == 0
+    assert not service._source_json(source)["writable"]
+    service.client.send_message.assert_not_called()
+
+
+async def test_library_broadcast_projection_rejects_both_send_routes(service, tmp_path):
+    source = service.store.upsert_library_source(
+        source_id="news", peer_type="channel", peer_id="-1000000000042",
+        access_hash=4200, display_title="News", is_bot=False,
+    )
+    row = service.store.activate(
+        peer_id=source.peer_id, peer_type=source.peer_type, access_hash=4200,
+        thread_id=0, is_forum=False, title="News", trigger_id=10,
+        preview="announcement", reason="library_message", library_source_id=source.id,
+    )
+    service.client.get_entity = AsyncMock(return_value=SimpleNamespace(
+        id=42, broadcast=True, creator=True,
+    ))
+    upload = tmp_path / "notes.txt"
+    upload.write_text("notes", encoding="utf-8")
+    for send, key in ((service.send, row.id), (service.send_library, source.id)):
+        for attachment in (False, True):
+            kwargs = {"file_path": upload, "mime_type": "text/plain"} if attachment else {}
+            with pytest.raises(InboxError) as denied:
+                await send(key, str(uuid4()), "must not post", **kwargs)
+            assert denied.value.status == 403
+    service.client.send_message.assert_not_called()
+    service.client.send_file.assert_not_called()
+
+
+async def test_library_human_upload_reply_is_idempotent_without_opening_access(service, tmp_path):
+    source = service.store.upsert_library_source(
+        source_id="supervisor", peer_type="user", peer_id="42", access_hash=4200,
+        display_title="Supervisor", is_bot=False,
+    )
+    service.client.get_entity = AsyncMock(return_value=SimpleNamespace(id=42, bot=False))
+    service.client.messages = [Message(7, "question")]
+    upload = tmp_path / "notes.txt"
+    upload.write_text("notes", encoding="utf-8")
+    request_id = str(uuid4())
+    before = service.manual_open_status()
+    for _ in range(2):
+        sent = await service.send_library(
+            source.id, request_id, "reply", file_path=upload,
+            filename="notes.txt", mime_type="text/plain", reply_to=7,
+        )
+        assert sent == {"message_id": 902}
+    assert service.client.send_file.await_count == 1
+    assert service.client.send_file.await_args.kwargs["reply_to"] == 7
+    assert not service.store.active()
+    assert service.manual_open_status() == before
+
+
+async def test_expired_inbox_projection_cannot_send_even_when_library_is_writable(service):
+    source = service.store.upsert_library_source(
+        source_id="course", peer_type="chat", peer_id="-22", access_hash=None,
+        display_title="Course", is_bot=False,
+    )
+    row = service.store.activate(
+        peer_id="-22", peer_type="chat", thread_id=0, is_forum=False,
+        title="Course", trigger_id=10, preview="lesson", reason="library_message",
+        library_source_id=source.id,
+    )
+    service.store.open(row.id)
+    service.test_clock[0] += 301
+    with pytest.raises(InboxError) as expired:
+        await service.send(row.id, str(uuid4()), "must not reopen")
+    assert expired.value.status == 404
+    service.client.send_message.assert_not_called()
+
+
+async def test_library_send_offline_does_not_wait_for_permission_requests(service):
+    source = service.store.upsert_library_source(
+        source_id="course", peer_type="chat", peer_id="-22", access_hash=None,
+        display_title="Course", is_bot=False,
+    )
+    service.client.connected = False
+    service.client.get_entity = AsyncMock()
+    with pytest.raises(InboxError) as offline:
+        await service.send_library(source.id, str(uuid4()), "draft")
+    assert offline.value.status == 503
+    service.client.get_entity.assert_not_awaited()
+    service.client.send_message.assert_not_called()
 
 
 def test_selecting_forum_source_closes_topic_rows_and_uses_one_projection(service):
@@ -2491,7 +2637,7 @@ async def test_digest_source_scope_filters_before_fetch_and_ignores_library_memb
     await run_digest(service, service.store.factory, settings, now, provider)
     assert "PRIVATE HUMAN MARKER" not in str(provider.calls)
     link = latest_digest(service.store.factory)["items"][0]["links"][0]
-    assert link.startswith("/?library=") and "-100" not in link
+    assert link.startswith("/?digest_source=") and "-100" not in link
 
 
 async def test_digest_permanent_source_failure_isolated_and_library_soft_disabled(
@@ -2600,3 +2746,83 @@ async def test_digest_503_does_not_disable_library_source(settings, tmp_path):
         await service.digest_rows(now - timedelta(days=1), now)
     assert failure.value.status == 503
     assert service.store.library_source(source.id, enabled_only=False).library_enabled is True
+
+
+async def test_reply_uses_selected_quote_and_its_own_entities(service):
+    row = activate(service)
+    parent = Message(7, "Полный текст с другой ссылкой", entities=[
+        MessageEntityTextUrl(0, 6, "https://example.org/wrong")])
+    message = Message(100, "ответ", reply_to_msg_id=7, reply_to=SimpleNamespace(
+        quote_text="фрагмент", quote_entities=[
+            MessageEntityTextUrl(0, 8, "https://example.org/quote")]))
+    result = await service.serialize(message, row, {7: parent})
+    assert result["reply"]["text"] == "фрагмент"
+    assert result["reply"]["segments"] == [
+        {"text": "фрагмент", "url": "https://example.org/quote"}]
+    assert result["reply"]["id"] == 7
+
+
+@pytest.mark.parametrize("parent", [None, MessageEmpty(id=7, peer_id=PeerChannel(123))])
+async def test_selected_quote_survives_unavailable_original(service, parent):
+    row = activate(service)
+    message = Message(100, "ответ", reply_to_msg_id=7, parent=parent,
+                      reply_to=SimpleNamespace(quote_text="выделенный фрагмент"))
+    result = await service.serialize(message, row, {})
+    assert result["reply"] == {
+        "id": None, "sender": "", "text": "выделенный фрагмент",
+        "segments": [],
+    }
+
+
+async def test_own_message_updates_preview_without_attention(service):
+    row = activate(service)
+    before = service.store.get(row.id)
+    message = Message(200, "Мой последний ответ", out=True)
+    event = SimpleNamespace(chat_id=-100123, id=200, message=message,
+                            out=True, sender_id=1)
+    await service.observe(event)
+    after = service.store.get(row.id)
+    assert after.preview == "Вы: Мой последний ответ"
+    assert (after.trigger_id, after.unread_count, after.expires_at, after.activated_at) == (
+        before.trigger_id, before.unread_count, before.expires_at, before.activated_at)
+    service.store.update_preview(row.id, 150, "старый ответ")
+    assert service.store.get(row.id).preview == "Вы: Мой последний ответ"
+    service.store.activate(peer_id=row.peer_id, title=row.title, thread_id=0,
+                           is_forum=False, trigger_id=160, preview="запоздалое входящее")
+    assert service.store.get(row.id).preview == "Вы: Мой последний ответ"
+
+
+async def test_own_message_does_not_activate_closed_conversation(service):
+    row = activate(service)
+    service.store.close(row.id)
+    message = Message(200, "ответ в Telegram", out=True)
+    await service.observe(SimpleNamespace(chat_id=-100123, id=200, message=message,
+                                         out=True, sender_id=1))
+    assert service.store.active() == []
+
+
+async def test_preview_does_not_cross_forum_topics(service):
+    row = activate(service, thread=50, forum=True)
+    message = Message(200, "другая тема", thread=60, out=True)
+    await service.observe(SimpleNamespace(chat_id=-100123, id=200, message=message,
+                                         out=True, sender_id=1))
+    assert service.store.get(row.id).preview == row.preview
+
+
+async def test_history_refreshes_preview_from_latest_own_message(service):
+    row = activate(service)
+    service.client.messages = [Message(100, "входящее"), Message(200, "мой ответ", out=True)]
+    await service.history(row.id)
+    assert service.store.get(row.id).preview == "Вы: мой ответ"
+
+
+def test_latest_preview_survives_database_reinitialization(settings):
+    store = InboxStore(init_db(settings), lambda: set())
+    row = store.activate(peer_id="42", title="Чат", thread_id=0, is_forum=False,
+                         trigger_id=100, preview="входящее")
+    store.update_preview(row.id, 200, "мой ответ")
+    reloaded = InboxStore(init_db(settings), lambda: set())
+    assert reloaded.get(row.id).preview == "мой ответ"
+    assert reloaded.get(row.id).preview_message_id == 200
+    reloaded.update_preview(row.id, 150, "старое сообщение")
+    assert reloaded.get(row.id).preview == "мой ответ"

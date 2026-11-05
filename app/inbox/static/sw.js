@@ -1,15 +1,18 @@
 'use strict';
 
-const CACHE = 'telegram-detox-shell-v16';
+const CACHE = 'telegram-detox-shell-v30';
 const SHELL = new Set([
   '/',
   '/manifest.webmanifest',
-  '/static/style.css?v=16',
-  '/static/app.js?v=16',
-  '/static/ui.mjs?v=16',
-  '/static/playback.mjs?v=16',
-  '/static/notifications.mjs?v=16',
-  '/static/push.mjs?v=16',
+  '/static/style.css?v=30',
+  '/static/app.js?v=30',
+  '/static/ui.mjs?v=30',
+  '/static/actions.mjs?v=30',
+  '/static/avatars.mjs?v=30',
+  '/static/content.mjs?v=30',
+  '/static/playback.mjs?v=30',
+  '/static/notifications.mjs?v=30',
+  '/static/push.mjs?v=30',
   '/static/app-icon-180.png',
   '/static/app-icon-512.png',
 ]);
@@ -25,11 +28,13 @@ self.addEventListener('push', event => {
   let payload = {};
   try { payload = event.data?.json() || {}; } catch (_) {}
   const conversation = validConversation(payload.conversation_id) ? payload.conversation_id : null;
-  const tag = conversation ? `conversation:${conversation}` : 'telegram-detox:attention';
-  const url = conversation ? `/?conversation=${conversation}` : '/';
+  const digest = payload.kind === 'digest';
+  const tag = digest ? 'telegram-detox:digest'
+    : conversation ? `conversation:${conversation}` : 'telegram-detox:attention';
+  const url = digest ? '/?view=digests' : conversation ? `/?conversation=${conversation}` : '/';
   const title = typeof payload.title === 'string' ? payload.title.slice(0, 100) : 'Telegram Detox';
   const subtitle = typeof payload.subtitle === 'string' ? payload.subtitle.slice(0, 100) : 'Новое сообщение';
-  const body = typeof payload.body === 'string' ? payload.body.slice(0, 200) : subtitle;
+  const body = typeof payload.body === 'string' ? payload.body.slice(0, digest ? 90 : 200) : subtitle;
   const badge = Number.isSafeInteger(payload.badge) && payload.badge > 0 ? payload.badge : 0;
   const badgeUpdate = badge > 0 && typeof self.navigator?.setAppBadge === 'function'
     ? self.navigator.setAppBadge(badge).catch(() => {})
@@ -37,7 +42,7 @@ self.addEventListener('push', event => {
       ? self.navigator.clearAppBadge().catch(() => {}) : Promise.resolve();
   event.waitUntil(Promise.all([
     self.registration.showNotification(title, {
-      body: `${subtitle}${body ? `\n${body}` : ''}`,
+      body: body || subtitle || 'Новое сообщение',
       tag, renotify: true, icon: '/static/app-icon-180.png',
       data: {url},
     }),
@@ -49,7 +54,7 @@ self.addEventListener('notificationclick', event => {
   event.notification.close();
   const raw = event.notification.data?.url;
   const match = typeof raw === 'string' ? raw.match(/^\/\?conversation=([a-f0-9]{32})$/) : null;
-  const url = match ? `/?conversation=${match[1]}` : '/';
+  const url = raw === '/?view=digests' ? raw : match ? `/?conversation=${match[1]}` : '/';
   event.waitUntil(self.clients.matchAll({type: 'window', includeUncontrolled: true}).then(async clients => {
     if (clients.length) {
       const client = clients[0];

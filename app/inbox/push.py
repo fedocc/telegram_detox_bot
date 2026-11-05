@@ -17,10 +17,12 @@ from sqlalchemy.exc import IntegrityError
 
 from app.db.tables import (
     InboxNotification,
+    InboxTrustedDevice,
     LibrarySource,
     WebPushDelivery,
     WebPushSubscription,
 )
+from app.inbox.digest_notifications import DIGEST_READY, DIGEST_URL, is_digest_notification
 
 KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 MAX_ATTEMPTS = 3
@@ -84,7 +86,7 @@ class WebPushService:
     def configured(self):
         return bool(self.private_key and self.public_key)
 
-    def subscribe(self, raw, device_label=""):
+    def subscribe(self, raw, device_label="", *, trusted_device_id=None):
         if not self.configured:
             raise RuntimeError("web push is not configured")
         value = validate_subscription(raw)
@@ -102,13 +104,21 @@ class WebPushService:
                             id=uuid4().hex, endpoint=value["endpoint"],
                             p256dh=value["p256dh"], auth=value["auth"],
                             device_label=device_label.strip(), created_at=now,
+                            trusted_device_id=trusted_device_id,
                             last_success_at=None, disabled_at=None,
                         )
                         session.add(row)
                     else:
+                        if (trusted_device_id
+                                and row.trusted_device_id not in {None, trusted_device_id}):
+                            raise ValueError("subscription belongs to another device")
+                        if trusted_device_id:
+                            row.trusted_device_id = trusted_device_id
                         row.p256dh = value["p256dh"]
                         row.auth = value["auth"]
                         row.device_label = device_label.strip()
+                        if row.disabled_at is not None:
+                            row.created_at = now
                         row.disabled_at = None
                     session.commit()
                     return {"enabled": True}
@@ -116,18 +126,25 @@ class WebPushService:
                 continue
         raise RuntimeError("subscription conflict")
 
-    def unsubscribe(self, raw):
+    def unsubscribe(self, raw, *, trusted_device_id=None):
         value = validate_subscription(raw)
         with self.factory() as session:
             row = session.scalar(select(WebPushSubscription).where(
                 WebPushSubscription.endpoint == value["endpoint"]
             ))
             if row is not None and row.disabled_at is None:
+                if trusted_device_id and row.trusted_device_id != trusted_device_id:
+                    raise ValueError("subscription belongs to another device")
                 row.disabled_at = self.clock()
                 session.commit()
         return {"enabled": False}
 
     def _payload(self, event, badge):
+        if is_digest_notification(event):
+            return json.dumps({
+                "kind": "digest", "title": event.title, "body": event.preview,
+                "tag": "telegram-detox:digest", "url": DIGEST_URL, "badge": badge,
+            }, ensure_ascii=False)
         count = max(1, int(event.unread_count or 1))
         reason = {
             "direct_reply": "Ответ на ваше сообщение",
@@ -137,10 +154,10 @@ class WebPushService:
             "telegram_code": "Новый код Telegram",
         }.get(event.trigger_reason, "Новое сообщение")
         subtitle = f"{count} новых сообщений" if count > 1 else reason
-        preview = " ".join((event.preview or "").split())[:180]
+        preview = " ".join((event.preview or "").split())[:180] or "Новое сообщение"
         return json.dumps({
             "title": event.title[:100], "subtitle": subtitle,
-            "body": f"Последнее: {preview}" if count > 1 else preview,
+            "body": preview,
             "tag": f"conversation:{event.conversation_id}",
             "conversation_id": event.conversation_id,
             "url": f"/?conversation={event.conversation_id}",
@@ -164,14 +181,26 @@ class WebPushService:
             latest_by_conversation = {}
             for event in reversed(recent):
                 latest_by_conversation[event.conversation_id] = event
+            latest_digest = session.scalar(select(InboxNotification).where(
+                InboxNotification.trigger_reason == DIGEST_READY,
+                InboxNotification.created_at >= now - 86400,
+                InboxNotification.suppressed.is_(False),
+            ).order_by(InboxNotification.id.desc()).limit(1))
+            if latest_digest is not None and is_digest_notification(latest_digest):
+                latest_by_conversation[latest_digest.conversation_id] = latest_digest
             events = list(latest_by_conversation.values())
             muted_ids = set(session.scalars(select(LibrarySource.id).where(
                 LibrarySource.notifications_muted.is_(True)
             )))
         for subscription in subscriptions:
             for event in events:
+                if event.created_at < subscription.created_at:
+                    continue
+                if is_digest_notification(event):
+                    await self._deliver(subscription.id, event, self._payload(event, badge), now)
+                    continue
                 conversation = active.get(event.conversation_id)
-                if (event.created_at < subscription.created_at or conversation is None
+                if (conversation is None
                         or event.peer_id in self.store.ignored()
                         or event.trigger_id <= conversation.last_seen_message_id
                         or conversation.library_source_id in muted_ids):
@@ -191,6 +220,11 @@ class WebPushService:
             subscription = session.get(WebPushSubscription, subscription_id)
             if subscription is None or subscription.disabled_at is not None:
                 return
+            if subscription.trusted_device_id:
+                device = session.get(InboxTrustedDevice, subscription.trusted_device_id)
+                if (device is None or device.approved_at is None or device.revoked_at is not None
+                        or device.trusted_until <= now):
+                    return
             if delivery is None:
                 delivery = WebPushDelivery(
                     subscription_id=subscription_id, notification_id=event.id,

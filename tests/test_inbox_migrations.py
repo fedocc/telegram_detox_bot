@@ -273,6 +273,7 @@ def test_frozen_inbox_schema_migrates_losslessly_and_idempotently(
         )
         assert private["title"] == "Latest private"
         assert private["preview"] == "unread preview"
+        assert private["preview_message_id"] == 12
         assert private["trigger_id"] == private["latest_relevant_message_id"] == 12
         assert private["last_seen_message_id"] == 10
         assert private["unread_count"] == 2

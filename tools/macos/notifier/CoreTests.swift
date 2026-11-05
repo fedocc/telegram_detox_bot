@@ -32,15 +32,25 @@ import Foundation
             event(3, preview: "latest", unread: 2),
             event(4, conversation: conversationB, preview: "other", unread: 1),
         ], cursor: 4), now: 1000)
-        check(grouped.count == 2, "one event per conversation")
-        check(grouped[0].event_id == 3 && grouped[0].preview == "latest"
-              && grouped[0].unread_count == 2, "latest preview and count win")
-        check(grouped[1].conversation_id == conversationB, "different conversations stay separate")
+        check(grouped.count == 3, "keep each event so the system can stack them")
+        check(grouped[0].event_id == 2 && grouped[0].preview == "first", "duplicate event is dropped")
+        check(grouped[1].event_id == 3 && grouped[1].preview == "latest"
+              && grouped[1].unread_count == 2, "next message remains a separate notification")
+        check(grouped[2].conversation_id == conversationB, "different conversations stay separate")
         check(state.consume(Feed(events: [event(4, conversation: conversationB)], cursor: 4),
                             now: 1000).isEmpty, "repeated poll")
         state = try JSONDecoder().decode(NotifierState.self, from: JSONEncoder().encode(state))
         check(state.consume(Feed(events: [event(4)], cursor: 4), now: 1000).isEmpty,
               "restart dedup")
+
+        check(notificationRequestIdentifier(event(2)) != notificationRequestIdentifier(event(3)),
+              "messages in one conversation have distinct request ids")
+        check(notificationRequestIdentifier(event(2)) == notificationRequestIdentifier(event(2)),
+              "a replay has the same request id")
+        check(notificationRequestIdentifier(event(-1)) == nil, "invalid event id")
+        check(notificationBody(event(3, preview: "Голосовое сообщение", unread: 3))
+              == "Голосовое сообщение", "ordinary body without Last prefix")
+        check(notificationBody(event(4, preview: "  ")) == "Новое сообщение", "legacy empty body")
 
         let legacyEvent = Data("""
             {"event_id":9,"conversation_id":"\(conversationA)","title":"T","topic_title":"",
@@ -109,6 +119,27 @@ import Foundation
               "click route")
         check(inboxURL("https://evil.test").absoluteString == "http://127.0.0.1:8787/",
               "invalid route fallback")
+        let digest = AttentionEvent(event_id: 21, conversation_id: "digest",
+            title: "Сводка готова", topic_title: "", preview: "3 пункта",
+            trigger_reason: "digest_ready", created_at: 1000)
+        var digestState = NotifierState(enabled: true, cursor: 20, bootstrap: false)
+        check(digestState.consume(Feed(events: [digest], cursor: 21), now: 1000).count == 1,
+              "ON accepts a new digest")
+        check(digestState.consume(Feed(events: [digest], cursor: 21), now: 1000).isEmpty,
+              "digest does not repeat on polling")
+        check(notificationGroup(digest) == "telegram-detox:digest", "digest grouping")
+        check(notificationRequestIdentifier(digest) == "telegram-detox:digest:event:21",
+              "stable digest request identifier")
+        check(inboxURL("digest").absoluteString == inboxOrigin + "/?view=digests",
+              "digest opens full summary")
+        check(notificationGroup(event(21, conversation: "digest")) == nil,
+              "invalid conversation cannot impersonate a digest")
+        digestState = NotifierState(enabled: false, cursor: 20, bootstrap: false)
+        check(digestState.consume(Feed(events: [digest], cursor: 21), now: 1000).isEmpty,
+              "OFF suppresses digest")
+        digestState = NotifierState(enabled: true, cursor: 20, bootstrap: false, mute_until: 1600)
+        check(digestState.consume(Feed(events: [digest], cursor: 21), now: 1000).isEmpty,
+              "PAUSE suppresses digest")
         check(plain(" hi\n\tthere ", limit: 8) == "hi there", "plain preview")
 
         let base = ["host": "127.0.0.1:8788", "origin": "http://127.0.0.1:8787"]

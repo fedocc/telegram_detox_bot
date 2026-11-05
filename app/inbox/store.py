@@ -15,6 +15,7 @@ from app.db.tables import (
     LibrarySource,
     ManualOpenUsage,
 )
+from app.inbox.digest_notifications import is_digest_notification
 from app.inbox.library import SAVED_MESSAGES, peer_type_for_marked_id, source_token
 
 ACTIVE_MINUTES = 5
@@ -82,6 +83,16 @@ class InboxStore:
     def get_any(self, key):
         with self.factory() as session:
             return session.get(InboxConversation, key)
+
+    def update_preview(self, key, message_id, preview):
+        # Updating display text never activates a chat or changes unread state.
+        with self.factory() as session:
+            session.execute(update(InboxConversation).where(
+                InboxConversation.id == key,
+                InboxConversation.preview_message_id <= int(message_id),
+                InboxConversation.trigger_id <= int(message_id),
+            ).values(preview=preview[:256], preview_message_id=int(message_id)))
+            session.commit()
 
     def unread_total(self, rows=None):
         return sum(max(0, int(row.unread_count or 0)) for row in (
@@ -240,7 +251,9 @@ class InboxStore:
                         row.manually_closed = False
                     if int(trigger_id) >= int(row.trigger_id or 0):
                         row.title = title[:512]
-                        row.preview = preview[:256]
+                        if int(trigger_id) >= int(row.preview_message_id or 0):
+                            row.preview = preview[:256]
+                            row.preview_message_id = int(trigger_id)
                         row.trigger_id = int(trigger_id)
                         if event_is_new:
                             row.activated_at = now
@@ -366,12 +379,13 @@ class InboxStore:
             } if source_ids else set()
             events = []
             for row in rows:
+                if row.created_at < self.clock() - 86400 or row.suppressed:
+                    continue
+                digest = is_digest_notification(row)
                 conversation = active.get(row.conversation_id)
-                if (
+                if not digest and (
                     conversation is None
                     or row.peer_id in self.ignored()
-                    or row.created_at < self.clock() - 86400
-                    or row.suppressed
                     or row.trigger_id <= conversation.last_seen_message_id
                     or conversation.library_source_id in muted
                 ):
@@ -381,7 +395,8 @@ class InboxStore:
                     "conversation_id": row.conversation_id,
                     "title": row.title,
                     "topic_title": plain_preview(
-                        conversation.topic_title or row.topic_title, 160
+                        row.topic_title if digest else conversation.topic_title or row.topic_title,
+                        160,
                     ),
                     "preview": row.preview,
                     "trigger_reason": row.trigger_reason,

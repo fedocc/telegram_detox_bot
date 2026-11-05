@@ -31,10 +31,11 @@ Requests time out and back off to at most 60 seconds; logs record connection sta
 changes rather than every failed poll.
 
 Delivery deliberately uses **at-most-once submission**: cursor is saved before
-submitting to UserNotifications, with one stable native request ID per conversation.
-Events in one fetched page are coalesced to the newest preview/count. Before a
-replacement the app removes pending and delivered items with that identifier. A crash between
-that save and OS submission can lose a banner; it cannot replay the event after
+submitting to UserNotifications. Each event has a distinct request ID; its conversation
+ID is the native thread identifier, so macOS can stack messages from the same chat.
+Message text and media labels appear directly, without a “Last” prefix. Opening a chat
+clears only that chat's delivered and pending notifications, including the legacy format.
+A crash between that save and OS submission can lose a banner; it cannot replay the event after
 restart. Exact-once display across SQLite, the Mac filesystem and macOS notification
 center is not transactional. Inbox pending attention and email delivery remain
 independent of banners. macOS permissions and Focus settings determine visibility.
